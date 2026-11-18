@@ -32,12 +32,17 @@ pub async fn list_lights(State(app): State<Arc<App>>) -> Json<LightsResponse> {
 }
 
 /// What the editor shows beside a light.
-fn view(light: &Light, devices: &[DeviceInfo]) -> LightView {
+///
+/// The LED count is the engine's own (`canvas_core::arrangement::light_led_count`): the run
+/// clamped to the zone, capped at `MAX_ZONE_LEDS`, and none for a light whose device or zone is
+/// gone. One function instead of a copy, so the count the editor's fit marks read cannot drift
+/// from the count the engine plans (#504).
+pub fn view(light: &Light, devices: &[DeviceInfo]) -> LightView {
     let device = devices.iter().find(|device| device.id == light.device_id);
     let zone = device.and_then(|device| {
         device.zones.iter().find(|zone| zone.index == light.zone_index)
     });
-    let leds = zone.map(|zone| led_count(light, zone)).unwrap_or(0);
+    let leds = canvas_core::arrangement::light_led_count(light, devices);
     // A zone that shrank below the owner's first LED drops it: there is no notch to show and the
     // light plays from LED 0. The stored value is left alone (a resize back restores it); the
     // engine's own helper applies the same rule at play time (#468).
@@ -50,17 +55,6 @@ fn view(light: &Light, devices: &[DeviceInfo]) -> LightView {
         led_count: leds,
         connected: device.is_some_and(|device| device.connected),
         label: label(light, device, zone),
-    }
-}
-
-/// The LEDs the light has now: its run clamped to the zone, or the zone's whole count.
-fn led_count(light: &Light, zone: &ZoneInfo) -> u32 {
-    match light.leds {
-        None => zone.led_count,
-        Some(slice) => {
-            let start = slice.start.min(zone.led_count);
-            slice.count.min(zone.led_count - start)
-        }
     }
 }
 
@@ -122,12 +116,8 @@ pub async fn patch_light(
                 Some(0) if !reversed_after => Some(None),
                 Some(first) => {
                     let current = &store.lights.lights[index];
-                    let count = devices
-                        .iter()
-                        .find(|device| device.id == current.device_id)
-                        .and_then(|device| device.zones.iter().find(|zone| zone.index == current.zone_index))
-                        .map(|zone| led_count(current, zone))
-                        .unwrap_or(0);
+                    // The count the light has now, as the engine plans it: the slice, capped.
+                    let count = canvas_core::arrangement::light_led_count(current, &devices);
                     if first >= count {
                         return Err(ApiFailure::validation(format!(
                             "a light's first LED must be below its {count} LEDs"

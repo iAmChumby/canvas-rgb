@@ -3,19 +3,24 @@
 //! A 256-bit random token lives at `%APPDATA%\canvas-rgb\api-token` as 64 lowercase hex
 //! characters, readable only by the current user. The daemon compares it in constant time.
 
-use rand::rngs::OsRng;
-use rand::TryRngCore;
+use rand::rngs::SysRng;
+use rand::TryCryptoRng;
 use std::path::Path;
 
 /// How many random bytes the token holds.
 pub const TOKEN_BYTES: usize = canvas_proto::consts::TOKEN_BYTES;
 
-/// The token as lowercase hex.
+/// Fills `bytes` from `rng`. The `TryCryptoRng` bound makes the compiler refuse a generator that
+/// is not marked cryptographically secure, so the token can never come from a seeded test RNG.
+fn fill_secret<R: TryCryptoRng>(rng: &mut R, bytes: &mut [u8]) -> Result<(), R::Error> {
+    rng.try_fill_bytes(bytes)
+}
+
+/// The token as lowercase hex, drawn from the operating system's random source (`SysRng`, which
+/// is `ProcessPrng` on Windows).
 pub fn generate() -> String {
     let mut bytes = [0u8; TOKEN_BYTES];
-    OsRng
-        .try_fill_bytes(&mut bytes)
-        .expect("OS random source must fill the API token");
+    fill_secret(&mut SysRng, &mut bytes).expect("OS random source must fill the API token");
     let mut out = String::with_capacity(TOKEN_BYTES * 2);
     for b in bytes {
         out.push_str(&format!("{b:02x}"));

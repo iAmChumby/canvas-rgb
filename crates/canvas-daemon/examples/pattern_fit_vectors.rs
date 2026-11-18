@@ -15,6 +15,12 @@
 //! The file also carries the 4096-LED cap (`canvas_core::arrangement::MAX_ZONE_LEDS`), because
 //! a change to it on one side alone would move no case's verdict and pass unseen.
 //!
+//! Each run case's members also carry the count `GET /api/v1/lights` answers
+//! (`crates/canvas-daemon/src/api/lights.rs` `view`), which is the count the editor's fit marks
+//! read. `view` asks `canvas_core::arrangement::light_led_count`, the same function `member_fits`
+//! uses, so the file records one rule and not two; the rows with a stored slice (`Light::leds`)
+//! are the branch a one-sided change would otherwise pass unseen (#504, r-516).
+//!
 //! Print it and write the file with:
 //! `powershell -NoProfile -File tools/pattern-fit-vectors.ps1`
 //!
@@ -23,7 +29,9 @@
 
 use canvas_core::arrangement::MAX_ZONE_LEDS;
 use canvas_daemon::scenes::member_fits;
+use canvas_proto::api::LightView;
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
+use canvas_proto::layout::LedSlice;
 use canvas_proto::pattern::{fit_kind, BuiltOn, FitKind, GridSize};
 use canvas_proto::scene::{Arrangement, Light, LightId, SequenceShape};
 use canvas_proto::DeviceId;
@@ -56,7 +64,7 @@ struct FitCase {
     target: Arrangement,
 }
 
-/// One group member: the light, its arrangement, and the zone behind it.
+/// One group member: the light, its arrangement, the zone behind it, and the run it owns.
 struct Member {
     /// The light's id, and the case's name for it.
     light: &'static str,
@@ -64,6 +72,9 @@ struct Member {
     arrangement: Arrangement,
     /// The zone's LED count. `None` for a device that is gone: the light is listed with no LEDs.
     zone_leds: Option<u32>,
+    /// The run of the zone this light owns (`Light::leds`): its start and count. `None` owns the
+    /// whole zone; a slice that runs past the end of a zone that shrank keeps only what is left.
+    leds: Option<(u32, u32)>,
     /// Whether the device is listed as connected.
     connected: bool,
 }
@@ -236,12 +247,17 @@ fn fit_cases() -> Vec<FitCase> {
     ]
 }
 
+/// One member that owns its whole zone, connected.
+fn whole(light: &'static str, arrangement: Arrangement, zone_leds: Option<u32>) -> Member {
+    Member { light, arrangement, zone_leds, leds: None, connected: true }
+}
+
 /// One member of the three-light group the run cases share: 8, 8 and 10 LEDs.
 fn three() -> Vec<Member> {
     vec![
-        Member { light: "fan one", arrangement: Arrangement::Ring, zone_leds: Some(8), connected: true },
-        Member { light: "fan two", arrangement: Arrangement::Strip, zone_leds: Some(8), connected: true },
-        Member { light: "strip", arrangement: Arrangement::Strip, zone_leds: Some(10), connected: true },
+        whole("fan one", Arrangement::Ring, Some(8)),
+        whole("fan two", Arrangement::Strip, Some(8)),
+        whole("strip", Arrangement::Strip, Some(10)),
     ]
 }
 
@@ -284,12 +300,7 @@ fn run_cases() -> Vec<RunCase> {
             sequence: Some(SequenceShape::Ring),
             members: {
                 let mut members = three();
-                members.push(Member {
-                    light: "fan three",
-                    arrangement: Arrangement::Ring,
-                    zone_leds: Some(10),
-                    connected: true,
-                });
+                members.push(whole("fan three", Arrangement::Ring, Some(10)));
                 members
             },
         },
@@ -299,9 +310,9 @@ fn run_cases() -> Vec<RunCase> {
             built_on: on(16, Arrangement::Ring),
             sequence: Some(SequenceShape::Ring),
             members: vec![
-                Member { light: "fan one", arrangement: Arrangement::Ring, zone_leds: Some(8), connected: true },
-                Member { light: "empty zone", arrangement: Arrangement::Ring, zone_leds: Some(0), connected: true },
-                Member { light: "fan two", arrangement: Arrangement::Ring, zone_leds: Some(8), connected: true },
+                whole("fan one", Arrangement::Ring, Some(8)),
+                whole("empty zone", Arrangement::Ring, Some(0)),
+                whole("fan two", Arrangement::Ring, Some(8)),
             ],
         },
         RunCase {
@@ -310,8 +321,14 @@ fn run_cases() -> Vec<RunCase> {
             built_on: on(8, Arrangement::Ring),
             sequence: Some(SequenceShape::Ring),
             members: vec![
-                Member { light: "fan one", arrangement: Arrangement::Ring, zone_leds: Some(8), connected: true },
-                Member { light: "gone", arrangement: Arrangement::Ring, zone_leds: None, connected: false },
+                whole("fan one", Arrangement::Ring, Some(8)),
+                Member {
+                    light: "gone",
+                    arrangement: Arrangement::Ring,
+                    zone_leds: None,
+                    leds: None,
+                    connected: false,
+                },
             ],
         },
         RunCase {
@@ -320,8 +337,14 @@ fn run_cases() -> Vec<RunCase> {
             built_on: on(16, Arrangement::Ring),
             sequence: Some(SequenceShape::Ring),
             members: vec![
-                Member { light: "fan one", arrangement: Arrangement::Ring, zone_leds: Some(8), connected: true },
-                Member { light: "fan two", arrangement: Arrangement::Ring, zone_leds: Some(8), connected: false },
+                whole("fan one", Arrangement::Ring, Some(8)),
+                Member {
+                    light: "fan two",
+                    arrangement: Arrangement::Ring,
+                    zone_leds: Some(8),
+                    leds: None,
+                    connected: false,
+                },
             ],
         },
         RunCase {
@@ -329,24 +352,62 @@ fn run_cases() -> Vec<RunCase> {
             from: "scenes.rs member_fits, arrangement.rs light_led_count (count.min(MAX_ZONE_LEDS))",
             built_on: on(MAX_ZONE_LEDS, Arrangement::Ring),
             sequence: Some(SequenceShape::Ring),
-            members: vec![Member {
-                light: "damaged zone",
-                arrangement: Arrangement::Ring,
-                zone_leds: Some(MAX_ZONE_LEDS + 904),
-                connected: true,
-            }],
+            members: vec![whole("damaged zone", Arrangement::Ring, Some(MAX_ZONE_LEDS + 904))],
         },
         RunCase {
             name: "a zone past the 4096-LED cap is planned as the cap, each light its own",
             from: "scenes.rs member_fits (the per-light arm), arrangement.rs light_led_count",
             built_on: on(MAX_ZONE_LEDS, Arrangement::Ring),
             sequence: None,
-            members: vec![Member {
-                light: "damaged zone",
-                arrangement: Arrangement::Ring,
-                zone_leds: Some(MAX_ZONE_LEDS + 904),
-                connected: true,
-            }],
+            members: vec![whole("damaged zone", Arrangement::Ring, Some(MAX_ZONE_LEDS + 904))],
+        },
+        RunCase {
+            name: "a sliced member counts only the LEDs it keeps, in a run",
+            from: "arrangement.rs light_led_count (slice.count.min(zone - start)), api/lights.rs view",
+            built_on: on(12, Arrangement::Ring),
+            sequence: Some(SequenceShape::Ring),
+            members: vec![
+                Member {
+                    light: "sliced fan",
+                    arrangement: Arrangement::Ring,
+                    zone_leds: Some(12),
+                    leds: Some((8, 8)),
+                    connected: true,
+                },
+                whole("fan two", Arrangement::Ring, Some(8)),
+            ],
+        },
+        RunCase {
+            name: "a sliced member's own fit is its kept LEDs, each light its own",
+            from: "arrangement.rs light_led_count, scenes.rs member_fits (the per-light arm)",
+            built_on: on(4, Arrangement::Ring),
+            sequence: None,
+            members: vec![
+                Member {
+                    light: "sliced strip",
+                    arrangement: Arrangement::Ring,
+                    zone_leds: Some(12),
+                    leds: Some((8, 8)),
+                    connected: true,
+                },
+                whole("whole zone", Arrangement::Ring, Some(8)),
+            ],
+        },
+        RunCase {
+            name: "a slice that starts past the end of a shrunken zone has no LEDs, and leaves the run",
+            from: "arrangement.rs light_led_count (zone.saturating_sub(start)), api/lights.rs view",
+            built_on: on(8, Arrangement::Ring),
+            sequence: Some(SequenceShape::Ring),
+            members: vec![
+                whole("fan one", Arrangement::Ring, Some(8)),
+                Member {
+                    light: "stale slice",
+                    arrangement: Arrangement::Ring,
+                    zone_leds: Some(10),
+                    leds: Some((20, 4)),
+                    connected: true,
+                },
+            ],
         },
     ]
 }
@@ -408,7 +469,7 @@ fn light_of(member: &Member) -> Light {
         id: member.light.to_string(),
         device_id: DeviceId(format!("openrgb:{}", member.light)),
         zone_index: 0,
-        leds: None,
+        leds: member.leds.map(|(start, count)| LedSlice { start, count }),
         name: None,
         arrangement: member.arrangement,
         reversed: false,
@@ -455,7 +516,9 @@ pub fn print_json() -> String {
     );
     out.push_str("  \"source\": [\n");
     out.push_str("    \"crates/canvas-proto/src/pattern.rs, fit_kind_follows_the_rule_order\",\n");
-    out.push_str("    \"crates/canvas-core/src/pattern_fit.rs, the fit_colors tests (each asserts a fit kind by what the colours do)\"\n");
+    out.push_str("    \"crates/canvas-core/src/pattern_fit.rs, the fit_colors tests (each asserts a fit kind by what the colours do)\",\n");
+    out.push_str("    \"crates/canvas-daemon/src/scenes.rs, member_fits (a sequence group's run, a light with no LEDs)\",\n");
+    out.push_str("    \"crates/canvas-core/src/arrangement.rs, light_led_count (a slice clamped to its zone, capped at zone_led_cap), and crates/canvas-daemon/src/api/lights.rs, view (led_count is that same call)\"\n");
     out.push_str("  ],\n");
     out.push_str(&format!("  \"zone_led_cap\": {MAX_ZONE_LEDS},\n"));
     out.push_str("  \"cases\": [\n");
@@ -478,6 +541,13 @@ pub fn print_json() -> String {
         let lights: Vec<Light> = case.members.iter().map(light_of).collect();
         let devices: Vec<DeviceInfo> = case.members.iter().filter_map(device_of).collect();
         let members: Vec<LightId> = case.members.iter().map(|m| m.light.to_string()).collect();
+        // The count `GET /api/v1/lights` answers, from the API's own view: the number the editor's
+        // fit marks read. `member_fits` below asks `light_led_count` itself, so a change to one
+        // side alone shows up in this file.
+        let views: Vec<LightView> = lights
+            .iter()
+            .map(|light| canvas_daemon::api::lights::view(light, &devices))
+            .collect();
         let fits = member_fits(&case.built_on, &members, case.sequence, &lights, &devices);
         out.push_str("    {\n");
         out.push_str(&format!("      \"name\": {},\n", json_string(case.name)));
@@ -500,11 +570,16 @@ pub fn print_json() -> String {
                 Some(count) => count.to_string(),
                 None => "null".to_string(),
             };
+            let run = match member.leds {
+                Some((start, count)) => format!("{{ \"start\": {start}, \"count\": {count} }}"),
+                None => "null".to_string(),
+            };
             out.push_str(&format!(
-                "        {{ \"light\": {}, \"arrangement\": \"{}\", \"zone_leds\": {zone}, \"connected\": {} }}",
+                "        {{ \"light\": {}, \"arrangement\": \"{}\", \"zone_leds\": {zone}, \"leds\": {run}, \"led_count\": {}, \"connected\": {} }}",
                 json_string(member.light),
                 arrangement_name(member.arrangement),
-                member.connected
+                views[n].led_count,
+                views[n].connected
             ));
             out.push_str(if n + 1 == case.members.len() { "\n" } else { ",\n" });
         }

@@ -262,7 +262,8 @@ impl IntoResponse for SceneAnswer {
 
 /// The groups a create asked for, in its order. Each id is minted from the group's name with
 /// [`fresh_id`], against every group id of every scene, exactly as the copy path mints them; a
-/// name a group of the same request already took mints `-2`, `-3` and so on.
+/// name a group of the same request already took mints `-2`, `-3` and so on. A group carries the
+/// shape it was asked for (#504), so a ring or a line is made in the one request.
 fn asked_groups(scenes: &[Scene], asked: &[NewGroup]) -> Vec<Group> {
     let mut used: Vec<String> =
         scenes.iter().flat_map(|s| s.groups.iter().map(|g| g.id.clone())).collect();
@@ -277,7 +278,7 @@ fn asked_groups(scenes: &[Scene], asked: &[NewGroup]) -> Vec<Group> {
             plays: group.plays.clone(),
             mode: group.mode,
             brightness: group.brightness,
-            sequence: None,
+            sequence: group.sequence,
         });
     }
     groups

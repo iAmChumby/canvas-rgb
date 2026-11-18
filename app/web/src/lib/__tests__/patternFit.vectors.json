@@ -2,7 +2,9 @@
   "rule": "crates/canvas-proto/src/pattern.rs fit_kind: the same LED count and arrangement is exact; a light of one LED is one_led; the same arrangement is stretched; anything else is other_shape. The order matters: a light of one LED is one_led even when its arrangement differs, and a pattern built on one LED of another arrangement is other_shape.",
   "source": [
     "crates/canvas-proto/src/pattern.rs, fit_kind_follows_the_rule_order",
-    "crates/canvas-core/src/pattern_fit.rs, the fit_colors tests (each asserts a fit kind by what the colours do)"
+    "crates/canvas-core/src/pattern_fit.rs, the fit_colors tests (each asserts a fit kind by what the colours do)",
+    "crates/canvas-daemon/src/scenes.rs, member_fits (a sequence group's run, a light with no LEDs)",
+    "crates/canvas-core/src/arrangement.rs, light_led_count (a slice clamped to its zone, capped at zone_led_cap), and crates/canvas-daemon/src/api/lights.rs, view (led_count is that same call)"
   ],
   "zone_led_cap": 4096,
   "cases": [
@@ -182,9 +184,9 @@
       "built_on": { "led_count": 26, "arrangement": "ring" },
       "sequence": null,
       "members": [
-        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
-        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "connected": true },
-        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "connected": true }
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "leds": null, "led_count": 10, "connected": true }
       ],
       "fits": [
         { "light": "fan one", "fit": "stretched" },
@@ -198,9 +200,9 @@
       "built_on": { "led_count": 26, "arrangement": "ring" },
       "sequence": "ring",
       "members": [
-        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
-        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "connected": true },
-        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "connected": true }
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "leds": null, "led_count": 10, "connected": true }
       ],
       "fits": [
         { "light": "fan one", "fit": "exact" },
@@ -214,9 +216,9 @@
       "built_on": { "led_count": 26, "arrangement": "strip" },
       "sequence": "line",
       "members": [
-        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
-        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "connected": true },
-        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "connected": true }
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "leds": null, "led_count": 10, "connected": true }
       ],
       "fits": [
         { "light": "fan one", "fit": "exact" },
@@ -230,8 +232,8 @@
       "built_on": { "led_count": 26, "arrangement": "ring" },
       "sequence": "ring",
       "members": [
-        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
-        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "connected": true }
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true }
       ],
       "fits": [
         { "light": "fan one", "fit": "stretched" },
@@ -244,10 +246,10 @@
       "built_on": { "led_count": 26, "arrangement": "ring" },
       "sequence": "ring",
       "members": [
-        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
-        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "connected": true },
-        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "connected": true },
-        { "light": "fan three", "arrangement": "ring", "zone_leds": 10, "connected": true }
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "leds": null, "led_count": 10, "connected": true },
+        { "light": "fan three", "arrangement": "ring", "zone_leds": 10, "leds": null, "led_count": 10, "connected": true }
       ],
       "fits": [
         { "light": "fan one", "fit": "stretched" },
@@ -262,9 +264,9 @@
       "built_on": { "led_count": 16, "arrangement": "ring" },
       "sequence": "ring",
       "members": [
-        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
-        { "light": "empty zone", "arrangement": "ring", "zone_leds": 0, "connected": true },
-        { "light": "fan two", "arrangement": "ring", "zone_leds": 8, "connected": true }
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "empty zone", "arrangement": "ring", "zone_leds": 0, "leds": null, "led_count": 0, "connected": true },
+        { "light": "fan two", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true }
       ],
       "fits": [
         { "light": "fan one", "fit": "exact" },
@@ -277,8 +279,8 @@
       "built_on": { "led_count": 8, "arrangement": "ring" },
       "sequence": "ring",
       "members": [
-        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
-        { "light": "gone", "arrangement": "ring", "zone_leds": null, "connected": false }
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "gone", "arrangement": "ring", "zone_leds": null, "leds": null, "led_count": 0, "connected": false }
       ],
       "fits": [
         { "light": "fan one", "fit": "exact" }
@@ -290,8 +292,8 @@
       "built_on": { "led_count": 16, "arrangement": "ring" },
       "sequence": "ring",
       "members": [
-        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
-        { "light": "fan two", "arrangement": "ring", "zone_leds": 8, "connected": false }
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "fan two", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": false }
       ],
       "fits": [
         { "light": "fan one", "fit": "exact" },
@@ -304,7 +306,7 @@
       "built_on": { "led_count": 4096, "arrangement": "ring" },
       "sequence": "ring",
       "members": [
-        { "light": "damaged zone", "arrangement": "ring", "zone_leds": 5000, "connected": true }
+        { "light": "damaged zone", "arrangement": "ring", "zone_leds": 5000, "leds": null, "led_count": 4096, "connected": true }
       ],
       "fits": [
         { "light": "damaged zone", "fit": "exact" }
@@ -316,10 +318,51 @@
       "built_on": { "led_count": 4096, "arrangement": "ring" },
       "sequence": null,
       "members": [
-        { "light": "damaged zone", "arrangement": "ring", "zone_leds": 5000, "connected": true }
+        { "light": "damaged zone", "arrangement": "ring", "zone_leds": 5000, "leds": null, "led_count": 4096, "connected": true }
       ],
       "fits": [
         { "light": "damaged zone", "fit": "exact" }
+      ]
+    },
+    {
+      "name": "a sliced member counts only the LEDs it keeps, in a run",
+      "from": "arrangement.rs light_led_count (slice.count.min(zone - start)), api/lights.rs view",
+      "built_on": { "led_count": 12, "arrangement": "ring" },
+      "sequence": "ring",
+      "members": [
+        { "light": "sliced fan", "arrangement": "ring", "zone_leds": 12, "leds": { "start": 8, "count": 8 }, "led_count": 4, "connected": true },
+        { "light": "fan two", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true }
+      ],
+      "fits": [
+        { "light": "sliced fan", "fit": "exact" },
+        { "light": "fan two", "fit": "exact" }
+      ]
+    },
+    {
+      "name": "a sliced member's own fit is its kept LEDs, each light its own",
+      "from": "arrangement.rs light_led_count, scenes.rs member_fits (the per-light arm)",
+      "built_on": { "led_count": 4, "arrangement": "ring" },
+      "sequence": null,
+      "members": [
+        { "light": "sliced strip", "arrangement": "ring", "zone_leds": 12, "leds": { "start": 8, "count": 8 }, "led_count": 4, "connected": true },
+        { "light": "whole zone", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true }
+      ],
+      "fits": [
+        { "light": "sliced strip", "fit": "exact" },
+        { "light": "whole zone", "fit": "stretched" }
+      ]
+    },
+    {
+      "name": "a slice that starts past the end of a shrunken zone has no LEDs, and leaves the run",
+      "from": "arrangement.rs light_led_count (zone.saturating_sub(start)), api/lights.rs view",
+      "built_on": { "led_count": 8, "arrangement": "ring" },
+      "sequence": "ring",
+      "members": [
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "leds": null, "led_count": 8, "connected": true },
+        { "light": "stale slice", "arrangement": "ring", "zone_leds": 10, "leds": { "start": 20, "count": 4 }, "led_count": 0, "connected": true }
+      ],
+      "fits": [
+        { "light": "fan one", "fit": "exact" }
       ]
     }
   ]

@@ -13,6 +13,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Patterns: a light's ring or line view now marks which physical LED is LED 1 and which way the run goes. Drag the notch or use the arrow keys (Home resets) to move LED 1, and the real light flashes that LED while you set it; patterns and canvas effects both start their run from the LED you choose, and a reversed light keeps that LED first and runs back from it. The flash lights the right LED on a part of a header, and a drag in the small Devices view lands on the LED under the pointer and saves once when you let go. (#468)
 - Patterns: a group that plays a pattern can run it through its lights as one sequence. A shape picker in the group's sheet chooses Each light (every light plays the whole pattern, as before), One ring (the lights' LEDs joined end to end in the order of the group's device list, the last LED of the last light meeting the first of the first) or One line (the same run with two ends). The pattern is fitted once to all those LEDs, Spin carries a colour across each join from one light to the next, each light still applies its own first LED and direction, and each device's fit note (Fits, Stretched, ...) describes the whole run. Reordering the devices reorders the run, and a change of the picker reaches the lights at once. A canvas effect ignores the picker. Checked on fake devices only; a real-hardware check is still to do. (#468)
 - Devices: the ROYUAN MonsGeek keyboard has live per-key frames, off by default and turned on with the `CANVAS_RGB_ROYUAN_LIVE=1` environment variable. The key map is still being mapped, so which key lights for which cell is not settled. (#10)
+- Scenes: the command line's groups file can name each group's shape (`"sequence": "ring"`, `"line"` or `"each"`), so a scene can be made as One ring or One line in one request, and a renamed group keeps the shape the file names. (#504)
 
 ### Changed
 
@@ -55,6 +56,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - The site's hero glow no longer shows a faint line where it crosses the section edge, and a long sweep takes the same time at 30, 60 and 144 Hz. (#63)
 - Effects: a library tile whose render runs out of time now gives a plain reason, and the time spent loading a slow effect counts toward the render budget instead of being added on top of it. (#58)
 - Installer notes: a failed start of canvas-rgb after an update is now named in the final note with what to do, and an uninstall that found no installation no longer claims it could not stop the service. (#77)
+
+### Security
+
+- The editor's framework, Next.js, is on 16.4.6, which fixes GHSA-mfr8-8qww-v76h (information disclosure across root params when a `use cache` function runs through `unstable_cache()`). The editor is a static export and uses neither feature, so the fix removes a build-time security warning and changes nothing you can see. (#463)
 
 ## [0.17.0] - 2026-11-16
 
