@@ -352,39 +352,54 @@ async fn wait_for_write(fake: &FakeOpenRgbServer, index: u32) -> u32 {
     writes
 }
 
-/// Real OpenRGB announces controllers over seconds. Here devices 0 and 1 settle and get the boot
-/// color, and device 2 is announced about 1.6 s after that, at the service's real 1 s tick. Before
-/// the fix the supervisor locked `boot_written` after the first stable tick and never saw it.
+/// Real OpenRGB announces controllers over seconds. Devices 0 and 1 settle and get the boot
+/// color; device 2 is announced only after that write. Before the fix the supervisor locked
+/// `boot_written` after the first stable tick and never painted a controller found later.
+/// The test announces it itself and steps the clock the supervisor reads, so the order does not
+/// depend on how fast a shared runner gets through its 1 s ticks (class `cause:timing-test`, #178).
 #[tokio::test]
 async fn a_controller_announced_after_the_boot_write_is_painted_too() {
-    let fake = FakeOpenRgbServer::start_detecting(
-        vec![device(0, 4), device(1, 6), device(2, 3)],
-        Duration::from_millis(200),
-        Duration::from_millis(1650),
-    )
-    .await
-    .unwrap();
+    let fake = FakeOpenRgbServer::start(vec![device(0, 4), device(1, 6)]).await.unwrap();
     let processes = FakeProcesses::new();
     let (root, exe) = install();
     let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
     let boot = Rgb8::new(10, 20, 30);
 
-    let mut ticker = tokio::time::interval(Duration::from_secs(1));
-    let mut written_with_two = false;
-    for _ in 0..10 {
-        ticker.tick().await;
-        sup.tick(Instant::now(), false, Some(boot)).await;
-        if sup.boot_written() && fake.colors(2) != vec![boot; 3] {
-            written_with_two = true;
+    // Connect first, as the #178 test does: the handshake is real I/O and a busy machine can
+    // make it take a tick or two. The synthetic clock starts once the supervisor is up.
+    let mut now = Instant::now();
+    let mut connected = false;
+    for _ in 0..30 {
+        sup.tick(now, false, Some(boot)).await;
+        if sup.state() == OpenRgbServerState::Running {
+            connected = true;
+            break;
         }
-        if fake.colors(2) == vec![boot; 3] {
+        now += Duration::from_secs(1);
+    }
+    assert!(connected, "the supervisor never reached the fake server");
+
+    // Step the supervisor's own clock until the two settled devices have the boot color.
+    for _ in 0..30 {
+        now += Duration::from_secs(1);
+        sup.tick(now, false, Some(boot)).await;
+        if sup.boot_written() {
             break;
         }
     }
-    assert!(written_with_two, "the boot color was written while device 2 was still unannounced");
+    assert!(sup.boot_written(), "the boot color was never written to the first two devices");
     assert_eq!(fake.wait_for_colors(0, &[boot; 4]).await, vec![boot; 4]);
     assert_eq!(fake.wait_for_colors(1, &[boot; 6]).await, vec![boot; 6]);
-    assert_eq!(fake.wait_for_colors(2, &[boot; 3]).await, vec![boot; 3], "the late controller got the boot color");
+
+    // OpenRGB finds the controller now, after the boot write. One more tick paints it.
+    fake.announce(device(2, 3));
+    now += Duration::from_secs(1);
+    sup.tick(now, false, Some(boot)).await;
+    assert_eq!(
+        fake.wait_for_colors(2, &[boot; 3]).await,
+        vec![boot; 3],
+        "the late controller got the boot color"
+    );
 }
 
 /// The 5 s cap used to warn only for a count of zero. A count that is above zero but still

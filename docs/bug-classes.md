@@ -764,9 +764,11 @@ line. Three mechanisms, and one bug the timing only exposed.
   is still not on a shared helper that carries the keeper. Delete an entry when its test is fixed.
   - **The siblings of #170 and #178 (same shape, not yet fixed):** the other tests in
     `crates/canvas-svc/src/openrgb_tests.rs` that pair a `tokio::time::interval` with
-    `Instant::now()` (`a_controller_announced_after_the_boot_write_is_painted_too`,
-    `the_restart_limit_black_waits_for_detection_and_paints_late_devices`) read the fake server's
-    detection schedule and the supervisor's clocks off the wall clock the same way #178 did. In the
+    `Instant::now()` (`the_restart_limit_black_waits_for_detection_and_paints_late_devices`) read the
+    fake server's detection schedule and the supervisor's clocks off the wall clock the same way
+    #178 did. (`a_controller_announced_after_the_boot_write_is_painted_too` was one of these until
+    #519: it now announces the late device from the test and steps the supervisor's clock itself.)
+    In the
     editor, `drag()` in `app/web/src/views/__tests__/StackBuilder.test.tsx` still fakes the clock after
     the builder's first send, so the baseline it measures from is a wall-clock reading; its assertions
     are loose enough that the gap has not moved them, and it is a shape, not a sighting.
