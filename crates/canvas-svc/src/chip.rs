@@ -140,6 +140,10 @@ pub const MSI_ALT1_MAP: RegisterMap = RegisterMap {
     ],
 };
 
+/// Every channel table the service has. The fan-rule vectors (#507) read the headers from here, so
+/// a new board's table must be listed: `every_register_map_is_in_maps` fails until it is.
+pub const MAPS: &[RegisterMap] = &[DEFAULT_MAP, MSI_ALT1_MAP];
+
 /// Super I/O config port, slot 0 of PawnIO's LpcIO module.
 pub const SIO_PORT: u16 = 0x2E;
 /// The second Super I/O config port, LpcIO slot 1. The test B850 has nothing at 0x2E (LpcIO's
@@ -446,6 +450,28 @@ impl<P: PortIo> FanChip for Nct6687<P> {
 
 #[cfg(test)]
 mod tests {
+    /// A `pub const ...: RegisterMap` that `MAPS` does not list is a table the fan-rule vectors
+    /// cannot see (#507 review): read this file's own source and compare.
+    #[test]
+    fn every_register_map_is_in_maps() {
+        let source = include_str!("chip.rs");
+        let declared: Vec<&str> = source
+            .lines()
+            .filter_map(|line| line.strip_prefix("pub const "))
+            .filter(|rest| rest.contains(": RegisterMap = "))
+            .filter_map(|rest| rest.split(':').next())
+            .collect();
+        assert!(declared.len() >= 2, "the scan found the tables: {declared:?}");
+        let maps_line = source
+            .lines()
+            .find(|line| line.starts_with("pub const MAPS:"))
+            .expect("MAPS is declared");
+        for name in &declared {
+            assert!(maps_line.contains(name), "{name} is a RegisterMap that MAPS does not list");
+        }
+        assert_eq!(declared.len(), super::MAPS.len(), "MAPS lists exactly the declared tables");
+    }
+
     use super::*;
     use crate::fakes::FakeChip;
 

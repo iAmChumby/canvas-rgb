@@ -9,6 +9,7 @@
 
 import { ApiFailure } from "@/lib/errors";
 import { driven } from "@/lib/drive";
+import { baseFloor } from "@/lib/fan-rules";
 import { demoThumbnail, thumbnailBytes } from "@/lib/thumb-demo";
 import {
   answerDelayMs,
@@ -761,13 +762,10 @@ function interpolate(points: { temp_c: number; percent: number }[], temp: number
   return last.percent;
 }
 
-function floorFor(header: string, configured: number): number {
-  const floor = Math.max(configured, 20);
-  return header === "cpu_fan" ? Math.max(floor, 30) : floor;
-}
-
 function validateMode(header: string, mode: FanMode, configured: number): void {
-  const floor = floorFor(header, configured);
+  // One floor rule for the editor and the demo backend: fan-rules.ts is tied to the spine's
+  // constants by shared vectors, so the demo cannot drift from the daemon (#507).
+  const floor = baseFloor(header, configured);
   if (mode.mode === "fixed") {
     if (mode.percent > 100) fail(422, "validation", `${header}: ${mode.percent}% is above 100%`);
     if (mode.percent < floor) {
