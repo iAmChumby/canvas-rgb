@@ -1981,6 +1981,88 @@ async fn a_spinning_sequence_carries_the_colour_from_fan_one_to_fan_two() {
     assert!(visited.contains(&8) && visited.contains(&16), "it goes on into fan 2 and the strip: {visited:?}");
 }
 
+/// The sequence rig of [`a_spinning_sequence_carries_the_colour_from_fan_one_to_fan_two`], with the
+/// pattern given, so a test can swap its colours without changing its timing (#518).
+async fn lit_sequence_rig(pattern: Pattern) -> Rig {
+    use canvas_proto::scene::SequenceShape;
+    let mut run = group("run", &[], RUN, Props::new());
+    run.members = [FAN1, FAN2, STRIP].iter().map(|id| format!("{id}#z0")).collect();
+    run.sequence = Some(SequenceShape::Ring);
+    rig_full(
+        vec![pattern],
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene { id: "main".into(), name: "Main".into(), rev: 1, groups: vec![run] }],
+        },
+        vec![device_of(FAN1, 8), device_of(FAN2, 8), device_of(STRIP, 10)],
+        vec![
+            light_of(FAN1, Arrangement::Ring),
+            light_of(FAN2, Arrangement::Ring),
+            light_of(STRIP, Arrangement::Strip),
+        ],
+    )
+    .await
+}
+
+/// A colour-only save of a spinning pattern keeps a sequence group's clock: the marker carries on
+/// from where it is instead of starting again at its first LED (#518). The ring's clock is one per
+/// group slot, shared by the whole run, so a save must not restart it.
+#[tokio::test]
+async fn a_spinning_sequence_group_keeps_its_clock_across_a_colour_only_swap() {
+    let mut lit = run_pattern(Motion::spin(0.25));
+    lit.frames[0].colors = (0..26).map(|i| if i == 7 { rgb(RED) } else { Rgb8::BLACK }).collect();
+    let rig = lit_sequence_rig(lit.clone()).await;
+    let tape = Arc::new(Tape::default());
+    for (device, id) in [FAN1, FAN2, STRIP].iter().enumerate() {
+        rig.app.engine.add_sink(DeviceId((*id).into()), Arc::new(TapeSink { device, tape: Arc::clone(&tape) }));
+    }
+    let ticks = || -> Vec<Vec<Rgb8>> {
+        let log = tape.frames.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slots: [Option<Vec<Rgb8>>; 3] = [None, None, None];
+        let mut out = Vec::new();
+        for (device, frame) in log.iter() {
+            slots[*device] = Some(frame.clone());
+            if slots.iter().all(Option::is_some) {
+                out.push(slots.iter_mut().flat_map(|s| s.take().unwrap()).collect());
+            }
+        }
+        out
+    };
+    let at = |tick: &Vec<Rgb8>, channel: usize| {
+        tick.iter().enumerate().max_by_key(|(_, c)| channel_of(c, channel)).map(|(i, _)| i).unwrap_or(0)
+    };
+    // 0.25 laps a second over 26 LEDs: one LED every 0.5 s. Let the red marker reach the strip.
+    wait_until(|| ticks().iter().any(|t| at(t, 0) >= 15)).await;
+
+    // Same id, motion and frames: only the marker's colour changes.
+    let mut swapped = lit.clone();
+    swapped.frames[0].colors[7] = Rgb8::new(0, 200, 0);
+    let (status, answer) = put_pattern_body(&rig, RUN, &swapped).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    wait_until(|| ticks().iter().any(|t| t.iter().any(|c| c.g > 60))).await;
+    let all = ticks();
+    let green = all
+        .iter()
+        .position(|t| t.iter().any(|c| c.g > 60))
+        .expect("a frame with the new green marker");
+    // The run position on the frame before the new colours and on the first frame with them: two
+    // ticks of the engine's own clock, next to each other in the tape whatever the save took to
+    // land. A kept clock carries the position on; a clock that started over is back at the
+    // pattern's own LED 7, well behind where the run had got to. The only other way forward is
+    // round the end of the run, two LEDs at most in one frame.
+    let previous = all[green.checked_sub(1).expect("the old colours come before the new")].clone();
+    let leds = swapped.frames[0].colors.len();
+    let before = at(&previous, 0);
+    let carried = at(&all[green], 1);
+    let wrapped = before + 2 >= leds && carried <= 2;
+    assert!(
+        carried >= before || wrapped,
+        "the run position carries on from {before} (the new colours start at {carried}; a restart gives 7)"
+    );
+}
+
 /// The fit the editor's sentence reports for a sequence group is the fit of the whole run.
 #[tokio::test]
 async fn a_sequence_group_reports_the_fit_of_the_whole_run() {
@@ -2185,6 +2267,341 @@ async fn a_pattern_draft_keeps_the_groups_past_the_budget_dark_with_their_senten
         assert!(last.iter().all(|c| *c == Rgb8::BLACK), "{id}: a group past the budget plays under a draft");
     }
     said_over(&group_states(&rig).await);
+}
+
+/// A valid HTML effect for the draft PUTs over the pattern rigs.
+const DRAFT_HTML: &str = r##"<head><title>Draft</title></head>
+<body><canvas id="c" width="320" height="200"></canvas></body>
+<script>
+var c = document.getElementById("c");
+var ctx = c.getContext("2d");
+ctx.fillStyle = "#ffcc00";
+ctx.fillRect(0, 0, 320, 200);
+function draw() { window.requestAnimationFrame(draw); }
+window.requestAnimationFrame(draw);
+</script>"##;
+
+/// The effect the scene's `draft` group plays, saved by the test as the editor saves one: a draft
+/// of this file's own source lands on the groups that play it (#518).
+const SAVED_HTML: &str = r##"<head>
+  <title>Saved</title>
+  <meta description="An effect the draft takeover lands on." />
+</head>
+<body><canvas id="stage" width="320" height="200"></canvas></body>
+<script>
+  var c = document.getElementById("stage");
+  var ctx = c.getContext("2d");
+  function draw() {
+    ctx.fillStyle = "#101020";
+    ctx.fillRect(0, 0, 320, 200);
+    ctx.fillStyle = "#ff00ff";
+    ctx.fillRect(40, 40, 30, 30);
+    window.requestAnimationFrame(draw);
+  }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+/// An HTML draft PUT, as the editor sends one.
+async fn put_html_draft(rig: &Rig, html: &str) -> (StatusCode, serde_json::Value) {
+    let body = serde_json::json!({
+        "html": html,
+        "props": {},
+        "epoch": EPOCH2,
+        "seq": 1,
+    });
+    send(rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await
+}
+
+/// Saves `html` as `file_name` through the import route, as the editor does, and returns the
+/// effect's id.
+async fn import_html_effect(rig: &Rig, file_name: &str, html: &str) -> String {
+    let body = serde_json::json!({ "file_name": file_name, "html": html, "replace": false });
+    let (status, answer) = send(rig, "POST", routes::EFFECTS_IMPORT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    answer["effect"]["id"].as_str().expect("the imported effect's id").to_string()
+}
+
+/// The reel past the budget on four strips, and a group playing `html:take518`, which the test
+/// imports after the rig starts (#518).
+async fn html_draft_over_budget_rig() -> Rig {
+    let ids: Vec<String> = (0..4).map(|i| format!("fake:big{i}")).collect();
+    let sizes = OVER;
+    // rig_full needs the two ordinary fake devices for its A/B handles.
+    let mut devices = vec![device(A), device(B)];
+    let mut lights = vec![light(A), light(B)];
+    for (id, leds) in ids.iter().zip(sizes) {
+        devices.push(device_of(id, leds));
+        lights.push(light_of(id, Arrangement::Strip));
+    }
+    let big: Vec<String> = ids.iter().map(|id| format!("{id}#z0")).collect();
+    let big_refs: Vec<&str> = big.iter().map(String::as_str).collect();
+    rig_full(
+        vec![reel(256, Rgb8::new(0, 0, 200))],
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![
+                    group("big", &big_refs, "pattern:Reel", Props::new()),
+                    group("draft", &["fake:a#z0"], "html:take518", Props::new()),
+                ],
+            }],
+        },
+        devices,
+        lights,
+    )
+    .await
+}
+
+/// An HTML draft over a scene with a group past the frame budget goes through the takeover that
+/// rebuilds every group (`build_and_set_with`), and leaves the pattern group dark with its
+/// sentence there too (#518).
+#[tokio::test]
+async fn an_html_draft_takeover_rebuild_keeps_the_over_budget_group_dark() {
+    let rig = html_draft_over_budget_rig().await;
+    let states = group_states(&rig).await;
+    assert!(
+        states.get("big").cloned().flatten().is_some_and(|why| why.contains("4000000")),
+        "the reel past the budget is dark on the full build: {states:?}"
+    );
+    big_strips_go_dark(&rig, "the group past the budget before the draft").await;
+
+    // The effect is imported as the editor imports one; a scene save builds the group that was
+    // dark only because the file was not there when the scene started.
+    assert_eq!(import_html_effect(&rig, "take518.html", SAVED_HTML).await, "html:take518");
+    put_main(&rig, |_| {}).await;
+    let states = group_states(&rig).await;
+    assert_eq!(states.get("draft"), Some(&None), "the imported effect plays: {states:?}");
+    assert!(
+        states.get("big").cloned().flatten().is_some_and(|why| why.contains("4000000")),
+        "the reel is still past the budget: {states:?}"
+    );
+
+    // A draft of a file no group plays: the engine holds the takeover group alone.
+    let (status, answer) = put_html_draft(&rig, DRAFT_HTML).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["applied"], serde_json::json!(true), "{answer}");
+
+    // A draft of the saved effect's own source lands on the group that plays it. The engine does
+    // not hold the scene's groups, so the whole scene is built again through `build_and_set_with`
+    // with the draft on its group: the reel is refused there too.
+    let saved = std::fs::read_to_string(rig.home.path.join("effects").join("take518.html"))
+        .expect("the imported file is in the effects folder");
+    let (status, answer) = put_html_draft(&rig, &saved).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["applied"], serde_json::json!(true), "{answer}");
+
+    let states = group_states(&rig).await;
+    let why = states.get("big").cloned().flatten().expect("the big group is dark and says why");
+    assert!(
+        why.contains("Reel has 256 frames") && why.contains("4000000"),
+        "the sentence names the pattern and the limit: {why}"
+    );
+    assert_eq!(states.get("draft"), Some(&None), "the group the draft landed on plays: {states:?}");
+    big_strips_go_dark(&rig, "the group past the budget under the draft takeover").await;
+}
+
+/// `reel` under its own id, for scenes with more than one pattern.
+fn named_reel(id: &str, frames: usize, lit: Rgb8) -> Pattern {
+    let mut reel = reel(frames, lit);
+    reel.id = format!("pattern:{id}");
+    reel
+}
+
+/// The frames each reel of the two-reel rigs has: enough that two together are past the scene's
+/// budget, and one alone fits.
+const REEL_FRAMES: usize = 128;
+
+/// [`two_reel_rig_with`] with a full reel on each group: the pair is past the budget, so the later
+/// group is dark from the start.
+async fn two_reel_rig() -> Rig {
+    two_reel_rig_with(REEL_FRAMES).await
+}
+
+/// Two groups, `a` and `b`, each playing a reel on four strips of four different sizes: either
+/// reel of [`REEL_FRAMES`] alone fits the scene's budget, the two together do not (#518). `a` plays
+/// `pattern:A` (blue) with `a_frames` frames and `b` plays `pattern:B` (green) with
+/// [`REEL_FRAMES`], so saving one changes the budget of the other without naming it.
+async fn two_reel_rig_with(a_frames: usize) -> Rig {
+    let ids: Vec<String> = (0..8).map(|i| format!("fake:s{i}")).collect();
+    let sizes = [4096u32, 4095, 4094, 4093, 4092, 4091, 4090, 4089];
+    // rig_full needs the two ordinary fake devices for its A/B handles; no group uses them.
+    let mut devices = vec![device(A), device(B)];
+    let mut lights = vec![light(A), light(B)];
+    for (id, leds) in ids.iter().zip(sizes) {
+        devices.push(device_of(id, leds));
+        lights.push(light_of(id, Arrangement::Strip));
+    }
+    let members: Vec<String> = ids.iter().take(4).map(|id| format!("{id}#z0")).collect();
+    let other: Vec<String> = ids.iter().skip(4).map(|id| format!("{id}#z0")).collect();
+    let member_refs: Vec<&str> = members.iter().map(String::as_str).collect();
+    let other_refs: Vec<&str> = other.iter().map(String::as_str).collect();
+    rig_full(
+        vec![
+            named_reel("A", a_frames, Rgb8::new(0, 0, 200)),
+            named_reel("B", REEL_FRAMES, Rgb8::new(0, 200, 0)),
+        ],
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![
+                    group("a", &member_refs, "pattern:A", Props::new()),
+                    group("b", &other_refs, "pattern:B", Props::new()),
+                ],
+            }],
+        },
+        devices,
+        lights,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_group_the_budget_left_dark_plays_when_another_pattern_shrinks() {
+    let rig = two_reel_rig().await;
+    let states = group_states(&rig).await;
+    assert_eq!(states.get("a"), Some(&None), "the first group fits alone: {states:?}");
+    assert!(states.get("b").cloned().flatten().is_some(), "the second group is dark under the shared budget: {states:?}");
+    for id in ["fake:s4", "fake:s7"] {
+        shows_where(&sink(&rig, id), "a strip of the refused group", |f| {
+            f.len() > 4000 && f.iter().all(|c| *c == Rgb8::BLACK)
+        })
+        .await;
+    }
+
+    // Saving A with one frame frees the budget. The save names only A; B must still be rebuilt.
+    let small = named_reel("A", 1, Rgb8::new(0, 0, 200));
+    let (status, answer) = put_pattern_body(&rig, "pattern:A", &small).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    let states = group_states(&rig).await;
+    assert_eq!(states.get("a"), Some(&None), "the shrunken group plays: {states:?}");
+    assert_eq!(states.get("b"), Some(&None), "the group the budget left dark now fits and plays: {states:?}");
+    for id in ["fake:s4", "fake:s7"] {
+        shows_where(&sink(&rig, id), "a strip of the recovered group", |f| {
+            f.len() > 4000 && f[0] == Rgb8::new(0, 200, 0)
+        })
+        .await;
+    }
+}
+
+/// A pattern save that grows past the shared budget turns a group it does not name dark, with the
+/// budget's reason, as a scene save does (#518). The budget is one for the whole scene, so the
+/// group that was inside it and no longer is cannot keep playing.
+#[tokio::test]
+async fn a_pattern_save_that_grows_past_the_budget_turns_an_unnamed_group_dark() {
+    // `a` is one frame and `b` is a full reel: together they are 2 096 384 + 16 378, inside the
+    // 4 000 000 a scene keeps, so both play.
+    let rig = two_reel_rig_with(1).await;
+    let states = group_states(&rig).await;
+    assert_eq!(states.get("a"), Some(&None), "the one-frame group plays: {states:?}");
+    assert_eq!(states.get("b"), Some(&None), "the full reel fits beside it: {states:?}");
+
+    // Saving `a` with a full reel puts the pair past the budget: the later group is refused, as a
+    // full build refuses it, though the save names only `a`.
+    let grown = named_reel("A", REEL_FRAMES, Rgb8::new(0, 0, 200));
+    let (status, answer) = put_pattern_body(&rig, "pattern:A", &grown).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    let states = group_states(&rig).await;
+    assert_eq!(states.get("a"), Some(&None), "the first group keeps the budget: {states:?}");
+    let why = states.get("b").cloned().flatten().expect("the group the budget now refuses is dark");
+    assert!(
+        why.contains("B has 128 frames") && why.contains("4000000"),
+        "the sentence names why: {why}"
+    );
+    for id in ["fake:s4", "fake:s7"] {
+        shows_where(&sink(&rig, id), "a strip of the group the grown pattern refuses", |f| {
+            f.len() > 4000 && f.iter().all(|c| *c == Rgb8::BLACK)
+        })
+        .await;
+    }
+}
+
+/// A valid HTML effect for the groups the HTML runtime limit leaves dark (#419).
+const LIMIT_HTML: &str = r##"<head>
+  <title>Limit</title>
+  <meta description="An effect for the HTML runtime limit." />
+</head>
+<body><canvas id="stage" width="320" height="200"></canvas></body>
+<script>
+  var c = document.getElementById("stage");
+  var ctx = c.getContext("2d");
+  function draw() {
+    ctx.fillStyle = "#203040";
+    ctx.fillRect(0, 0, 320, 200);
+    window.requestAnimationFrame(draw);
+  }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+/// Three groups playing one HTML effect on the rig's three lights, loaded with the effect already
+/// in the folder: the scene starts three HTML runtimes where the limit is two (#370).
+async fn html_limit_rig() -> Rig {
+    let rig = rig_full(
+        Vec::new(),
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![
+                    group("one", &["fake:a#z0"], "html:limittest", Props::new()),
+                    group("two", &["fake:b#z0"], "html:limittest", Props::new()),
+                    group("three", &["fake:c#z0"], "html:limittest", Props::new()),
+                ],
+            }],
+        },
+        vec![device(A), device(B), device(C)],
+        vec![light(A), light(B), light(C)],
+    )
+    .await;
+    // The file is written after start-up, then found; the scene goes on again with it present.
+    std::fs::write(rig.home.path.join("effects").join("limittest.html"), LIMIT_HTML)
+        .expect("the effect is written");
+    rig.app.user_effects.rescan(&rig.home.path.join("effects"));
+    canvas_daemon::scenes::apply_active(&rig.app, false).await;
+    rig
+}
+
+/// #419: a pattern save must not retry a group the HTML limit left dark. The save frees no runtime,
+/// so building that group would run the scene past the cap it was loaded past (#518).
+#[tokio::test]
+async fn a_pattern_save_does_not_build_a_group_the_html_limit_left_dark() {
+    let rig = html_limit_rig().await;
+    let over = canvas_daemon::scenes::html_limit_sentence(3);
+    let built = rig.app.scene.builds();
+    let failures = rig.app.scene.failures();
+    assert_eq!(failures.len(), 1, "the two runtimes the limit allows are running: {failures:?}");
+    assert_eq!(
+        failures.get("three").map(String::as_str),
+        Some(over.as_str()),
+        "the third group waits under the limit: {failures:?}"
+    );
+
+    // A pattern save no group plays: the incremental path revisits the groups it names, and the
+    // ones a failure left dark, which must not include a group the HTML limit left dark.
+    let mut unused = reel(1, Rgb8::new(0, 0, 200));
+    unused.id = "pattern:Unused".into();
+    let (status, answer) = put_pattern_body(&rig, "pattern:Unused", &unused).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    assert_eq!(rig.app.scene.builds(), built, "the pattern save built no HTML runtime");
+    let failures = rig.app.scene.failures();
+    assert_eq!(
+        failures.get("three").map(String::as_str),
+        Some(over.as_str()),
+        "the group the limit left dark is still dark, with the same reason: {failures:?}"
+    );
 }
 
 /// Which colour a marker is, as the channel it lights: 0 red, 1 green, 2 blue.

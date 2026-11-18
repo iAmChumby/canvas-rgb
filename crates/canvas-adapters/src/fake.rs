@@ -149,6 +149,8 @@ struct FakeState {
     /// How many times the client asked for the controller count while a rescan was still
     /// re-registering controllers: reads of a list that is mid-detection (#290).
     reads_during_detection: u32,
+    /// How many times a client asked for the controller count, at any time: one per list read.
+    list_reads: u32,
     /// How many frame packets (`UPDATE_LEDS`, `SET_CUSTOM_MODE`) named a controller id the server does not
     /// have (protocol 6): dropped, and ACKed (`NetworkServer.cpp:1495-1531`, `:1247`).
     frames_to_stale_ids: u32,
@@ -428,6 +430,7 @@ impl FakeOpenRgbServer {
             rescan_run: None,
             quiet_progress: false,
             reads_during_detection: 0,
+            list_reads: 0,
             frames_to_unregistered: 0,
             frames_to_stale_ids: 0,
             echoes_sent: 0,
@@ -626,6 +629,13 @@ impl FakeOpenRgbServer {
     /// controllers (the list was mid-detection).
     pub fn reads_during_detection(&self) -> u32 {
         guard(&self.state).reads_during_detection
+    }
+
+    /// A handle that reads how many times a client asked for the controller count (one per list read), for a
+    /// task that cannot borrow the server: the count is read when the handle is called.
+    pub fn list_reads_probe(&self) -> impl Fn() -> u32 + Send + Sync + 'static {
+        let state = Arc::clone(&self.state);
+        move || guard(&state).list_reads
     }
 
     /// How many frame packets named a controller that was not registered at that moment of a
@@ -1314,6 +1324,7 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
             bytes
         }
         REQUEST_CONTROLLER_COUNT => {
+            state.list_reads += 1;
             if state.rescan_listed.is_some() {
                 state.reads_during_detection += 1;
             }

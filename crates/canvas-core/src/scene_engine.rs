@@ -135,6 +135,31 @@ impl PatternTiming {
     }
 }
 
+/// A [`PatternTiming`]'s fields as plain data, for the shared vectors that tie the editor's
+/// `timingKey` to this rule (#518).
+///
+/// The vectors are JSON, but this crate keeps JSON in its tests: the example that writes them
+/// (`crates/canvas-core/examples/timing_key_vectors.rs`) asks here for the rule's own fields and
+/// serialises them itself. A field added to [`PatternTiming`] belongs here too, or the editor's
+/// test no longer covers it.
+#[doc(hidden)]
+#[derive(Clone, PartialEq)]
+pub struct PatternTimingFields {
+    pub id: String,
+    pub motion: canvas_proto::pattern::Motion,
+    pub playback: Option<canvas_proto::pattern::Playback>,
+    pub frames: Vec<(u32, Option<canvas_proto::pattern::Transition>)>,
+}
+
+/// The engine's timing of `pattern`, as [`PatternTimingFields`] (#518). Not for the daemon: the
+/// example that writes the editor's vectors is the one caller, so a timing change reaches the
+/// editor's test instead of drifting past it.
+#[doc(hidden)]
+pub fn pattern_timing_fields(pattern: &canvas_proto::pattern::Pattern) -> PatternTimingFields {
+    let PatternTiming { id, motion, playback, frames } = PatternTiming::of(pattern);
+    PatternTimingFields { id, motion, playback, frames }
+}
+
 impl GroupSlot {
     /// Installs a freshly built effect in this slot: its needs and how a strip reads it
     /// (`strip_read`, #400) come from that build, read once by the caller, never per frame.

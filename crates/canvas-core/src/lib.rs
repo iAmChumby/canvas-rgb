@@ -23,6 +23,8 @@ pub mod sampling;
 pub(crate) mod scene_engine;
 /// The scene canvas's scale and sampling, which the daemon's stack masks must match.
 pub use scene_engine::{SCENE_RENDER_SCALE, SCENE_SAMPLING};
+/// A pattern's timing as the engine compares it, for the editor's shared vectors (#518).
+pub use scene_engine::{pattern_timing_fields, PatternTimingFields};
 mod timer;
 
 #[cfg(all(test, windows))]

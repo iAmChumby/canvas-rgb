@@ -263,9 +263,15 @@ or acts as if a step worked without checking that it did.
   read in `enumerate()` is the one deliberate exception (it settles the list). **The rule:** an
   address that is a position is valid only for the list it was read from; a packet that carries one
   goes through `write_packet` with `positional` set, and the check sits under the socket lock, where
-  a list change cannot slip between the check and the write. Left: a list change OpenRGB makes on its
-  own (a hot plug) is announced only by its 100, after the swap, and no hold the client takes can
-  cover it.
+  a list change cannot slip between the check and the write. [#520](https://github.com/iAmChumby/canvas-rgb/issues/520):
+  the hold was not applied to an adapter with no list yet (`list_is_unsettled` and the hold check in
+  `enumerate()` both required a non-empty list), so `discover()` and a frame's controller lookup read the
+  list by position through the hold and cached it. Fixed: a hold makes an empty list unsettled too
+  (`an_empty_list_under_a_rescan_hold_is_not_read_and_no_frame_goes_out_by_position`). The other
+  `controllers.is_empty()` checks in `openrgb.rs` are start-up rules (an empty list that is changing with no
+  hold is a start-up that found nothing yet, and a read of it is the list) and stay. Left: a list change
+  OpenRGB makes on its own (a hot plug) is announced only by its 100, after the swap, and no hold the
+  client takes can cover it.
 - **Class fix:** done (PR #23). Every user-facing claim about system state comes from a field the
   daemon or service measured, never from a constant: `DisplayInfo.blocked_by` (spine) replaces the
   hard-coded ZEUS CAST warning, and the onboarding tag names what was checked ("SignalRGB not seen").
@@ -438,6 +444,16 @@ line. Three mechanisms, and one bug the timing only exposed.
   for. Two more tests in that file made the same read (`a_failed_rollback_keeps_both_records`,
   `start_up_rolls_back_a_leftover_intent`) and wait now. No guard: the mistake is two correct
   lines in the wrong order, which `timing_class.rs` cannot tell from a read that is safe.
+- [#520](https://github.com/iAmChumby/canvas-rgb/issues/520): the D1 test of #509
+  (`a_rescan_that_starts_from_an_unsettled_list_awaits_and_ends_with_the_right_answer`,
+  `crates/canvas-adapters/tests/openrgb_rescan.rs`) asserted `stall < 600` on the longest gap of a 5 ms ticker,
+  and `timing_class.rs` did not know `stall`. `stall`, `stalled`, `stall_ms`, `longest_stall` and
+  `longest_stall_ms` are clock words now. The test judges an event instead: the rescan and a refresher run in one
+  `tokio::join!`, the refresher waits for the fake to take packet 140 and then asks for a refresh, and the fake
+  counts the list reads (`list_reads_probe`); a rescan that awaits answers it with the held list and no read, one
+  that spins runs the refresher only after its hold is gone. No timer sits between the packet and the refresh.
+  **Rule:** a test of "the runtime kept running" asks what state the other task found, not how long it
+  waited to find it.
 - [#429](https://github.com/iAmChumby/canvas-rgb/issues/429):
   `a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry` (`crates/canvas-daemon/tests/chains.rs`)
   failed once in CI with `left: None` where the setup session should be. The wait was right; the product

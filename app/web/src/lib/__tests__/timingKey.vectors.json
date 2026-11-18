@@ -1,0 +1,2216 @@
+{
+  "note": "Pairs of patterns and the daemon's same-timing verdict for each. Printed by crates/canvas-core/examples/timing_key_vectors.rs; tools/timing-key-vectors.ps1 writes this file. The editor's timingKey (app/web/src/lib/patternDraft.ts) is checked against it, and the timing objects printed here are the fields of the engine's PatternTiming.",
+  "pairs": [
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#0000ff",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "only the colours change",
+      "same_timing": true,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 12
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "note": "a later version wrote this",
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "only built_on and extra change",
+      "same_timing": true,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Other",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "the id changes",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Other",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "type": "none"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "the motion kind changes",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "type": "none"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.5,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "the motion speed changes",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.5,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        }
+      },
+      "name": "playback goes away",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": null
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": false
+        }
+      },
+      "name": "playback stops looping",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": false
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "a frame's transition goes away",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            null
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "a frame gains a transition",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            null
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": false
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        }
+      },
+      "name": "playback is nothing instead of set not to loop",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": false
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": null
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 301,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "a frame's hold changes",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            301,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "cut",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "a frame's transition kind changes",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "cut",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 401
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "a frame's transition ms changes",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 401
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "a frame's transition easing changes",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "a frame is added",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    },
+    {
+      "a": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          },
+          {
+            "colors": [
+              "#00c800",
+              "#0000c8"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "b": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#c80000",
+              "#00c800"
+            ],
+            "hold": 300,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          }
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "name": "a frame is removed",
+      "same_timing": false,
+      "timing_a": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ],
+          [
+            500,
+            {
+              "easing": "linear",
+              "kind": "cut",
+              "ms": 0
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      },
+      "timing_b": {
+        "frames": [
+          [
+            300,
+            {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 400
+            }
+          ]
+        ],
+        "id": "pattern:Base",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        },
+        "playback": {
+          "loop": true
+        }
+      }
+    }
+  ]
+}

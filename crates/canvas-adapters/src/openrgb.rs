@@ -1028,11 +1028,14 @@ impl OpenRgbAdapter {
         Ok(())
     }
 
-    /// Whether OpenRGB's list is changing while this adapter holds a list: what an index in it
-    /// names is not to be trusted.
+    /// Whether what an index in OpenRGB's list names is not to be trusted: the list is changing while
+    /// this adapter holds one, or a rescan was requested and OpenRGB has not said anything yet. The hold
+    /// counts with an empty list too (#520): OpenRGB may have swapped its list already, and a read by
+    /// position, or a frame built from one, would mix the old list and the new. An empty list that is
+    /// changing with no hold is a start-up that has found nothing yet, and a read of it is the list.
     fn list_is_unsettled(&self) -> bool {
         let session = guard(&self.link.session);
-        (session.unsettled || session.rescan_requests > 0) && !session.controllers.is_empty()
+        session.rescan_requests > 0 || (session.unsettled && !session.controllers.is_empty())
     }
 
     fn require_connected(&self) -> Result<(), AdapterError> {
@@ -1255,7 +1258,8 @@ impl OpenRgbAdapter {
                 return Ok(session.controllers.clone());
             }
             // A rescan was requested and OpenRGB has not said anything yet: its list may be swapped already.
-            if session.rescan_requests > 0 && !session.controllers.is_empty() {
+            // An empty list is held too: it answers as it is, and nothing is read through the hold (#520).
+            if session.rescan_requests > 0 {
                 return Ok(session.controllers.clone());
             }
             session.list_changes
