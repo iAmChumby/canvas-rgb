@@ -104,6 +104,12 @@ where
     }
 }
 
+/// How long Windows has reported no keyboard or mouse input, for a caller that wants a function
+/// (the ring adapter's idle gate takes one).
+pub fn windows_idle_for() -> Duration {
+    WindowsInputIdle.idle_for()
+}
+
 /// The real input clock: `GetLastInputInfo` from user32.
 #[derive(Debug, Default)]
 pub struct WindowsInputIdle;
@@ -1404,6 +1410,20 @@ mod tests {
             "the child failed, but not with the wait's own message
 {text}"
         );
+    }
+
+    #[test]
+    fn the_controller_write_gate_is_the_one_gate_for_the_pad_and_the_rings() {
+        // The daemon turns the gate through the `Peripheral` trait; the ring adapter reads it from
+        // the shared vendor handle. No hardware is touched: nothing connects.
+        let handle = canvas_adapters::eightbitdo_ultimate2::VendorHandle::new();
+        let mut pad =
+            canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::with_handle(handle.clone());
+        assert!(!handle.writes_enabled(), "off until the daemon says otherwise");
+        Peripheral::set_config_writes(&mut pad, true);
+        assert!(handle.writes_enabled());
+        Peripheral::set_config_writes(&mut pad, false);
+        assert!(!handle.writes_enabled());
     }
 
     #[test]

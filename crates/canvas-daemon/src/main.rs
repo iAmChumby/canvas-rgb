@@ -152,6 +152,12 @@ async fn daemon_main(fakes: bool) -> Exit {
     });
     engine.set_white_balance(canvas_daemon::api::devices::white_balance_map(&store.config));
 
+    // The controller's vendor channel, shared by the peripheral adapter (which opens it and reads
+    // the settings) and, later, the ring adapter (which writes stills through it). Its idle clock
+    // is the one the peripheral reads wait on, so the two wait for the same quiet (#376).
+    let pad_handle = canvas_adapters::eightbitdo_ultimate2::VendorHandle::new();
+    pad_handle.set_idle_source(std::sync::Arc::new(canvas_daemon::peripherals::windows_idle_for));
+
     // The OpenRGB adapter, on the port the config names, with the native adapters beside it.
     // In fakes mode it talks to the fake OpenRGB server on the fake port, and
     // the composite's keyboard is disabled: no HID is ever touched.
@@ -180,7 +186,9 @@ async fn daemon_main(fakes: bool) -> Exit {
         if canvas_daemon::fakes::real_peripherals_enabled(fakes) {
             vec![
                 Box::new(canvas_adapters::attack_shark_x6::AttackSharkX6::new()),
-                Box::new(canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::new()),
+                Box::new(canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::with_handle(
+                    pad_handle.clone(),
+                )),
             ]
         } else {
             Vec::new()
