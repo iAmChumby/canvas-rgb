@@ -18,6 +18,13 @@ updates:
       cargo:
         patterns:
           - "*"
+    ignore:
+      # windows-core has to move together with the `windows` crate: the daemon's
+      # #[implement] code compiles against both. `windows` has no release past 0.62.2
+      # (crates.io, 2026-11-18), so windows-core 0.100 cannot build next to it. Remove this
+      # ignore when a `windows` release depends on windows-core 0.100.
+      - dependency-name: "windows-core"
+        versions: [">=0.100.0"]
 
   # The npm projects. They do not depend on each other, so each has its own entry.
   - package-ecosystem: npm
@@ -30,6 +37,14 @@ updates:
       npm:
         patterns:
           - "*"
+    ignore:
+      # TypeScript 7 (the native compiler) passes `tsc`, but `eslint .` fails with
+      # "typescript-eslint does not support TS 7.0" (typescript-eslint 8.73.0 peers
+      # typescript <6.1.0; its TS 7 support is tracked in typescript-eslint issue 10940).
+      # The editor build runs lint, so it stays on 5.9.x. Remove this ignore when
+      # typescript-eslint supports TS 7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: "/site"
