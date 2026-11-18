@@ -350,6 +350,36 @@ second on the status poll, so the effect tears down and starts again before it c
   send. Tests in `crates/canvas-daemon/tests/api.rs` (`issue295_*`). Rule: a writer that replaces a whole
   config asks the owner for its current copy, never its own cache, never a file the owner guards, and
   never the defaults.
+- [#481](https://github.com/iAmChumby/canvas-rgb/issues/481): an editor closed while an undo's light
+  write was in flight put its pattern back on the lights. The hook cancelled its queued frame on
+  unmount, but the write landed afterwards and `finishUndo → restore → applyDoc → schedule` queued a
+  new one; `send` checked `alive` only after the PUT, so a draft was revived for up to `DRAFT_LEASE`
+  (15 s) after the unmount's DELETE (`app/web/src/views/patterns/usePatternEditor.ts`,
+  `app/web/src/views/patterns/PatternEditor.tsx`). The shape picker's PATCH had the same window.
+  Fix: the hook marks itself unmounted in its cleanup and refuses to schedule after that; `send`
+  checks `alive` before the PUT and `chooseShape` checks it after its PATCH. Regression tests:
+  `app/web/src/views/patterns/__tests__/PatternUndo491.test.ts` "P5: unmounting during the undo's light
+  write sends no draft afterwards" and `PatternSpin.test.tsx` "closing the editor during a pending undo
+  write sends no draft after the DELETE (#491)". Rule: an async continuation of an editor action checks
+  that its owner still exists before it sends anything; a request guard checked only on the answer is
+  checked on the send too.
+- [#171](https://github.com/iAmChumby/canvas-rgb/issues/171), again in #481 (the fix for the entry above
+  broke it): the `mounted` ref the unmount guard reads started `true` and only its cleanup wrote it,
+  `mounted.current = false`. StrictMode (`reactStrictMode: true` in `next.config.ts`) mounts, runs the
+  cleanup and mounts again on the same instance, so the flag stayed `false` for the editor's whole
+  life and `schedule()` dropped every draft: nothing reached the lights (`usePatternEditor.ts`). Fix:
+  the effect body sets the flag back to `true`, as `EffectEditor.tsx` already did after #171. Class
+  fix: `app/web/src/test/mountGuard.test.ts` reads every source and fails on a file that writes
+  `mounted`/`alive`/`isMounted` `.current = false` and never `= true`; the pattern editor is also
+  tested under `<StrictMode>` (`PatternGesture491.test.tsx` "S1"). Rule: a lifecycle flag is set in
+  the effect body and cleared in its cleanup, never initialised and only cleared.
+- #481, the same pass: the Spin slider's gesture gate was a boolean opened by a keydown and closed by
+  any keyup, a pointer end or nothing (focus loss sends no keyup). A held key then pushed one history
+  entry per repeat, or its Spin/Off click was lost. Fix: the `Slider` owns the gesture as the set of
+  inputs that are down; it begins with the first and ends once with the last, or on blur or unmount
+  (`app/web/src/components/Slider.tsx`, `components/__tests__/SliderGesture.test.tsx`). Rule: a
+  gesture that brackets history is owned by the control that sees every input of it, not by flags the
+  callers flip.
 
 ### `cause:timing-test`: a test whose verdict depends on how long the machine takes
 

@@ -51,6 +51,19 @@ describe("a panel that must stay clear of its anchor's row (#469)", () => {
     expect(p.maxHeight).toBe(200);
   });
 
+  it("grows a panel into the page from an anchor near a left sidebar (#481)", () => {
+    // A frame connector at 1440 sits just past the rail: the old right-edge alignment put the
+    // panel at x=8, over the sidebar. "start" hangs it off the anchor's left edge instead.
+    const a: AnchorRect = { left: 306, right: 326, top: 754, bottom: 774, width: 20 };
+    const old = placePanel(a, 1440, 900, 230, 315, true);
+    expect(old.left).toBeLessThan(200);
+    const p = placePanel(a, 1440, 900, 230, 315, true, "start");
+    expect(p.left).toBe(a.left);
+    expect(p.left + 315).toBeLessThan(1440);
+    // The panel already flips above a bottom-row anchor; the defect was purely sideways, so the
+    // anchor-clearing option is deliberately not used here (it would cap this panel to 111 px).
+  });
+
   it("leaves other panels' old clamping alone", () => {
     const a = anchor(60, 92);
     const p = placePanel(a, 768, 1024, 958, 380, false);

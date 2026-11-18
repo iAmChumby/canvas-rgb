@@ -210,7 +210,9 @@ export function FrameStrip(props: FrameStripProps) {
             <NumberField
               label="Frames per second"
               unit="fps"
-              value={fps ?? 10}
+              value={fps}
+              // Unequal holds have no fps; an empty field says so instead of a made-up 10 (#481).
+              placeholder="mixed"
               min={FPS_MIN}
               max={FPS_MAX}
               onCommit={props.onFps}
@@ -326,7 +328,13 @@ function Connector({
         )}
       </button>
       <span className={s.connectorWord}>{word}</span>
-      <Popover anchor={ref} open={open} onClose={() => setOpen(false)} label={`Transition after frame ${index + 1}`}>
+      <Popover
+        anchor={ref}
+        open={open}
+        onClose={() => setOpen(false)}
+        label={`Transition after frame ${index + 1}`}
+        align="start"
+      >
         <div className={s.transition}>
           <p className={s.transitionTitle}>
             {last ? `Frame ${index + 1} to frame 1` : `Frame ${index + 1} to frame ${index + 2}`}
