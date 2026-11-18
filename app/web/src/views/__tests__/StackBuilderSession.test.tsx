@@ -4,6 +4,7 @@
 // at the lift rather than on every move.
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { plainEntry } from "@/test/historyGuard";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dismissNotifications, NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
@@ -49,6 +50,7 @@ beforeAll(() => {
 });
 
 afterEach(async () => {
+  plainEntry();
   vi.useRealTimers();
   cleanup();
   vi.restoreAllMocks();

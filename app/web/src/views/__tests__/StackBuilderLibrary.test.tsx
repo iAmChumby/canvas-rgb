@@ -4,6 +4,7 @@
 // under the finger with Shift.
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { plainEntry } from "@/test/historyGuard";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dismissNotifications, NotifyHost } from "@/components/Notify";
 import { getSnap, refreshAll } from "@/lib/store";
@@ -48,6 +49,7 @@ beforeAll(() => {
 });
 
 afterEach(async () => {
+  plainEntry();
   cleanup();
   vi.restoreAllMocks();
   act(() => dismissNotifications());

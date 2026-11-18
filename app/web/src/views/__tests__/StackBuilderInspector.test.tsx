@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { plainEntry } from "@/test/historyGuard";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
@@ -41,7 +42,10 @@ beforeAll(() => {
     ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON: () => ({}) }) as DOMRect) as typeof Range.prototype.getBoundingClientRect;
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  plainEntry();
+  cleanup();
+});
 
 /** The rows of the layer list, top first. */
 function layerNames(): string[] {

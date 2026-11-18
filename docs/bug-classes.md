@@ -227,6 +227,21 @@ or acts as if a step worked without checking that it did.
   already stored is removed at start, after a snapshot, only when the owner never touched it.
   The rule itself now lives in one shared place, `crates/canvas-adapters/src/drive.rs`
   (`is_driven`), so the service's boot and black paint ask it too (#413).
+- [#500](https://github.com/iAmChumby/canvas-rgb/issues/500): deleting an effect re-applied the
+  active scene with the draft gate free (`crates/canvas-daemon/src/api/effects.rs`, the delete's
+  `apply_active_ungated`), so a takeover that landed under the gate during that apply was
+  forgotten: the apply ends by clearing the takeover flag (`scenes.rs`, `apply_body`), and the
+  next commit or scene write put the scene over the lights the editor was previewing on. Fixed:
+  the delete takes `app.draft.gate()` before its store write and holds it across `stop_locked`
+  and the apply, the order `api/patterns.rs:98,150` uses. Regression test on the fakes:
+  `deleting_an_effect_keeps_a_takeover_that_lands_during_the_apply` (`tests/scenes.rs`) parks the
+  apply at a user effect's builder with a condvar, lands a takeover under the gate, and asserts it
+  still holds after the delete; red on origin/main, green after. Sibling search: every other
+  non-test `apply_active_ungated` caller holds the gate already (`draft.rs:1122,1194,1316`,
+  `first_run.rs:522`, `transient.rs:167`, `scenes.rs:722`, `api/stacks.rs:273`,
+  `api/settings.rs:361`, `api/patterns.rs:164`); `scenes::apply_active` (`scenes.rs:692`) takes the
+  scene order but no gate and has no product callers, only tests, so it is a trap rather than a
+  second sighting. No sibling found; the class fix is not due on this count.
 - **Class fix:** done (PR #23). Every user-facing claim about system state comes from a field the
   daemon or service measured, never from a constant: `DisplayInfo.blocked_by` (spine) replaces the
   hard-coded ZEUS CAST warning, and the onboarding tag names what was checked ("SignalRGB not seen").

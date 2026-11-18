@@ -1,3 +1,4 @@
+import { useInsertionEffect } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/endpoints";
@@ -260,6 +261,62 @@ describe("leaving the pattern editor", () => {
   });
 });
 
+describe("opening the pattern page by a client-side push", () => {
+  /**
+   * Next changes the history in the commit of the page it navigates to, in an insertion effect, so
+   * while the new page renders `history.state` is still the entry being left.
+   */
+  function NextCommit({ to }: { to: string }) {
+    useInsertionEffect(() => {
+      window.history.pushState({}, "", to);
+    }, [to]);
+    return null;
+  }
+
+  it("opens the editor when the entry being left is a dirty panel's guard entry (#484)", async () => {
+    // The entry being left: the effects page, with the panel's guard state on it.
+    window.history.replaceState({ canvasRgbPatternGuard: true }, "", "/effects/?state=patterns");
+    await refreshAll();
+    render(
+      <>
+        <NextCommit to={PATTERN} />
+        <PatternEditorPage />
+      </>,
+    );
+    // The editor opens on the pattern, and nothing sent the page to the effects page.
+    expect(await screen.findByRole("button", { name: "Fill all" })).toBeTruthy();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("a push that goes past a dirty panel's guard is not undone by the panel closing (#484)", async () => {
+    if (intake) await api.putPattern("pattern:Intake", intake);
+    arrive(null, "/effects/?state=patterns");
+    await refreshAll();
+    render(
+      <StripSlotsProvider>
+        <StripSlot kind="title" />
+        <StripSlot kind="actions" />
+        <EffectsView />
+      </StripSlotsProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Edit the pattern Intake" }));
+    fireEvent.click(within(await screen.findByLabelText(/, a pattern$/)).getByRole("button", { name: "Fill all" }));
+    await waitForPatternGuard();
+    await settled(["/effects/?state=patterns", "/effects/?state=patterns" + GUARD]);
+    // A link that does not ask pushes the new page's entry on top of the guard's, and the panel goes.
+    window.history.pushState({}, "", PATTERN);
+    cleanup();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await settled(["/effects/?state=patterns", "/effects/?state=patterns" + GUARD, PATTERN]);
+  });
+
+  it("still opens no editor on an entry that is the guard's own", async () => {
+    window.history.replaceState({ canvasRgbPatternGuard: true }, "", PATTERN);
+    render(<PatternEditorPage />);
+    await expectInert();
+  });
+});
+
 describe("leaving the pattern panel in the effects view", () => {
   /** The effects page with the pattern panel open on the seeded pattern. */
   async function openPanel(): Promise<HTMLElement> {
@@ -497,15 +554,25 @@ describe.each(SHAPES)("the pattern page, $name", ({ behind }) => {
     await expectInert();
   });
 
-  it.each(["Discard", "Save"] as const)("a rail link, then %s, leaves no guard entry behind the page it goes to", async (choice) => {
+  it.each(["Discard", "Save"] as const)("a rail link, then %s, replaces the editor's entry with the page it goes to", async (choice) => {
     await ready();
     fireEvent.click(screen.getByRole("link", { name: /^Devices/ }));
     await answer(choice);
-    await settled([...before, editor, "/devices/"]);
-    // One Back is the editor's page, a fresh one: the guard's copy of it is gone.
-    window.history.back();
-    await waitFor(() => expect(here()).toBe(editor));
-    expect(tracker?.urls()).toEqual([...before, editor, "/devices/"]);
+    // The editor's own entry became the page the link goes to, so one Back is the page before the
+    // editor and never a fresh editor. The guard's copy is ahead of the new page, inert (#484).
+    await settled([...before, "/devices/", editor + GUARD], before.length);
+    expect(tracker?.left).toBe(false);
+    await backOnce();
+  });
+
+  it.each(["Discard", "Save"] as const)("a rail link, then %s, leaves no entry ahead that opens an editor", async (choice) => {
+    await ready();
+    fireEvent.click(screen.getByRole("link", { name: /^Devices/ }));
+    await answer(choice);
+    await settled([...before, "/devices/", editor + GUARD], before.length);
+    // Forward onto the guard's copy: it opens no editor and lands on the effects page.
+    await forwardOnto(editor);
+    await expectInert();
   });
 
   it.each(["Discard", "Save"] as const)("Back, then %s, goes to the page it came from and never leaves the document", async (choice) => {

@@ -14,6 +14,7 @@ import {
   hasPendingNavigation,
 } from "@/lib/navigationGuard";
 import { useLeaveGuard, type LeaveReason } from "@/lib/useLeaveGuard";
+import { STACK_ENTRY_SPENT, STACK_GUARD } from "@/lib/stackRoute";
 import { refreshAll } from "@/lib/store";
 import { layersForServer, stackNameProblem } from "@/views/effects/stackDraft";
 import { nameOf } from "@/views/effects/layerText";
@@ -118,36 +119,62 @@ export function useSaveAndLeave({
   // entry of the builder's own, and the browser is warned when the window closes (#474).
   const { allowBack, dropSentinel } = useLeaveGuard({
     dirty,
-    sentinel: "canvasRgbStackGuard",
+    sentinel: STACK_GUARD,
     onAsk: (reason) => setLeaving(reason),
     onDrop: dropGuardEntry,
     isLeaving: () => pendingLeave.current,
+    // A leave takes the guard's entry back itself, however it ends: a Save as well as a Discard.
+    strictEntry: true,
   });
 
-  /** A direct load has no page behind the builder, and a save or a discard leaves the guard entry
-   *  on top of the builder's own. Land on that entry and rewrite it, so no entry the browser can
-   *  reach reopens the builder (D95.5.8). */
+  /** The close key, and a Back with no page behind: the guard entry sits on top of the builder's own.
+   *  Land on the builder's entry and rewrite it to the effects page, so one Back goes to the page the
+   *  person came from and no entry the browser can reach reopens the builder (D95.5.8). */
   const closeDirect = () => {
     pendingLeave.current = true;
     allowBack();
     dropSentinel(onClose);
   };
 
-  /** Carries out the way out the prompt was asked about, as it was asked: a Back the guard
-   *  caught is not the same leave as the close key pressed afterwards. */
+  /**
+   * Carries out the way out the prompt was asked about, as it was asked: a Back the guard
+   * caught is not the same leave as the close key pressed afterwards.
+   *
+   * The guard's entry is a copy of the builder's on top of it. A leave takes it back first, then
+   * closes or navigates from the builder's own entry, and replaces that entry, so one Back lands
+   * where the person was before the builder:
+   *   - a rail link's page change replaces the builder's entry;
+   *   - the close key, or a Back with no page of the app behind, replaces it with the effects page;
+   *   - a Back with a page behind goes to that page, and the builder's entry, marked spent, stays
+   *     ahead of it.
+   * The guard's copy stays ahead in each (a browser cannot delete a forward entry). Both leftovers
+   * carry the guard's state key, and `useStackParam` opens no builder for an entry that has it.
+   */
   const goAfterLeave = (reason: LeaveReason) => {
     pendingName.current = null;
     if (reason === "back") {
       allowBack();
       pendingLeave.current = true;
-      // Back goes past the guard entry and past the builder, one page in all. A direct load
-      // has no page behind it, so the builder closes onto the effects page instead.
-      if (openedInApp.current) window.history.go(-2);
-      else closeDirect();
+      if (openedInApp.current) {
+        // Back goes past the guard entry and past the builder, one page in all.
+        dropSentinel(() => {
+          window.history.replaceState(
+            { ...(window.history.state ?? {}), [STACK_GUARD]: STACK_ENTRY_SPENT },
+            "",
+            window.location.href,
+          );
+          window.history.back();
+        });
+      } else {
+        // A direct load has no page behind it, so the builder closes onto the effects page instead.
+        closeDirect();
+      }
       return;
     }
     if (hasPendingNavigation()) {
-      continueNavigation();
+      pendingLeave.current = true;
+      allowBack();
+      dropSentinel(() => continueNavigation({ replace: true }));
       return;
     }
     // The guard's own entry is on top of the builder's: land on the builder's entry and close.
