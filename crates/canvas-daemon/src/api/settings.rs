@@ -43,16 +43,20 @@ pub async fn put_settings(
         crate::api::output::apply_power(&app, settings.power)?;
     }
 
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        store.config.settings = settings.clone();
-        store
-            .save_config()
-            .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))?;
-    }
+    let persisted = settings.clone();
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            store.config.settings = persisted;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
 
     Ok(Json(settings))
 }
@@ -61,16 +65,19 @@ pub async fn put_settings(
 ///
 /// The "size your ARGB headers" panel goes away and stays away.
 pub async fn dismiss_zone_panel(State(app): State<Arc<App>>) -> ApiResult<Json<serde_json::Value>> {
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        store.config.zone_panel_dismissed = true;
-        store
-            .save_config()
-            .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))?;
-    }
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            store.config.zone_panel_dismissed = true;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -78,13 +85,19 @@ pub async fn dismiss_zone_panel(State(app): State<Arc<App>>) -> ApiResult<Json<s
 ///
 /// The user reached Done in the onboarding. The window stops opening by itself.
 pub async fn complete_onboarding(State(app): State<Arc<App>>) -> ApiResult<Json<serde_json::Value>> {
-    {
-        let mut store = app.store.write().await;
-        store.config.onboarding_complete = true;
-        store
-            .save_config()
-            .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))?;
-    }
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            store.config.onboarding_complete = true;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -329,14 +342,8 @@ pub async fn config_import(
         }
 
         // Reload the store from disk and apply it.
-        let store = crate::storage::Store::load_from(&home);
-        {
-            let mut guard = app
-                .store
-                .write()
-                .await;
-            *guard = store;
-        }
+        let loaded = crate::storage::Store::load_from(&home);
+        crate::store_io::store_edit(&app, |guard| *guard = loaded).await;
         // The stacks are read again from the file the import wrote, so the library shows them at
         // once and the next frame resolves them against the new layout.
         app.stacks.reload_with(&known);

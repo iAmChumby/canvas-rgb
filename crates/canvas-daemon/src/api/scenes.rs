@@ -169,43 +169,56 @@ async fn response_after_write(app: &App) -> ScenesResponse {
 
 /// Replaces the scene with `new`'s id and saves. On a failed save the old scene is back and the
 /// error says why. Returns the scene it replaced.
-pub(crate) async fn replace_saved(app: &App, new: Scene) -> ApiResult<Scene> {
-    let mut store = app.store.write().await;
-    let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == new.id) else {
-        return Err(ApiFailure::not_found(format!("no scene with the id {}", new.id)));
-    };
-    let old = std::mem::replace(&mut store.scenes.scenes[slot], new);
-    if let Err(e) = store.save_scenes() {
-        store.scenes.scenes[slot] = old;
-        return Err(save_failure(&store, e));
-    }
-    Ok(old)
+pub(crate) async fn replace_saved(app: &Arc<App>, new: Scene) -> ApiResult<Scene> {
+    let id = new.id.clone();
+    crate::store_io::store_save_rolled(
+        app,
+        move |store| {
+            let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == id) else {
+                return Err(ApiFailure::not_found(format!("no scene with the id {id}")));
+            };
+            let old = std::mem::replace(&mut store.scenes.scenes[slot], new);
+            Ok((old, slot))
+        },
+        |store| store.save_scenes(),
+        |slot, store, e, old| {
+            store.scenes.scenes[slot] = old.clone();
+            save_failure(store, e)
+        },
+    )
+    .await
 }
 
 /// Replaces every scene in `new` (by id) and saves the whole file ONCE. On a failed save every
 /// replaced scene is back as it was and the error says why; the file on disk is never half
 /// written (`write_json` writes a temp file and renames it). Returns the scenes it replaced, in
 /// the order of `new`.
-pub(crate) async fn replace_all_saved(app: &App, new: Vec<Scene>) -> ApiResult<Vec<Scene>> {
-    let mut store = app.store.write().await;
-    let mut slots = Vec::with_capacity(new.len());
-    for scene in &new {
-        let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == scene.id) else {
-            return Err(ApiFailure::not_found(format!("no scene with the id {}", scene.id)));
-        };
-        slots.push(slot);
-    }
-    let mut old = Vec::with_capacity(new.len());
-    for (slot, scene) in slots.iter().zip(new) {
-        old.push(std::mem::replace(&mut store.scenes.scenes[*slot], scene));
-    }
-    if let Err(e) = store.save_scenes() {
-        for (slot, was) in slots.iter().zip(old) {
-            store.scenes.scenes[*slot] = was;
-        }
-        return Err(save_failure(&store, e));
-    }
-    Ok(old)
+pub(crate) async fn replace_all_saved(app: &Arc<App>, new: Vec<Scene>) -> ApiResult<Vec<Scene>> {
+    crate::store_io::store_save_rolled(
+        app,
+        move |store| {
+            let mut slots = Vec::with_capacity(new.len());
+            for scene in &new {
+                let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == scene.id) else {
+                    return Err(ApiFailure::not_found(format!("no scene with the id {}", scene.id)));
+                };
+                slots.push(slot);
+            }
+            let mut old = Vec::with_capacity(new.len());
+            for (slot, scene) in slots.iter().zip(new) {
+                old.push(std::mem::replace(&mut store.scenes.scenes[*slot], scene));
+            }
+            Ok((old, slots))
+        },
+        |store| store.save_scenes(),
+        |slots, store, e, old| {
+            for (slot, was) in slots.iter().zip(old) {
+                store.scenes.scenes[*slot] = was.clone();
+            }
+            save_failure(store, e)
+        },
+    )
+    .await
 }
 
 /// A copy of the scene with this id, if there is one.
@@ -297,7 +310,7 @@ pub async fn create_scene(
         ));
     }
     let _lock = app.scene.lock().await;
-    let mut store = app.store.write().await;
+    let store = app.store.read().await;
     let mut taken: Vec<&str> = store.scenes.scenes.iter().map(|s| s.id.as_str()).collect();
     taken.push(RESERVED_SCENE_ID);
     let id = fresh_id(&slug(&name), taken);
@@ -338,11 +351,21 @@ pub async fn create_scene(
         }
         return Ok(SceneAnswer::DryRun(SceneDryRun { saved: false, scene }));
     }
-    store.scenes.scenes.push(scene.clone());
-    if let Err(e) = store.save_scenes() {
-        store.scenes.scenes.pop();
-        return Err(save_failure(&store, e));
-    }
+    drop(store);
+    let saved = scene.clone();
+    crate::store_io::store_save_rolled(
+        &app,
+        |store| {
+            store.scenes.scenes.push(saved);
+            Ok(((), ()))
+        },
+        |store| store.save_scenes(),
+        |_, store, e, _| {
+            store.scenes.scenes.pop();
+            save_failure(store, e)
+        },
+    )
+    .await?;
     Ok(SceneAnswer::Saved(scene))
 }
 
@@ -547,28 +570,36 @@ pub async fn put_scenes(
     }
 
     // One save for the lot; a failed save puts everything back.
-    {
-        let mut store = app.store.write().await;
-        let before = store.scenes.clone();
-        for (_, new) in &planned {
-            if let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == new.id) {
-                store.scenes.scenes[slot] = new.clone();
-            }
-        }
-        if let Some(order) = &reorder {
-            let mut sorted = Vec::with_capacity(order.len());
-            for id in order {
-                if let Some(slot) = store.scenes.scenes.iter().position(|s| &s.id == id) {
-                    sorted.push(store.scenes.scenes[slot].clone());
+    let planned_save = planned.clone();
+    let reorder_save = reorder.clone();
+    crate::store_io::store_save_rolled(
+        &app,
+        move |store| {
+            let before = store.scenes.clone();
+            for (_, new) in &planned_save {
+                if let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == new.id) {
+                    store.scenes.scenes[slot] = new.clone();
                 }
             }
-            store.scenes.scenes = sorted;
-        }
-        if let Err(e) = store.save_scenes() {
+            if let Some(order) = &reorder_save {
+                let mut sorted = Vec::with_capacity(order.len());
+                for id in order {
+                    if let Some(slot) = store.scenes.scenes.iter().position(|s| &s.id == id) {
+                        sorted.push(store.scenes.scenes[slot].clone());
+                    }
+                }
+                store.scenes.scenes = sorted;
+            }
+            Ok(((), before))
+        },
+        |store| store.save_scenes(),
+        |before, store, e, _| {
             store.scenes = before;
-            return Err(save_failure(&store, e).into());
-        }
-    }
+            save_failure(store, e)
+        },
+    )
+    .await
+    .map_err(SceneFailure::from)?;
     let active = scenes::active_scene(&app.store.read().await.scenes).id.clone();
     if let Some((old, new)) = planned.iter().find(|(_, new)| new.id == active) {
         tell_engine(&app, &lock, old, new).await;
@@ -600,26 +631,31 @@ pub async fn delete_scene(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ScenesResponse>> {
     let lock = app.scene.lock().await;
-    let was_active = {
-        let mut store = app.store.write().await;
-        let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == id) else {
-            return Err(ApiFailure::not_found(format!("no scene with the id {id}")));
-        };
-        if store.scenes.scenes.len() == 1 {
-            return Err(ApiFailure::conflict("the last scene cannot be deleted"));
-        }
-        let before = store.scenes.clone();
-        let was_active = store.scenes.active == id;
-        store.scenes.scenes.remove(slot);
-        if was_active {
-            store.scenes.active = store.scenes.scenes[0].id.clone();
-        }
-        if let Err(e) = store.save_scenes() {
+    let key = id.clone();
+    let was_active = crate::store_io::store_save_rolled(
+        &app,
+        move |store| {
+            let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == key) else {
+                return Err(ApiFailure::not_found(format!("no scene with the id {key}")));
+            };
+            if store.scenes.scenes.len() == 1 {
+                return Err(ApiFailure::conflict("the last scene cannot be deleted"));
+            }
+            let before = store.scenes.clone();
+            let was_active = store.scenes.active == key;
+            store.scenes.scenes.remove(slot);
+            if was_active {
+                store.scenes.active = store.scenes.scenes[0].id.clone();
+            }
+            Ok((was_active, before))
+        },
+        |store| store.save_scenes(),
+        |before, store, e, _| {
             store.scenes = before;
-            return Err(save_failure(&store, e));
-        }
-        was_active
-    };
+            save_failure(store, e)
+        },
+    )
+    .await?;
     // The scene is gone, so the groups it kept an HTML runtime for are named by nothing: the
     // record of the choice (#384) would otherwise outlive it.
     app.scene.set_html_kept(&id, Vec::new());
@@ -642,19 +678,28 @@ pub async fn put_active(
 ) -> ApiResult<Json<ScenesResponse>> {
     let lock = app.scene.lock().await;
     {
-        let mut store = app.store.write().await;
+        let store = app.store.read().await;
         let Some(scene) = store.scenes.scenes.iter().find(|s| s.id == request.id) else {
             return Err(ApiFailure::not_found(format!("no scene with the id {}", request.id)));
         };
         // The scene must not start more HTML runtimes than a scene may: it is about to be on the
         // lights.
         scenes::check_html_limit(&app, scene).map_err(ApiFailure::validation)?;
-        let before = std::mem::replace(&mut store.scenes.active, request.id.clone());
-        if let Err(e) = store.save_scenes() {
-            store.scenes.active = before;
-            return Err(save_failure(&store, e));
-        }
     }
+    let active_id = request.id.clone();
+    crate::store_io::store_save_rolled(
+        &app,
+        |store| {
+            let before = std::mem::replace(&mut store.scenes.active, active_id);
+            Ok(((), before))
+        },
+        |store| store.save_scenes(),
+        |before, store, e, _| {
+            store.scenes.active = before;
+            save_failure(store, e)
+        },
+    )
+    .await?;
     let _replace = crate::draft::hold_for_replace(&app).await;
     scenes::apply_with(&app, &lock, true).await;
     // The write landed: the answer is the state the daemon knows, and not a 503 that

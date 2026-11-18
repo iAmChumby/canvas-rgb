@@ -101,8 +101,8 @@ pub async fn patch_light(
     let devices = app.devices.read().await.clone();
     // A rename changes nothing the engine plays; an arrangement, a direction or a first LED does.
     let replan = patch.arrangement.is_some() || patch.reversed.is_some() || patch.first_led.is_some();
-    let (light, saved) = {
-        let mut store = app.store.write().await;
+    let (index, light, saved) = {
+        let store = app.store.read().await;
         let Some(index) = store.lights.lights.iter().position(|light| light.id == id) else {
             return Err(ApiFailure::not_found(format!("no light with the id {id}")));
         };
@@ -150,35 +150,41 @@ pub async fn patch_light(
                 Some(Some(trimmed.to_string()))
             }
         };
-        // Kept so a failed save leaves memory as it was: never ahead of the disk and the engine.
         let before = store.lights.lights[index].clone();
-        {
-            let light = &mut store.lights.lights[index];
-            if let Some(name) = name {
-                light.name = name;
-            }
-            if let Some(arrangement) = patch.arrangement {
-                light.arrangement = arrangement;
-            }
-            if let Some(reversed) = patch.reversed {
-                light.reversed = reversed;
-            }
-            if let Some(first_led) = first_led {
-                light.first_led = first_led;
-            }
+        let mut changed = before.clone();
+        if let Some(name) = name {
+            changed.name = name;
+        }
+        if let Some(arrangement) = patch.arrangement {
+            changed.arrangement = arrangement;
+        }
+        if let Some(reversed) = patch.reversed {
+            changed.reversed = reversed;
+        }
+        if let Some(first_led) = first_led {
+            changed.first_led = first_led;
         }
         // A patch that changes nothing leaves the file alone: the light on disk is still right.
-        let saved = store.lights.lights[index] != before;
-        if saved {
-            if let Err(e) = store.save_lights() {
-                store.lights.lights[index] = before;
-                return Err(ApiFailure::service_unavailable(format!(
-                    "the light was not changed: {e}"
-                )));
-            }
-        }
-        (store.lights.lights[index].clone(), saved)
+        let saved = changed != before;
+        (index, changed, saved)
     };
+    if saved {
+        let persisted = light.clone();
+        crate::store_io::store_save_rolled(
+            &app,
+            |store| {
+                let old = std::mem::replace(&mut store.lights.lights[index], persisted);
+                Ok(((), old))
+            },
+            |store| store.save_lights(),
+            |old, store, e, _| {
+                // A failed save leaves memory as it was: never ahead of the disk and the engine.
+                store.lights.lights[index] = old;
+                ApiFailure::service_unavailable(format!("the light was not changed: {e}"))
+            },
+        )
+        .await?;
+    }
 
     // The engine follows: a new arrangement or direction is a new plan for the light's group.
     if replan && saved {
@@ -221,8 +227,8 @@ pub async fn delete_light(
     let lock = app.scene.lock().await;
     let _gate = app.draft.gate().lock().await;
 
-    let (removed, emptied) = {
-        let mut store = app.store.write().await;
+    let (removed, emptied, lights, scenes) = {
+        let store = app.store.read().await;
         let Some(index) = store.lights.lights.iter().position(|light| light.id == id) else {
             return Err(ApiFailure::not_found(format!("no light with the id {id}")));
         };
@@ -239,16 +245,14 @@ pub async fn delete_light(
                 "the light was not removed: a snapshot could not be taken: {e}"
             )));
         }
-        // Kept so a failed save leaves memory as it was: never ahead of the disk and the engine.
-        let before_lights = store.lights.clone();
-        let before_scenes = store.scenes.clone();
-        let removed = store.lights.lights[index].clone();
-
-        store.lights.lights.remove(index);
+        let mut lights = store.lights.clone();
+        let mut scenes = store.scenes.clone();
+        let removed = lights.lights[index].clone();
+        lights.lights.remove(index);
         // The light leaves every group. A group it leaves empty is named in the answer; the repair
         // below drops it, as it drops any other empty group.
         let mut emptied: Vec<EmptiedGroup> = Vec::new();
-        for scene in &mut store.scenes.scenes {
+        for scene in &mut scenes.scenes {
             let mut changed = false;
             for group in &mut scene.groups {
                 if group.members.iter().any(|member| member == &id) {
@@ -269,19 +273,24 @@ pub async fn delete_light(
                 scene.rev += 1;
             }
         }
-        // Clone the lights: both fields are reached through the write guard's DerefMut, so a
-        // mutable borrow of `scenes` and an immutable one of `lights` cannot be held together.
-        let current_lights = store.lights.clone();
-        let _changes = crate::scenes::repair(&mut store.scenes, &current_lights);
-
-        if let Err(e) = store.save_lights() {
-            store.lights = before_lights;
-            store.scenes = before_scenes;
-            return Err(ApiFailure::service_unavailable(format!(
-                "the light was not removed: {e}"
-            )));
-        }
-        if let Err(e) = store.save_scenes() {
+        let _changes = crate::scenes::repair(&mut scenes, &lights);
+        (removed, emptied, lights, scenes)
+    };
+    let next_lights = lights.clone();
+    let next_scenes = scenes.clone();
+    crate::store_io::store_save_rolled(
+        &app,
+        |store| {
+            // Kept so a failed save leaves memory as it was: never ahead of the disk and the engine.
+            let before_lights = std::mem::replace(&mut store.lights, next_lights);
+            let before_scenes = std::mem::replace(&mut store.scenes, next_scenes);
+            Ok(((), (before_lights, before_scenes)))
+        },
+        |store| {
+            store.save_lights()?;
+            store.save_scenes()
+        },
+        |(before_lights, before_scenes), store, e, _| {
             store.lights = before_lights;
             store.scenes = before_scenes;
             // Best effort: put the lights file back too, so a half-written pair is not left behind.
@@ -289,12 +298,10 @@ pub async fn delete_light(
                 "lights.json could not be put back after scenes.json failed to save",
                 store.save_lights(),
             );
-            return Err(ApiFailure::service_unavailable(format!(
-                "the light was not removed: {e}"
-            )));
-        }
-        (removed, emptied)
-    };
+            ApiFailure::service_unavailable(format!("the light was not removed: {e}"))
+        },
+    )
+    .await?;
 
     // The scene changed, so it is replanned and published the way a patch that changes the
     // arrangement is: the editor sees the light gone and its groups repaired. The scene order is

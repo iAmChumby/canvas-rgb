@@ -36,6 +36,7 @@ pub mod scenes;
 pub mod preview;
 pub mod state;
 pub mod stack;
+pub mod store_io;
 pub mod stacks;
 pub mod storage;
 pub mod strip_read_guard;

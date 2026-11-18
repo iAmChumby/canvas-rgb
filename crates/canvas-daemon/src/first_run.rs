@@ -403,7 +403,7 @@ pub async fn size_headers(
         );
         drop(guard);
         // The store's copy is what a chain commit and an export write back: keep it in step.
-        app.store.write().await.zones.sizes = file.sizes;
+        crate::store_io::store_edit(app, |store| store.zones.sizes = file.sizes).await;
     }
 
     // Read the devices again, so the scene and the engine see the new LED counts (the list
@@ -421,22 +421,31 @@ pub async fn size_headers(
 
     // The lights that come of the sizing join the hardware map, and the first-run scene takes
     // them: they were skipped when the scene was made, because the headers had no LEDs then.
-    {
-        let mut store = app.store.write().await;
-        let added = store.sync_lights_from(&devices);
-        if added > 0 {
-            tracing::info!(added, "the sized headers are lights now");
-        }
-        // A migration that is still held (the layouts place a device that has not arrived)
-        // runs now, with the devices the sizing left.
-        store.finish_scenes(&devices);
-        if store.refresh_first_run_scene() {
-            tracing::info!("the first run's scene holds every light");
-            crate::logging::warn_if_err(
-                "the first run could not save the scenes",
-                store.save_scenes(),
-            );
-        }
+    let for_store = devices.to_vec();
+    let saved = crate::store_io::store_save(
+        app,
+        |_store| Ok(()),
+        move |store| {
+            let added = store.sync_lights_from(&for_store);
+            if added > 0 {
+                tracing::info!(added, "the sized headers are lights now");
+            }
+            // A migration that is still held (the layouts place a device that has not arrived)
+            // runs now, with the devices the sizing left.
+            store.finish_scenes(&for_store);
+            if store.refresh_first_run_scene() {
+                tracing::info!("the first run's scene holds every light");
+                crate::logging::warn_if_err(
+                    "the first run could not save the scenes",
+                    store.save_scenes(),
+                );
+            }
+            Ok(())
+        },
+    )
+    .await;
+    if let Err(e) = saved {
+        tracing::warn!(error = %e.message, "the first run could not write its lights and scenes to the store");
     }
     devices
 }

@@ -486,15 +486,26 @@ async fn commit_the_setup(
         )));
     }
 
-    let saved = {
-        // `zones.json` is written whole from the store's copy, and the sizes the first run and a
-        // zone PATCH saved live in `app.zones`: the copy takes them first, so the commit keeps
-        // every other header's saved length.
-        let sizes = app.zones.read().await.clone();
-        let mut store = app.store.write().await;
-        store.zones.sizes = sizes;
-        store.apply_chain_plan(&plan, Some((&device_id, zone, plan.final_leds)))
-    };
+    // `zones.json` is written whole from the store's copy, and the sizes the first run and a
+    // zone PATCH saved live in `app.zones`: the copy takes them first, so the commit keeps
+    // every other header's saved length. The plan is applied and saved on a snapshot off the
+    // runtime worker, so a stalled disk cannot hold the store lock (#241).
+    let sizes = app.zones.read().await.clone();
+    let plan_commit = plan.clone();
+    let device_key = device_id.clone();
+    let saved = crate::store_io::store_save(
+        app,
+        |store| {
+            store.zones.sizes = sizes;
+            Ok(())
+        },
+        move |store| {
+            store
+                .apply_chain_plan(&plan_commit, Some((&device_key, zone, plan_commit.final_leds)))
+                .map_err(|e| ApiFailure::internal(e.to_string()))
+        },
+    )
+    .await;
     if let Err(e) = saved {
         // Memory is back already: the store puts it back itself. Put the three files and the
         // header back too. When either fails, both records stay and start-up replays them.
@@ -525,10 +536,10 @@ async fn commit_the_setup(
         if rolled_back {
             crate::chain_records::delete_intent(&home);
             tracing::info!(device = %id, zone, "the commit could not be saved: its files are back and the setup is still open");
-            return Err(ApiFailure::service_unavailable(format!("the chain was not saved: {e}")));
+            return Err(ApiFailure::service_unavailable(format!("the chain was not saved: {}", e.message)));
         }
         return Err(ApiFailure::service_unavailable(format!(
-            "the chain was not saved, and its rollback did not finish; the next start finishes it: {e}"
+            "the chain was not saved, and its rollback did not finish; the next start finishes it: {}", e.message
         )));
     }
 
@@ -634,12 +645,16 @@ async fn empty_the_setup(
         let store = app.store.read().await;
         crate::chain_plan::plan_empty(&store.lights, &store.scenes, &device_id, zone)
     };
-    {
-        let mut store = app.store.write().await;
-        store.apply_chain_plan(&plan, None).map_err(|e| {
-            ApiFailure::service_unavailable(format!("the empty header was not saved: {e}"))
-        })?;
-    }
+    crate::store_io::store_save(
+        app,
+        |_store| Ok(()),
+        move |store| {
+            store.apply_chain_plan(&plan, None).map_err(|e| {
+                ApiFailure::service_unavailable(format!("the empty header was not saved: {e}"))
+            })
+        },
+    )
+    .await?;
     crate::scenes::apply_for_devices(app).await;
     tracing::info!(device = %id, zone, "a chain is empty: its lights left the hardware map");
     Ok(serde_json::json!({ "ok": true, "leds": leds }))
@@ -796,12 +811,12 @@ async fn roll_back_intent(
     // is what it must run on now, and the supervisor's sizes must be those.
     let reloaded = crate::storage::Store::load_from(home);
     let sizes = reloaded.zones.sizes.clone();
-    {
-        let mut store = app.store.write().await;
+    crate::store_io::store_edit(app, |store| {
         store.lights = reloaded.lights;
         store.scenes = reloaded.scenes;
         store.zones = reloaded.zones;
-    }
+    })
+    .await;
     *app.zones.write().await = sizes;
 
     let resized = {

@@ -324,13 +324,22 @@ pub async fn patch_defaults(
         )));
     }
     let fitted = fit_props_to_schema(&schema, props, "the starting values");
-    let mut store = app.store.write().await;
-    let mut merged = store.effects.saved.get(&schema.id).cloned().unwrap_or_default();
-    merged.extend(fitted);
-    store.effects.saved.insert(schema.id.clone(), merged.clone());
-    store
-        .save_effects()
-        .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
+    let id = schema.id.clone();
+    let merged = crate::store_io::store_save(
+        &app,
+        move |store| {
+            let mut merged = store.effects.saved.get(&id).cloned().unwrap_or_default();
+            merged.extend(fitted);
+            store.effects.saved.insert(id, merged.clone());
+            Ok(merged)
+        },
+        |store| {
+            store
+                .save_effects()
+                .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))
+        },
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": merged })))
 }
 
@@ -342,20 +351,25 @@ pub async fn put_favorite(
 ) -> ApiResult<Json<serde_json::Value>> {
     let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        store.effects.favorites.retain(|f| f != &schema.id);
-        if request.favorite {
-            store.effects.favorites.push(schema.id.clone());
-        }
-        store.effects.favorites.sort();
-        store
-            .save_effects()
-            .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
-    }
+    let id = schema.id.clone();
+    let favorite = request.favorite;
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            store.effects.favorites.retain(|f| f != &id);
+            if favorite {
+                store.effects.favorites.push(id.clone());
+            }
+            store.effects.favorites.sort();
+            Ok(())
+        },
+        |store| {
+            store
+                .save_effects()
+                .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))
+        },
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "favorite": request.favorite })))
 }
 
@@ -369,25 +383,29 @@ pub async fn put_effect(
 ) -> ApiResult<Json<serde_json::Value>> {
     let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        store.effects.saved.insert(schema.id.clone(), detail.props.clone());
-        store
-            .effects
-            .presets
-            .insert(schema.id.clone(), detail.user_presets.clone());
-        store.effects.favorites.retain(|f| f != &schema.id);
-        if detail.favorite {
-            store.effects.favorites.push(schema.id.clone());
-        }
-        store.effects.favorites.sort();
-        store
-            .save_effects()
-            .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
-    }
+    let id = schema.id.clone();
+    let props = detail.props.clone();
+    let presets = detail.user_presets.clone();
+    let favorite = detail.favorite;
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            store.effects.saved.insert(id.clone(), props);
+            store.effects.presets.insert(id.clone(), presets);
+            store.effects.favorites.retain(|f| f != &id);
+            if favorite {
+                store.effects.favorites.push(id.clone());
+            }
+            store.effects.favorites.sort();
+            Ok(())
+        },
+        |store| {
+            store
+                .save_effects()
+                .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))
+        },
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "ok": true, "id": schema.id })))
 }
 
@@ -525,27 +543,17 @@ fn clash(schema: &PropertySchema, user: &[Preset], name: &str, except: Option<&s
         })
 }
 
-/// Stores the new list for an effect and writes `effects.json`. When the write fails the list goes
-/// back to what it was, so the answer to the client and the memory agree: nothing half-saved.
-fn commit_presets(
-    store: &mut crate::storage::Store,
-    id: &str,
-    next: Vec<Preset>,
-) -> Result<(), ApiFailure> {
-    let before = store.effects.presets.get(id).cloned();
-    store.effects.presets.insert(id.to_string(), next);
-    if let Err(e) = store.save_effects() {
-        match before {
-            Some(list) => {
-                store.effects.presets.insert(id.to_string(), list);
-            }
-            None => {
-                store.effects.presets.remove(id);
-            }
+/// Puts an effect's preset list back after a failed save, so the answer to the client and the
+/// memory agree: nothing half-saved.
+fn restore_presets(store: &mut crate::storage::Store, id: &str, before: Option<Vec<Preset>>) {
+    match before {
+        Some(list) => {
+            store.effects.presets.insert(id.to_string(), list);
         }
-        return Err(ApiFailure::internal(format!("could not save the effects: {e}")));
+        None => {
+            store.effects.presets.remove(id);
+        }
     }
-    Ok(())
 }
 
 /// `POST /api/v1/effects/{id}/presets`.
@@ -569,18 +577,36 @@ pub async fn create_preset(
     let name = clean_preset_name(&request.name)?;
     check_preset_caps(&request.props)?;
     let props = fit_props_to_schema(&schema, request.props, &name);
-    let mut store = app.store.write().await;
-    let mut list = store.effects.presets.get(&schema.id).cloned().unwrap_or_default();
-    if clash(&schema, &list, &name, None) {
-        return Err(ApiFailure::conflict(format!("{name} is already a preset of this effect")));
-    }
-    if list.len() >= PRESETS_PER_EFFECT_MAX {
-        return Err(ApiFailure::validation(format!(
-            "an effect has at most {PRESETS_PER_EFFECT_MAX} presets"
-        )));
-    }
-    list.push(Preset { name, props });
-    commit_presets(&mut store, &schema.id, list.clone())?;
+    let id = schema.id.clone();
+    let list = {
+        let store = app.store.read().await;
+        let mut list = store.effects.presets.get(&id).cloned().unwrap_or_default();
+        if clash(&schema, &list, &name, None) {
+            return Err(ApiFailure::conflict(format!("{name} is already a preset of this effect")));
+        }
+        if list.len() >= PRESETS_PER_EFFECT_MAX {
+            return Err(ApiFailure::validation(format!(
+                "an effect has at most {PRESETS_PER_EFFECT_MAX} presets"
+            )));
+        }
+        list.push(Preset { name, props });
+        list
+    };
+    let next = list.clone();
+    crate::store_io::store_save_rolled(
+        &app,
+        |store| {
+            let before = store.effects.presets.get(&id).cloned();
+            store.effects.presets.insert(id.clone(), next.clone());
+            Ok(((), (before, id.clone())))
+        },
+        |store| store.save_effects(),
+        |(before, key), store, e, _| {
+            restore_presets(store, &key, before);
+            ApiFailure::internal(format!("could not save the effects: {e}"))
+        },
+    )
+    .await?;
     Ok(Json(PresetsResponse { user_presets: list }))
 }
 
@@ -598,27 +624,45 @@ pub async fn replace_preset(
     let rename_to = request.rename_to.as_deref().map(clean_preset_name).transpose()?;
     check_preset_caps(&request.props)?;
     let props = fit_props_to_schema(&schema, request.props, &name);
-    let mut store = app.store.write().await;
-    let mut list = store.effects.presets.get(&schema.id).cloned().unwrap_or_default();
-    let index = list
-        .iter()
-        .position(|p| p.name == name)
-        .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
-    if list[index].props != request.expected {
-        return Err(ApiFailure::conflict(format!("{name} was changed in another window")));
-    }
-    if let Some(new_name) = &rename_to {
-        if clash(&schema, &list, new_name, Some(&name)) {
-            return Err(ApiFailure::conflict(format!(
-                "{new_name} is already a preset of this effect"
-            )));
+    let id = schema.id.clone();
+    let list = {
+        let store = app.store.read().await;
+        let mut list = store.effects.presets.get(&id).cloned().unwrap_or_default();
+        let index = list
+            .iter()
+            .position(|p| p.name == name)
+            .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
+        if list[index].props != request.expected {
+            return Err(ApiFailure::conflict(format!("{name} was changed in another window")));
         }
-    }
-    list[index].props = props;
-    if let Some(new_name) = rename_to {
-        list[index].name = new_name;
-    }
-    commit_presets(&mut store, &schema.id, list.clone())?;
+        if let Some(new_name) = &rename_to {
+            if clash(&schema, &list, new_name, Some(&name)) {
+                return Err(ApiFailure::conflict(format!(
+                    "{new_name} is already a preset of this effect"
+                )));
+            }
+        }
+        list[index].props = props;
+        if let Some(new_name) = rename_to.clone() {
+            list[index].name = new_name;
+        }
+        list
+    };
+    let next = list.clone();
+    crate::store_io::store_save_rolled(
+        &app,
+        |store| {
+            let before = store.effects.presets.get(&id).cloned();
+            store.effects.presets.insert(id.clone(), next.clone());
+            Ok(((), (before, id.clone())))
+        },
+        |store| store.save_effects(),
+        |(before, key), store, e, _| {
+            restore_presets(store, &key, before);
+            ApiFailure::internal(format!("could not save the effects: {e}"))
+        },
+    )
+    .await?;
     Ok(Json(PresetsResponse { user_presets: list }))
 }
 
@@ -629,14 +673,32 @@ pub async fn delete_preset(
 ) -> ApiResult<Json<PresetsResponse>> {
     let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
-    let mut store = app.store.write().await;
-    let mut list = store.effects.presets.get(&schema.id).cloned().unwrap_or_default();
-    let index = list
-        .iter()
-        .position(|p| p.name == name)
-        .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
-    list.remove(index);
-    commit_presets(&mut store, &schema.id, list.clone())?;
+    let id = schema.id.clone();
+    let list = {
+        let store = app.store.read().await;
+        let mut list = store.effects.presets.get(&id).cloned().unwrap_or_default();
+        let index = list
+            .iter()
+            .position(|p| p.name == name)
+            .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
+        list.remove(index);
+        list
+    };
+    let next = list.clone();
+    crate::store_io::store_save_rolled(
+        &app,
+        |store| {
+            let before = store.effects.presets.get(&id).cloned();
+            store.effects.presets.insert(id.clone(), next.clone());
+            Ok(((), (before, id.clone())))
+        },
+        |store| store.save_effects(),
+        |(before, key), store, e, _| {
+            restore_presets(store, &key, before);
+            ApiFailure::internal(format!("could not save the effects: {e}"))
+        },
+    )
+    .await?;
     Ok(Json(PresetsResponse { user_presets: list }))
 }
 
@@ -1054,16 +1116,26 @@ pub async fn delete_effect(
     // would come back, unseen, the day the same file is imported again.
     let mut presets_removed = 0usize;
     if !query.keep_presets {
-        let mut store = app.store.write().await;
-        if let Some(list) = store.effects.presets.remove(&id) {
-            presets_removed = list.len();
-            if let Err(e) = store.save_effects() {
-                store.effects.presets.insert(id.clone(), list);
-                return Err(ApiFailure::internal(format!(
+        let key = id.clone();
+        presets_removed = crate::store_io::store_save_rolled(
+            &app,
+            |store| {
+                let Some(list) = store.effects.presets.remove(&key) else {
+                    return Ok((0, None));
+                };
+                Ok((list.len(), Some((key.clone(), list))))
+            },
+            |store| store.save_effects(),
+            |before, store, e, _| {
+                if let Some((key, list)) = before {
+                    store.effects.presets.insert(key, list);
+                }
+                ApiFailure::internal(format!(
                     "the effect file is gone but its presets could not be removed: {e}"
-                )));
-            }
-        }
+                ))
+            },
+        )
+        .await?;
     }
 
     // The effect was the active one: the daemon falls back the same way it does when

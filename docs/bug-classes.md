@@ -1336,3 +1336,38 @@ whose meaning is how high it reaches).
   does not cover: an effect in another crate that the daemon wraps without saying so, and the
   blend of a stack whose layers answer differently (the stack answers the cell, and the top
   layer's cell is what a strip shows).
+
+### `cause:blocking-io`: a synchronous file write inside an async handler, under the store lock
+
+The daemon's config, scenes, lights, effects, zones, displays and peripherals are written by
+synchronous methods on `Store` (temp file, flush, `sync_all`, rename). A handler that took
+`app.store.write().await`, changed the store and called one of those methods while holding the
+guard parked a Tokio worker on the disk and made every reader wait for the write through the same
+lock. The API port kept listening, so the editor showed "Daemon connecting" rather than an
+error: a slow or stalled disk looked exactly like a dead daemon (#241).
+
+- [#241](https://github.com/iAmChumby/canvas-rgb/issues/241): the part-1 report
+  (`.build/reports/t3-241.md`, main checkout) found the same fault shape at the settings, audio,
+  scenes, effects, chains and device-sync routes but could not reproduce a permanent hang on the
+  fakes: without a slow disk the writes finish in milliseconds. The re-find on the same base
+  listed the sites below; the writes are bounded by the disk, not permanent, so a test needs an
+  injected slow writer to expose them.
+- **Class fix:** done (#241). Two helpers in `crates/canvas-daemon/src/store_io.rs` are now the
+  only path that writes the store from async code. `store_save` (and `store_save_rolled`, for
+  routes that put memory back on a failed save) change memory under the store write lock, drop
+  the lock, and write a snapshot on `spawn_blocking`; `store_edit` covers mutations with no save.
+  Keeping the mutation synchronous means a caller cancelled mid-write still sees its own change,
+  which the guard that ends a takeover applies. One per-App writer mutex is held from the mutation
+  to the commit, so writes land one at a time and in the order callers asked for, while a reader
+  never waits for the disk. Each route's own rollback and its 503 are unchanged. `GET /api/v1/settings`
+  and the other readers take only the store lock. Every site
+  on the list was moved over, plus the devices, output, lights, patterns, stacks, displays,
+  peripherals and first-run writes found in the same search. The `%ProgramData%` fail-closed
+  checks stay inside the store's save methods and are untouched.
+- **Regression test:** `crates/canvas-daemon/tests/blocking_saves.rs` holds a test-only gate in
+  `storage::write_atomic`, parks a `PUT /api/v1/settings` in it, and asserts a concurrent
+  `GET /api/v1/settings` answers 200 while the write is still parked. On the old handlers with
+  the gate added and the helper absent it times out after 3 s; on the fix it answers in 0.04 s.
+- **How to check a new store write:** it goes through `store_save` (or `store_edit` when it does
+  not write). A `Store` save called directly while an `app.store.write()` guard is held is this
+  bug again.

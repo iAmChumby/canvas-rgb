@@ -112,37 +112,66 @@ pub async fn delete_pattern(
 
     // Its favourite is keyed by the id and would be unreachable with it gone. It goes first: a
     // failed write of effects.json puts it back and leaves the pattern alone.
-    let mut store = app.store.write().await;
-    let effects_before = store.effects.clone();
-    let before = store.effects.favorites.len();
-    store.effects.favorites.retain(|favorite| favorite != &pattern.id);
-    let favorite_removed = store.effects.favorites.len() != before;
-    if let Err(e) = store.save_effects() {
-        store.effects = effects_before;
-        return Err(ApiFailure::internal(format!(
-            "the pattern was left as it was: {e}"
-        )));
-    }
+    let pid = pattern.id.clone();
+    let (effects_before, favorite_removed) = crate::store_io::store_save_rolled(
+        &app,
+        |store| {
+            let effects_before = store.effects.clone();
+            let before = store.effects.favorites.len();
+            store.effects.favorites.retain(|favorite| favorite != &pid);
+            let favorite_removed = store.effects.favorites.len() != before;
+            Ok(((effects_before.clone(), favorite_removed), effects_before))
+        },
+        |store| store.save_effects(),
+        |before, store, e, _| {
+            store.effects = before;
+            ApiFailure::internal(format!("the pattern was left as it was: {e}"))
+        },
+    )
+    .await?;
 
     let removed = match app.patterns.delete(&pattern.id) {
         Ok(Some(removed)) => removed,
         Ok(None) => {
-            store.effects = effects_before;
-            let _ = store.save_effects();
+            let before = effects_before.clone();
+            let _ = crate::store_io::store_save(
+                &app,
+                |store| {
+                    store.effects = before;
+                    Ok(())
+                },
+                |store| {
+                    store
+                        .save_effects()
+                        .map_err(|e| ApiFailure::internal(e.to_string()))
+                },
+            )
+            .await;
             return Err(ApiFailure::not_found(format!(
                 "no pattern with the id or name {id}"
             )));
         }
         Err(e) => {
             // The pattern file was not written: put its favourite back too.
-            store.effects = effects_before;
-            let _ = store.save_effects();
+            let before = effects_before.clone();
+            let _ = crate::store_io::store_save(
+                &app,
+                |store| {
+                    store.effects = before;
+                    Ok(())
+                },
+                |store| {
+                    store
+                        .save_effects()
+                        .map_err(|e| ApiFailure::internal(e.to_string()))
+                },
+            )
+            .await;
             return Err(ApiFailure::internal(format!(
                 "the pattern could not be deleted, and nothing was removed: {e}"
             )));
         }
     };
-    drop(store);
 
     // A draft of this pattern holds the lights: it ends here, before the pattern is gone, or it
     // would put a pattern that cannot be built any more back on the lights.

@@ -37,13 +37,20 @@ pub async fn put_source(
     State(app): State<Arc<App>>,
     Json(source): Json<AudioSource>,
 ) -> ApiResult<Json<ResolvedAudioSource>> {
-    {
-        let mut store = app.store.write().await;
-        store.config.audio_source = source.clone();
-        store
-            .save_config()
-            .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))?;
-    }
+    let persisted = source.clone();
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            store.config.audio_source = persisted;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
     // Resolve the new pick first (nit), then apply it, so the answer and the
     // just-opened capture cannot disagree across two different enumerations.
     let inputs = Arc::clone(&app.inputs);

@@ -213,41 +213,73 @@ pub async fn delete_stack(
 
     // Its presets and its favourite are keyed by the id and would be unreachable with it gone.
     // They go first: a failed write of effects.json puts them back and leaves the stack alone.
-    let mut store = app.store.write().await;
-    let effects_before = store.effects.clone();
-    let mut presets_removed = 0usize;
-    if let Some(list) = store.effects.presets.remove(&stack.id) {
-        presets_removed = list.len();
-    }
-    let before = store.effects.favorites.len();
-    store.effects.favorites.retain(|favorite| favorite != &stack.id);
-    let favorite_removed = store.effects.favorites.len() != before;
-    if let Err(e) = store.save_effects() {
-        store.effects = effects_before;
-        return Err(ApiFailure::internal(format!(
-            "the stack and its presets were left as they were: {e}"
-        )));
-    }
+    let sid = stack.id.clone();
+    let (effects_before, presets_removed, favorite_removed) = crate::store_io::store_save_rolled(
+        &app,
+        |store| {
+            let effects_before = store.effects.clone();
+            let mut presets_removed = 0usize;
+            if let Some(list) = store.effects.presets.remove(&sid) {
+                presets_removed = list.len();
+            }
+            let before = store.effects.favorites.len();
+            store.effects.favorites.retain(|favorite| favorite != &sid);
+            let favorite_removed = store.effects.favorites.len() != before;
+            Ok((
+                (effects_before.clone(), presets_removed, favorite_removed),
+                effects_before,
+            ))
+        },
+        |store| store.save_effects(),
+        |before, store, e, _| {
+            store.effects = before;
+            ApiFailure::internal(format!("the stack and its presets were left as they were: {e}"))
+        },
+    )
+    .await?;
 
     let removed = match app.stacks.delete(&stack.id) {
         Ok(Some(removed)) => removed,
         Ok(None) => {
-            store.effects = effects_before;
-            let _ = store.save_effects();
+            let before = effects_before.clone();
+            let _ = crate::store_io::store_save(
+                &app,
+                |store| {
+                    store.effects = before;
+                    Ok(())
+                },
+                |store| {
+                    store
+                        .save_effects()
+                        .map_err(|e| ApiFailure::internal(e.to_string()))
+                },
+            )
+            .await;
             return Err(ApiFailure::not_found(format!(
                 "no stack with the id or name {id}"
             )));
         }
         Err(e) => {
             // The stack file was not written: put its presets and its favourite back too.
-            store.effects = effects_before;
-            let _ = store.save_effects();
+            let before = effects_before.clone();
+            let _ = crate::store_io::store_save(
+                &app,
+                |store| {
+                    store.effects = before;
+                    Ok(())
+                },
+                |store| {
+                    store
+                        .save_effects()
+                        .map_err(|e| ApiFailure::internal(e.to_string()))
+                },
+            )
+            .await;
             return Err(ApiFailure::internal(format!(
                 "the stack could not be deleted, and nothing was removed: {e}"
             )));
         }
     };
-    drop(store);
 
     // A stack a group plays ends with that group dark and a note, the ending a deleted prior
     // effect gets.
