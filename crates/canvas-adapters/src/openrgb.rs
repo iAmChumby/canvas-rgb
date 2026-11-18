@@ -688,6 +688,12 @@ impl OpenRgbAdapter {
         guard(&self.link.session).detection_signals
     }
 
+    /// Protocol 6 and later: how many ACKs of packet 140 this connection has heard. A test waits on it
+    /// to know that the server has answered the rescan packet.
+    pub fn rescan_acks(&self) -> u64 {
+        guard(&self.link.session).rescan_acks
+    }
+
     /// How a rescan on this adapter waits for detection to settle.
     pub fn rescan_timing(&self) -> RescanTiming {
         self.rescan_timing
