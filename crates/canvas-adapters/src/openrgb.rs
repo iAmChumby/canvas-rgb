@@ -56,7 +56,10 @@ const ENUMERATE_ATTEMPTS: u32 = 3;
 /// **unsettled** state, whoever began the detection and whether or not a packet 140 was sent; and
 /// while it is unsettled the cached controller list never changes, a list read is answered with the
 /// cached one, and no frame is written (protocol 5 names a controller by its position, so a frame
-/// sent while the controllers register again can land on another device). The list is **settled**
+/// sent while the controllers register again can land on another device). The hold begins earlier than
+/// the first 100: OpenRGB swaps its new list into the server and sends the 100 only afterwards
+/// (`ResourceManager.cpp:1041`, `:1045`, `:1067`), so the adapter holds from the moment it sends packet 140
+/// (`Session::rescan_requests`, #509) until a 100 or the end of that call. The list is **settled**
 /// once a read finds it non-empty and no list change arrived for `settle` before it began or
 /// while it ran; the list read then replaces the cached one, shorter or longer, and the frames
 /// resume. A list that stays empty never settles, however long that takes: an empty list is what a
@@ -276,6 +279,12 @@ struct Session {
     /// OpenRGB's list is changing (#290): a list change (100) arrived and no read has found the list
     /// settled since. While set, `controllers` is not replaced and no frame is written.
     unsettled: bool,
+    /// Protocol 5: how many packets 140 this adapter has sent that no list change (100) has followed yet (#509).
+    /// While it is above zero the list may already be swapped in OpenRGB (it swaps the list into its server
+    /// and sends the 100 only afterwards, `ResourceManager.cpp:1041`, `:1045`, `:1067`), and a position names
+    /// whatever sits there now, so the list is held exactly as when unsettled: no frame, no resize, no
+    /// list read replaces the cached list. A 100 hands the hold over to `unsettled` and clears this.
+    rescan_requests: u32,
     /// How many list changes (100) this session has seen. A read that began at one count and
     /// ended at another saw a list that changed under it.
     list_changes: u64,
@@ -355,6 +364,7 @@ impl Default for Session {
             resizing: HashMap::new(),
             discovering: 0,
             unsettled: false,
+            rescan_requests: 0,
             list_changes: 0,
             last_list_change: None,
             settle_failed_at: None,
@@ -526,6 +536,25 @@ struct Settling<'a> {
 impl Drop for Settling<'_> {
     fn drop(&mut self) {
         guard(&self.link.session).settling = false;
+    }
+}
+
+/// The hold a protocol 5 rescan puts on the list from the moment it sends packet 140 (#509): released
+/// however the call ends, unless a list change (100) already took it over.
+struct RescanHold<'a> {
+    link: &'a Link,
+    /// The session the hold was taken in: a reconnect starts a session with no hold.
+    epoch: u64,
+    /// The list change count when it was taken. A 100 after that has cleared every hold taken before it.
+    changes: u64,
+}
+
+impl Drop for RescanHold<'_> {
+    fn drop(&mut self) {
+        let mut session = guard(&self.link.session);
+        if session.epoch == self.epoch && session.list_changes == self.changes {
+            session.rescan_requests = session.rescan_requests.saturating_sub(1);
+        }
     }
 }
 
@@ -746,7 +775,10 @@ impl OpenRgbAdapter {
         let _ = changes.borrow_and_update();
         let started = Instant::now();
         let cap = started + timing.cap;
-        let changes_at_start = guard(&self.link.session).list_changes;
+        // Held before packet 140 goes out, not when the 100 comes back: OpenRGB swaps its list in first and
+        // tells clients after (#509), and a frame by position sent in between lands on another device.
+        let hold = self.hold_for_rescan();
+        let changes_at_start = hold.changes;
         self.send(0, REQUEST_RESCAN_DEVICES, &[]).await?;
         loop {
             self.require_connected()?;
@@ -792,6 +824,14 @@ impl OpenRgbAdapter {
                 () = sleep_until(wake.min(cap).min(Instant::now() + LINK_CHECK)) => {}
             }
         }
+    }
+
+    /// Holds the list from now until a list change (100) or the end of the rescan call, whichever is first
+    /// (see `Session::rescan_requests`).
+    fn hold_for_rescan(&self) -> RescanHold<'_> {
+        let mut session = guard(&self.link.session);
+        session.rescan_requests += 1;
+        RescanHold { link: &self.link, epoch: session.epoch, changes: session.list_changes }
     }
 
     /// A rescan on protocol 6 and later: OpenRGB says when detection starts (101) and ends (103), so
@@ -908,7 +948,7 @@ impl OpenRgbAdapter {
     /// names is not to be trusted.
     fn list_is_unsettled(&self) -> bool {
         let session = guard(&self.link.session);
-        session.unsettled && !session.controllers.is_empty()
+        (session.unsettled || session.rescan_requests > 0) && !session.controllers.is_empty()
     }
 
     fn require_connected(&self) -> Result<(), AdapterError> {
@@ -959,7 +999,15 @@ impl OpenRgbAdapter {
     /// Sends a request packet and waits for nothing.
     async fn send(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<(), AdapterError> {
         let bytes = encode_packet(device, packet_id, payload)?;
-        self.write_packet(device, &bytes, false).await
+        self.write_packet(device, &bytes, false, false).await
+    }
+
+    /// Sends a packet that names a controller by its position (protocol 5) and changes it: a zone resize.
+    /// Refused while the list is unsettled, checked under the socket lock like a frame (see
+    /// [`write_packet`](Self::write_packet)).
+    async fn send_positional(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<(), AdapterError> {
+        let bytes = encode_packet(device, packet_id, payload)?;
+        self.write_packet(device, &bytes, false, true).await
     }
 
     /// Sends a frame packet (`SET_CUSTOM_MODE`, `UPDATE_LEDS`).
@@ -969,7 +1017,7 @@ impl OpenRgbAdapter {
     /// check is under the socket lock, so it cannot slip between the resize and the frame.
     async fn send_frame(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<(), AdapterError> {
         let bytes = encode_packet(device, packet_id, payload)?;
-        self.write_packet(device, &bytes, true).await
+        self.write_packet(device, &bytes, true, true).await
     }
 
     /// Writes one packet on the socket, under the socket lock.
@@ -978,12 +1026,21 @@ impl OpenRgbAdapter {
     /// given up on (the future is dropped) can leave a part of a packet on the socket: the
     /// [`SendGuard`] then breaks the link, so the next writer does not write into the middle
     /// of it.
-    async fn write_packet(&self, device: u32, bytes: &[u8], frame: bool) -> Result<(), AdapterError> {
+    ///
+    /// A packet that `positional` marks names a controller by its position on protocol 5, so it may not
+    /// go out while OpenRGB's list is unsettled or a rescan was requested and not heard from (#509). That
+    /// is checked here, under the socket lock, and not only before the caller picked the controller: the
+    /// rescan takes its hold before it writes packet 140 on this lock, so a packet that passes the check
+    /// is written before packet 140 and reaches the list as it was, and every packet after is refused.
+    async fn write_packet(&self, device: u32, bytes: &[u8], frame: bool, positional: bool) -> Result<(), AdapterError> {
         let mut writer = self.link.writer.lock().await;
         // A write that was cut in the middle left the socket with a part of a packet on it:
         // the socket is dropped instead of carrying on.
         if self.link.broken.swap(false, Ordering::SeqCst) {
             *writer = None;
+        }
+        if positional && self.list_is_unsettled() {
+            return Err(AdapterError::Protocol(LIST_UNSETTLED_MESSAGE.into()));
         }
         if frame && self.resize_in_flight(device) {
             return Err(AdapterError::Protocol(format!(
@@ -1090,6 +1147,10 @@ impl OpenRgbAdapter {
         let changes_before = {
             let session = guard(&self.link.session);
             if session.unsettled && !session.controllers.is_empty() && !list_is_quiet(&session, settle) {
+                return Ok(session.controllers.clone());
+            }
+            // A rescan was requested and OpenRGB has not said anything yet: its list may be swapped already.
+            if session.rescan_requests > 0 && !session.controllers.is_empty() {
                 return Ok(session.controllers.clone());
             }
             session.list_changes
@@ -1497,6 +1558,7 @@ impl DeviceAdapter for OpenRgbAdapter {
             session.mode_sent.clear();
             session.resizing.clear();
             session.unsettled = false;
+            session.rescan_requests = 0;
             session.list_changes = 0;
             session.last_list_change = None;
             session.settle_failed_at = None;
@@ -1560,7 +1622,7 @@ impl DeviceAdapter for OpenRgbAdapter {
         // skipped for the rest of the connection.
         let _resize = ResizeGuard { link: &self.link, index: controller.addr };
         let resized = async {
-            self.send(controller.addr, RESIZE_ZONE, &resize_zone_payload(zone, size)).await?;
+            self.send_positional(controller.addr, RESIZE_ZONE, &resize_zone_payload(zone, size)).await?;
             // The next frame to this controller must re-enter custom mode after OpenRGB reconfigures it.
             guard(&self.link.session).custom_mode.remove(&controller.addr);
             // Ordered after the resize on the same socket, so the reply reflects the new size.
@@ -1672,6 +1734,8 @@ async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
                         // `NetworkServer.cpp:4175-4190`), so every one of these is a change of the list.
                         if session.protocol_version < PROTOCOL_WITH_EVENTS {
                             session.unsettled = true;
+                            // The list is now held for being unsettled: the hold of a rescan request is over.
+                            session.rescan_requests = 0;
                         }
                         Next::Drop
                     }

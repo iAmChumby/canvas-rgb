@@ -146,6 +146,10 @@ async fn no_list_change_after_packet_140_means_detection_did_not_start() {
     assert_eq!(server.rescan_count(), 1, "packet 140 still went out");
     assert!(adapter.is_connected());
     assert_eq!(adapter.discover().await.expect("discover").len(), 1, "the list was not touched");
+    // The hold the request put on the list ended with the call: no 100 came, so nothing changed, and a
+    // frame goes out again.
+    adapter.write_frame(&DeviceId("openrgb:one".into()), &[Rgb8::WHITE; 8]).await.expect("a frame after a rescan that started nothing");
+    until("the frame landed", || !server.landings().is_empty()).await;
 }
 
 /// A detection that keeps announcing list changes past the cap is unsettled: the call says so
@@ -529,4 +533,88 @@ async fn frames_resume_with_the_custom_mode_set_again_once_the_list_has_settled(
         1,
         "the mode was set more than once on the new object: {told:?}"
     );
+}
+
+/// Two identical sticks and a server that swaps their order (#509).
+fn twin(serial: &str) -> DeviceInfo {
+    DeviceInfo { name: "DDR5 stick".into(), ..stick(serial) }
+}
+
+/// OpenRGB release_1.1 swaps the new list into the server and only then sends the 100 that says so
+/// (`ResourceManager.cpp:1041`, `:1045`, `:1067`). On protocol 5 a frame names its controller by position, so
+/// a frame sent in between lands on whatever sits at that position now. The fake parks the server there
+/// (the list swapped, the 100 held), so the window is as long as the test makes it and nothing is timed.
+///
+/// The verdict is where each frame landed, read after the 100 has come, the list has settled and a frame
+/// sent after that has landed: the fake reads one connection in order, so every earlier frame has landed
+/// (or been refused) by then. A frame for stick a lands on stick a or nowhere.
+#[tokio::test]
+async fn a_frame_sent_after_the_rescan_request_and_before_packet_100_never_lands_on_another_device() {
+    let server = v5_server(vec![twin("a"), twin("b")]).await;
+    server.park_list_change(true);
+    server.rescan_order(vec![1, 0]);
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 2);
+    let a = DeviceId("openrgb:a".into());
+    let b = DeviceId("openrgb:b".into());
+    let red = [Rgb8 { r: 255, g: 0, b: 0 }; 8];
+    let blue = [Rgb8 { r: 0, g: 0, b: 255 }; 8];
+
+    let scanner = adapter.clone();
+    let rescan = tokio::spawn(async move { scanner.rescan_shared().await });
+    // The fake has taken packet 140 and swapped its list; it has sent no 100.
+    until("the fake took packet 140 and swapped its list", || server.rescan_count() == 1).await;
+    let in_window = [adapter.write_frame(&a, &red).await, adapter.write_frame(&b, &blue).await];
+
+    server.release_list_change();
+    rescan.await.expect("the task ends").expect("the detection settled");
+    assert_eq!(adapter.discover().await.expect("discover after the rescan").len(), 2);
+    adapter.write_frame(&a, &red).await.expect("a frame for a after the rescan");
+    adapter.write_frame(&b, &blue).await.expect("a frame for b after the rescan");
+    until("both frames after the rescan landed", || server.landings().len() >= 2).await;
+
+    let landings = server.landings();
+    for landing in &landings {
+        let wanted = if landing.serial == "a" { red[0] } else { blue[0] };
+        assert_eq!(landing.color, wanted, "a frame meant for the other stick landed on {landing:?}; in the window the adapter answered {in_window:?}");
+    }
+    assert_eq!(landings.len(), 2, "a frame sent in the window landed: {landings:?}");
+    assert!(in_window.iter().all(Result::is_err), "a frame was accepted while the list was between swap and 100: {in_window:?}");
+}
+
+/// The same window for a zone resize: `RESIZE_ZONE` names its controller by position too, so a resize of
+/// stick a's zone sent between the swap and the 100 would resize stick b's.
+#[tokio::test]
+async fn a_zone_resize_sent_before_packet_100_reaches_no_device() {
+    fn resizable(serial: &str) -> DeviceInfo {
+        let mut info = twin(serial);
+        info.zones[0].resizable = true;
+        info.zones[0].min_leds = 4;
+        info.zones[0].max_leds = 16;
+        info
+    }
+    let server = v5_server(vec![resizable("a"), resizable("b")]).await;
+    server.park_list_change(true);
+    server.rescan_order(vec![1, 0]);
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 2);
+    let a = DeviceId("openrgb:a".into());
+
+    let scanner = adapter.clone();
+    let rescan = tokio::spawn(async move { scanner.rescan_shared().await });
+    until("the fake took packet 140 and swapped its list", || server.rescan_count() == 1).await;
+    let in_window = adapter.set_zone_size(&a, 0, 12).await;
+
+    server.release_list_change();
+    rescan.await.expect("the task ends").expect("the detection settled");
+    // A frame after the rescan is ordered after any resize on the same connection: once it has landed, a
+    // resize that was sent has reached the fake.
+    adapter.discover().await.expect("discover after the rescan");
+    adapter.write_frame(&a, &[Rgb8::WHITE; 8]).await.expect("a frame after the rescan");
+    until("the frame after the rescan landed", || !server.landings().is_empty()).await;
+    assert_eq!(server.zone_leds(0, 0), Some(8), "stick b's zone was resized by a resize meant for stick a");
+    assert_eq!(server.zone_leds(1, 0), Some(8), "stick a's zone was resized: {in_window:?}");
+    assert!(in_window.is_err(), "a resize was accepted while the list was between swap and 100");
 }
