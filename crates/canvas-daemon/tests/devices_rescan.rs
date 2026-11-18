@@ -115,7 +115,7 @@ async fn wait_for_link(rig: &Rig, state: LinkState) {
         while *rig.app.openrgb.read().await != state {
             // yield_now does not advance a paused clock: a 5 ms sleep here would race 60 s of
             // virtual time ahead of the real connect I/O and fail the tests that start paused
-                        // (#519). The verdict is the state the assert reads; the timeout only ends a hang.
+            // (#519). The verdict is the state the assert reads; the timeout only ends a hang.
             tokio::task::yield_now().await;
         }
     })
