@@ -297,7 +297,47 @@ fn file_writer(
 /// only after the elevation check: it creates and prunes files in a user-writable folder, which
 /// an elevated process must never do.
 pub fn init(name: &str) -> std::io::Result<()> {
-    let dir = crate::paths::log_dir();
+    init_in(&crate::paths::log_dir(), name)
+}
+
+/// Refuses a reparse point (a junction or symlink) at `path`, named in the error. Reads the
+/// attributes without following the link. A path that does not exist yet passes.
+fn refuse_reparse_point(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(std::io::Error::other(format!(
+                    "the log folder {} is a reparse point; refusing to use it",
+                    path.display()
+                )));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(std::io::Error::other(format!(
+                "the log folder {} is a symlink; refusing to use it",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// [`init`] for the folder `dir`. A reparse point at `dir` or at its parent is refused BEFORE
+/// anything is created or pruned: the prune deletes old files by age with no name filter, so a
+/// junction here would delete files in its target. The path is named, and nothing is deleted,
+/// renamed or adopted (the fail-closed rule, `CLAUDE.md`; #72).
+fn init_in(dir: &std::path::Path, name: &str) -> std::io::Result<()> {
+    if let Some(parent) = dir.parent() {
+        refuse_reparse_point(parent)?;
+    }
+    refuse_reparse_point(dir)?;
+    let dir = dir.to_path_buf();
     std::fs::create_dir_all(&dir)?;
     prune_old_logs(&dir);
     let (writer, guard) = file_writer(&dir, name)?;
@@ -592,6 +632,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&elsewhere);
         assert_eq!(target_files, 0, "nothing was written through the junction");
+    }
+
+    /// #72: the prune deletes old files by age with no name filter, so a junction at the log
+    /// folder (or its parent) would delete files in the target. `init_in` refuses both before it
+    /// creates or prunes anything: it fails, names the path, and every file in the target (the old
+    /// ones included) is still there.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_at_the_log_folder_or_its_parent_is_refused_before_the_prune() {
+        for at_parent in [false, true] {
+            let root = temp_dir(if at_parent { "logdir-parent" } else { "logdir-self" });
+            let elsewhere = temp_dir(if at_parent { "logdir-parent-target" } else { "logdir-self-target" });
+            // Where the prune would reach: the target itself, or its `logs` folder when the parent is linked.
+            let victims = if at_parent { elsewhere.join("logs") } else { elsewhere.clone() };
+            std::fs::create_dir_all(&victims).unwrap();
+            let old = victims.join("canvas-rgbd.2000-01-01.log");
+            std::fs::write(&old, "an old log").unwrap();
+            let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+            std::fs::File::options().write(true).open(&old).unwrap().set_modified(old_time).unwrap();
+            let (link, dir) = if at_parent {
+                let link = root.join("canvas-rgb");
+                (link.clone(), link.join("logs"))
+            } else {
+                (root.join("logs"), root.join("logs"))
+            };
+            assert!(make_junction(&link, &elsewhere), "the junction was made");
+            let result = init_in(&dir, "canvas-rgbd");
+            let mut left: Vec<String> = std::fs::read_dir(&victims)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            left.sort();
+            let still_linked = std::fs::symlink_metadata(&link).is_ok();
+            let old_text = std::fs::read_to_string(&old).unwrap_or_default();
+            let _ = std::fs::remove_dir(&link);
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&elsewhere);
+            assert!(still_linked, "the junction is left alone");
+            assert_eq!(old_text, "an old log", "the old file in the target is intact (at_parent={at_parent})");
+            assert_eq!(left, ["canvas-rgbd.2000-01-01.log"], "the target holds exactly what it did (at_parent={at_parent})");
+            let message = result.expect_err("init must refuse the junction").to_string();
+            assert!(message.contains(&link.display().to_string()), "the error names the path: {message}");
+            assert!(message.contains("reparse"), "the error says why: {message}");
+        }
     }
 
     /// #36, at most once: a write that completes after the limit is not written a second time by

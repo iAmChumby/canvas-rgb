@@ -1284,6 +1284,14 @@ mod tests {
 
     /// A detection that is still running at the cap is unsettled, and the line says that OpenRGB is
     /// still detecting and which list answers (the API has no field for it, so the log says it).
+    ///
+    /// The verdict is independent of wall time (class `cause:timing-test`, #72). The cap is 30 s, 40 times the
+    /// stall below, so no real clock ends the wait. The test waits on what it can observe, the fake's packet-140
+    /// count and the adapter's count of its ACKs, then pauses the clock: the runtime is idle from
+    /// then on, so the paused clock runs to the cap by itself and ends the wait. The clock is paused
+    /// only after the I/O is done: a paused clock from the start would run to the cap while the
+    /// runtime waits on the socket. The fake holds the ACK back 700 ms, a stall the old 500 ms cap
+    /// read as "OpenRGB did not acknowledge the rescan".
     #[test]
     fn an_unsettled_detection_says_openrgb_is_still_detecting_and_which_list_answers() {
         use canvas_adapters::fake::FakeOpenRgbServer;
@@ -1292,14 +1300,24 @@ mod tests {
             tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime").block_on(async {
                 let server = FakeOpenRgbServer::start(vec![device("a")]).await.expect("fake server");
                 server.hold_detection(true);
+                server.delay_the_rescan_ack(700);
                 let timing = RescanTiming {
                     first: Duration::from_millis(300),
                     settle: Duration::from_millis(200),
-                    cap: Duration::from_millis(500),
+                    cap: Duration::from_secs(30),
                 };
                 let mut lane = OpenRgbAdapter::new("127.0.0.1", server.port()).with_rescan_timing(timing);
                 lane.connect().await.expect("connect");
-                detect_on_lane(&lane).await
+                let io_done = async {
+                    while server.rescan_count() < 1 || lane.rescan_acks() < 1 {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                    tokio::time::pause();
+                };
+                let (detection, ()) = tokio::join!(detect_on_lane(&lane), io_done);
+                assert_eq!(server.rescan_count(), 1, "one packet 140 was sent");
+                assert_eq!(lane.rescan_acks(), 1, "its ACK was heard before the verdict");
+                detection
             })
         });
         assert!(matches!(detection, Detection::Unsettled), "{detection:?}");

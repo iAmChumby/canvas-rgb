@@ -719,6 +719,15 @@ line. Three mechanisms, and one bug the timing only exposed.
   and its test, not by the scan); hand-made log subscribers (no rule); a missing log line (#45/#55: the
   cause is now known and it is not the clock, it is tracing's callsite interest cache; the helper holds
   the line, the scan cannot see a subscriber).
+  - #72, the fix pass on PR #521: `openrgb_supervisor.rs`
+    `an_unsettled_detection_says_openrgb_is_still_detecting_and_which_list_answers` read `Unsettled` off a
+    real 500 ms cap, so a 700 ms stall before the packet-140 ACK gave "did not acknowledge the rescan". It
+    now uses a 30 s cap, waits on the fake's packet-140 count and the adapter's ACK count, and pauses the
+    clock only after that I/O is done (a clock paused from the start runs to the cap while the runtime
+    waits on the socket); the fake can hold the ACK back (`delay_the_rescan_ack`) so the 700 ms stall is
+    in the test. `cli.rs` `serve_once` stopped accepting at a 2 s wall deadline; it now accepts until a
+    stop flag the test sets after the request returns, and the silent daemon reads until the client drops
+    instead of sleeping 2 s.
 - **Sibling search:** the allow-list entries marked "open" are the siblings: `timer.rs` upper bounds
   (3 tests), `effects_import.rs` and `quit.rs` ceilings, the `canvas-core/src/tests.rs` "sleep 300 ms
   then expect parked" tests and `wave1.rs`. The `api.rs` onboarding timers (60-350 ms sleeps against
