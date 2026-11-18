@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { NotifyHost } from "@/components/Notify";
 import { refreshAll, refreshStatus } from "@/lib/store";
-import { waitForStackGuard } from "@/test/historyGuard";
+import { waitForStackGuard, plainEntry } from "@/test/historyGuard";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
@@ -59,6 +59,7 @@ beforeAll(() => {
 });
 
 afterEach(() => {
+  plainEntry();
   phoneWidth = true;
   cleanup();
 });

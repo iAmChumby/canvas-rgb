@@ -42,19 +42,19 @@ export function PatternEditorPage() {
 
   // An entry the editor's guard made, or one the editor left, opens no editor: the guard's copy of
   // this page stays ahead of the history after a leave (a browser cannot delete it), and a Forward
-  // onto it lands here. It goes to the effects page, which is where the leave went. Read once, as
-  // the page opens: the entry the page opened on.
-  const [spent] = useState(() => {
-    if (typeof window === "undefined") return false;
+  // onto it lands here. It goes to the effects page, which is where the leave went.
+  //
+  // Read in the effect that opens the page, never while rendering: on a client-side navigation Next
+  // changes the history in the commit of the new page, so while the page renders `history.state` is
+  // still the entry being left (a push from a dirty effects panel would find the panel's guard and
+  // open no editor). By the time an effect runs it is the entry the page opened on, for a push, a
+  // Back and a reload alike.
+  useEffect(() => {
     const state = window.history.state as Record<string, unknown> | null;
-    return state !== null && typeof state === "object" && PATTERN_GUARD in state;
-  });
-  useEffect(() => {
-    if (spent) router.replace("/effects/");
-  }, [spent, router]);
-
-  useEffect(() => {
-    if (spent) return;
+    if (state !== null && typeof state === "object" && PATTERN_GUARD in state) {
+      router.replace("/effects/");
+      return;
+    }
     let cancelled = false;
     void (async () => {
       const query = new URLSearchParams(window.location.search);
@@ -70,7 +70,9 @@ export function PatternEditorPage() {
     return () => {
       cancelled = true;
     };
-  }, [spent]);
+    // Once, as the page opens: the router's identity is not a reason to read the entry again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // The save's promise goes to the editor, which shows a failure beside its Save key and keeps
   // the strokes: the page never replaces the editor with an error line.
@@ -94,6 +96,7 @@ export function PatternEditorPage() {
       // Replace, not push: the editor's entry becomes the effects page, so one Back goes to where
       // the person came from and never reopens a fresh editor.
       onCancel={() => router.replace("/effects/")}
+      ownsEntry
     />
   );
 }

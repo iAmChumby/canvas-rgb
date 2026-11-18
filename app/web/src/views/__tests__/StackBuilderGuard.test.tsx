@@ -4,7 +4,7 @@ import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { ApiFailure } from "@/lib/errors";
 import { refreshAll } from "@/lib/store";
-import { waitForStackGuard } from "@/test/historyGuard";
+import { waitForStackGuard, plainEntry } from "@/test/historyGuard";
 import { Rail } from "@/shell/Rail";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { EffectsView } from "@/views/EffectsView";
@@ -75,6 +75,7 @@ beforeAll(() => {
 });
 
 afterEach(() => {
+  plainEntry();
   cleanup();
   push.mockClear();
 });
