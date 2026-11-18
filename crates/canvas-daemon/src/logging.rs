@@ -90,6 +90,19 @@ pub fn close_within_limit() -> bool {
 /// thread writes its line there directly ([`write_line_direct_within`]).
 static DIRECT_TARGET: std::sync::Mutex<Option<(std::path::PathBuf, String)>> = std::sync::Mutex::new(None);
 
+/// Test-only: point the production panic writer at a temp folder, so a test can install the REAL
+/// hook (`exit_log::install_panic_hook`) and check its line lands in today's file. The target is
+/// process-wide; callers serialise with the other real-hook tests and restore it afterwards.
+#[cfg(test)]
+pub(crate) fn set_direct_target_for_test(dir: std::path::PathBuf, name: String) {
+    *DIRECT_TARGET.lock().unwrap_or_else(|p| p.into_inner()) = Some((dir, name));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_direct_target_for_test() {
+    *DIRECT_TARGET.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
 /// Days since 1970-01-01 as (year, month, day) in the proleptic Gregorian calendar.
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
@@ -124,11 +137,27 @@ pub fn todays_log_file(dir: &std::path::Path, name: &str) -> std::path::PathBuf 
     dir.join(format!("{name}.{}.log", appender_date(now)))
 }
 
-/// Appends one line to `path` in one write, creating the file if needed. A reparse point (a link
-/// or junction planted where the log file goes) is not followed: it is opened as itself, and
-/// refused.
-fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
-    use std::io::Write;
+/// Opens the log file `path` for appending, creating it when absent, WITHOUT following a reparse
+/// point. A link or junction planted at that name is reported as itself and refused: the path is
+/// named, and nothing is deleted, renamed or adopted (the fail-closed rule, `CLAUDE.md`). Both
+/// writers go through here: the direct panic writer and the rolling appender's own `create_writer`,
+/// which otherwise opens today's file with no check of its own (#36/#72).
+fn open_log_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        // symlink_metadata does not follow the link: a junction already at the name is refused
+        // before anything is opened or created there.
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(std::io::Error::other(format!(
+                    "the log file {} is a reparse point; refusing to write to it",
+                    path.display()
+                )));
+            }
+        }
+    }
     let mut options = std::fs::OpenOptions::new();
     options.append(true).create(true);
     #[cfg(windows)]
@@ -137,15 +166,29 @@ fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    let mut file = options.open(path)?;
+    let file = options.open(path)?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        // Check again after opening: a swap between the two checks is caught here, still with the
+        // reparse point as the handle, never followed.
         if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(std::io::Error::other("the log file is a reparse point; not writing to it"));
+            return Err(std::io::Error::other(format!(
+                "the log file {} is a reparse point; refusing to write to it",
+                path.display()
+            )));
         }
     }
+    Ok(file)
+}
+
+/// Appends one line to `path` in one write, creating the file if needed. A reparse point (a link
+/// or junction planted where the log file goes) is not followed: it is opened as itself, and
+/// refused.
+fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = open_log_file(path)?;
     file.write_all(format!("{line}\n").as_bytes())?;
     file.flush()
 }
@@ -234,6 +277,10 @@ fn file_writer(
     dir: &std::path::Path,
     name: &str,
 ) -> std::io::Result<(tracing_appender::non_blocking::NonBlocking, WorkerGuard)> {
+    // The appender opens today's file itself, with no reparse check. Open it the same way the
+    // direct panic writer does first: a link planted at that name is named and refused, never
+    // followed or adopted, and the appender then opens a regular file (#36/#72).
+    open_log_file(&todays_log_file(dir, name))?;
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix(name)
@@ -250,7 +297,47 @@ fn file_writer(
 /// only after the elevation check: it creates and prunes files in a user-writable folder, which
 /// an elevated process must never do.
 pub fn init(name: &str) -> std::io::Result<()> {
-    let dir = crate::paths::log_dir();
+    init_in(&crate::paths::log_dir(), name)
+}
+
+/// Refuses a reparse point (a junction or symlink) at `path`, named in the error. Reads the
+/// attributes without following the link. A path that does not exist yet passes.
+fn refuse_reparse_point(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(std::io::Error::other(format!(
+                    "the log folder {} is a reparse point; refusing to use it",
+                    path.display()
+                )));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(std::io::Error::other(format!(
+                "the log folder {} is a symlink; refusing to use it",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// [`init`] for the folder `dir`. A reparse point at `dir` or at its parent is refused BEFORE
+/// anything is created or pruned: the prune deletes old files by age with no name filter, so a
+/// junction here would delete files in its target. The path is named, and nothing is deleted,
+/// renamed or adopted (the fail-closed rule, `CLAUDE.md`; #72).
+fn init_in(dir: &std::path::Path, name: &str) -> std::io::Result<()> {
+    if let Some(parent) = dir.parent() {
+        refuse_reparse_point(parent)?;
+    }
+    refuse_reparse_point(dir)?;
+    let dir = dir.to_path_buf();
     std::fs::create_dir_all(&dir)?;
     prune_old_logs(&dir);
     let (writer, guard) = file_writer(&dir, name)?;
@@ -490,6 +577,23 @@ mod tests {
         assert_eq!((old.as_str(), future.as_str()), ("old\n", "future\n"));
     }
 
+    /// Makes a directory junction at `link` pointing at `target` (Windows, test only). The
+    /// `let made = ...` line is text-matched by the process-launch allow-list, so the binding is
+    /// kept even though clippy would inline it.
+    #[cfg(windows)]
+    #[allow(clippy::let_and_return)]
+    fn make_junction(link: &std::path::Path, target: &std::path::Path) -> bool {
+        // token: the current user's, not elevated (a test making a junction with mklink).
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        made
+    }
+
     /// A junction where today's file should be is not followed.
     #[cfg(windows)]
     #[test]
@@ -497,15 +601,7 @@ mod tests {
         let dir = temp_dir("reparse");
         let elsewhere = temp_dir("reparse-target");
         let link = todays_log_file(&dir, "canvas-rgbd");
-        // token: the current user's, not elevated (a test making a junction with mklink).
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&link)
-            .arg(&elsewhere)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        assert!(made, "the junction was made");
+        assert!(make_junction(&link, &elsewhere), "the junction was made");
         let result = write_line_direct(&dir, "canvas-rgbd", "the panic line");
         let target_files = std::fs::read_dir(&elsewhere).unwrap().count();
         let _ = std::fs::remove_dir(&link);
@@ -513,6 +609,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(&elsewhere);
         assert!(result.is_err(), "refused");
         assert_eq!(target_files, 0, "nothing was written through the link");
+    }
+
+    /// #36/#72: the rolling appender opens today's file on its own, so the direct writer's
+    /// reparse check was the only one. A junction planted at the name must now be refused by
+    /// `file_writer` too, before the appender can open or adopt it: the path is named, nothing is
+    /// written through the link, and the link itself is left alone.
+    #[cfg(windows)]
+    #[test]
+    fn the_appender_refuses_a_reparse_point_at_todays_file() {
+        let dir = temp_dir("appender-reparse");
+        let elsewhere = temp_dir("appender-reparse-target");
+        let link = todays_log_file(&dir, "canvas-rgbd");
+        assert!(make_junction(&link, &elsewhere), "the junction was made");
+        let error = file_writer(&dir, "canvas-rgbd").expect_err("the appender must refuse the junction");
+        let message = error.to_string();
+        assert!(message.contains(&link.display().to_string()), "the error names the path: {message}");
+        assert!(message.contains("reparse"), "the error says why: {message}");
+        let target_files = std::fs::read_dir(&elsewhere).unwrap().count();
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "the junction is still there: never deleted or adopted");
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        assert_eq!(target_files, 0, "nothing was written through the junction");
+    }
+
+    /// #72: the prune deletes old files by age with no name filter, so a junction at the log
+    /// folder (or its parent) would delete files in the target. `init_in` refuses both before it
+    /// creates or prunes anything: it fails, names the path, and every file in the target (the old
+    /// ones included) is still there.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_at_the_log_folder_or_its_parent_is_refused_before_the_prune() {
+        for at_parent in [false, true] {
+            let root = temp_dir(if at_parent { "logdir-parent" } else { "logdir-self" });
+            let elsewhere = temp_dir(if at_parent { "logdir-parent-target" } else { "logdir-self-target" });
+            // Where the prune would reach: the target itself, or its `logs` folder when the parent is linked.
+            let victims = if at_parent { elsewhere.join("logs") } else { elsewhere.clone() };
+            std::fs::create_dir_all(&victims).unwrap();
+            let old = victims.join("canvas-rgbd.2000-01-01.log");
+            std::fs::write(&old, "an old log").unwrap();
+            let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+            std::fs::File::options().write(true).open(&old).unwrap().set_modified(old_time).unwrap();
+            let (link, dir) = if at_parent {
+                let link = root.join("canvas-rgb");
+                (link.clone(), link.join("logs"))
+            } else {
+                (root.join("logs"), root.join("logs"))
+            };
+            assert!(make_junction(&link, &elsewhere), "the junction was made");
+            let result = init_in(&dir, "canvas-rgbd");
+            let mut left: Vec<String> = std::fs::read_dir(&victims)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            left.sort();
+            let still_linked = std::fs::symlink_metadata(&link).is_ok();
+            let old_text = std::fs::read_to_string(&old).unwrap_or_default();
+            let _ = std::fs::remove_dir(&link);
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&elsewhere);
+            assert!(still_linked, "the junction is left alone");
+            assert_eq!(old_text, "an old log", "the old file in the target is intact (at_parent={at_parent})");
+            assert_eq!(left, ["canvas-rgbd.2000-01-01.log"], "the target holds exactly what it did (at_parent={at_parent})");
+            let message = result.expect_err("init must refuse the junction").to_string();
+            assert!(message.contains(&link.display().to_string()), "the error names the path: {message}");
+            assert!(message.contains("reparse"), "the error says why: {message}");
+        }
     }
 
     /// #36, at most once: a write that completes after the limit is not written a second time by

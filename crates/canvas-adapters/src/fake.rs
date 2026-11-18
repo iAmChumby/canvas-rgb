@@ -61,6 +61,10 @@ struct FakeState {
     swallowed: u32,
     /// While set, the server stalls (see `stalled`) as soon as it has taken a packet 140 and queued its ACK.
     stall_after_rescan: bool,
+    /// How long the server holds the ACK of a packet 140 back, with the read loop stopped: a busy
+    /// OpenRGB whose thread is late to answer. A test injects it to prove a verdict does not depend on
+    /// how fast the ACK arrives.
+    rescan_ack_delay: std::time::Duration,
     /// While set, the server answers as usual but keeps each reply back until
     /// [`FakeOpenRgbServer::release_replies`]: a real OpenRGB that is slow, not dead.
     holding: bool,
@@ -371,6 +375,7 @@ impl FakeOpenRgbServer {
             stalled: false,
             swallowed: 0,
             stall_after_rescan: false,
+            rescan_ack_delay: std::time::Duration::ZERO,
             holding: false,
             held: Vec::new(),
             reading_paused: false,
@@ -623,6 +628,13 @@ impl FakeOpenRgbServer {
     /// quiet, whatever a test's clock does in between.
     pub fn stall_after_the_rescan_packet(&self, stall: bool) {
         guard(&self.state).stall_after_rescan = stall;
+    }
+
+    /// The server takes a packet 140, then stops for `ms` of real time before it queues the ACK (and
+    /// sends the 101 the detection caused, which goes out with it): a busy OpenRGB that is late to
+    /// answer. Nothing is lost, only late.
+    pub fn delay_the_rescan_ack(&self, ms: u64) {
+        guard(&self.state).rescan_ack_delay = std::time::Duration::from_millis(ms);
     }
 
     /// How many requests the server has swallowed while stalled (see
@@ -919,8 +931,15 @@ async fn serve(
             // switch). These are writes of their own, not the reply slot of a request, so a stalled
             // or held reply does not hold them back (#290).
             if packet_id == REQUEST_RESCAN_DEVICES {
+                let delay = {
+                    let mut state = guard(&state);
+                    start_rescan(&mut state);
+                    state.rescan_ack_delay
+                };
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
                 let mut state = guard(&state);
-                start_rescan(&mut state);
                 if state.version_of(connection) >= PROTOCOL_WITH_EVENTS && !state.stalled {
                     let ack = ack_packet(device, packet_id);
                     state.queue(connection, ack);

@@ -2011,12 +2011,26 @@ window.requestAnimationFrame(draw);
             best = best.min(started.elapsed().as_secs_f64());
         }
         let per_probe = best.max(1e-4);
-        // Frames of about half a second each. A step of 1/15 s runs four of them, two seconds.
-        let frame_s = 0.5;
-        let iterations = (probe as f64 * frame_s / per_probe) as u64;
+        // Size the frames to about half a second on this machine so the render is still held to
+        // the 700 ms budget. This is the TARGET for the work, not the slack: the slack is measured
+        // from the effect that is actually rendered, below (#51).
+        let target_frame_s = 0.5;
+        let iterations = (probe as f64 * target_frame_s / per_probe) as u64;
 
         let budget = std::time::Duration::from_millis(700);
         let mut tile = html_builder_seeded(1)("html:burn", &burning_frames(iterations)).expect("loads");
+        // Measure THIS effect's frame on THIS machine, now: the same warm-up and best of three
+        // used for the calibration, so one preempted sample cannot make the frame look dearer.
+        // The ceiling below follows the real frame cost; a constant half second did not (#51).
+        let mut tile_canvas = Canvas::new(8, 8);
+        tile.update(1.0 / 60.0, &mut tile_canvas, &Inputs::default());
+        let mut frame_best = f64::MAX;
+        for _ in 0..3 {
+            let measure_started = std::time::Instant::now();
+            tile.update(1.0 / 60.0, &mut tile_canvas, &Inputs::default());
+            frame_best = frame_best.min(measure_started.elapsed().as_secs_f64());
+        }
+        let frame_est = frame_best.max(1e-4);
         let started = std::time::Instant::now();
         let error = crate::thumbnail::render_within(tile.as_mut(), &Props::new(), budget)
             .expect_err("frames of half a second cannot finish a render in 700 ms");
@@ -2025,10 +2039,8 @@ window.requestAnimationFrame(draw);
         // Without a bound per frame, the render runs on to the end of the step it was in: four
         // frames, two seconds in all. With it, the frame in progress is stopped at the budget, so
         // the slot is held for the budget plus the interrupt latency. The ceiling is the budget
-        // plus ONE frame. The iterations are sized from the calibration so that a frame is
-        // `frame_s`, so `frame_est` works out to `frame_s` (0.5 s): the slack is a constant half
-        // second, not a measurement of this machine. A stall longer than that fails the test.
-        let frame_est = per_probe * iterations as f64 / probe as f64;
+        // plus ONE frame, measured from the built effect rather than assumed (#51). A stall longer
+        // than that fails the test.
         assert!(
             took < budget + std::time::Duration::from_secs_f64(frame_est),
             "the render held its slot for {took:?} on a {budget:?} budget (a frame is about {frame_est:.2} s)"

@@ -2002,8 +2002,11 @@ async fn engine_effect(engine: &FakeEngine) -> Option<String> {
     engine.effect_id.lock().unwrap().clone()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_onboarding_effect_restores_the_previous_effect_and_is_never_saved() {
+    // The waits below are tokio sleeps on a PAUSED clock (class `cause:timing-test`, #72): they
+    // advance virtual time to the onboarding timers instead of asking the machine to wait, so a
+    // stalled runner cannot fire a restore early or delay one past the assert.
     let (router, app, engine, home) = build_with_engine();
     // Waits run 100 times faster: hello's 2 s + 8 s grace is 100 ms.
     app.transient.set_time_scale(0.01);
@@ -2055,8 +2058,10 @@ async fn an_onboarding_effect_restores_the_previous_effect_and_is_never_saved() 
     assert!(!app.transient.is_pending());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn activating_a_normal_effect_cancels_the_onboarding_restore() {
+    // Paused clock: the 300 ms wait advances virtual time past the cancelled restore timer
+    // (class `cause:timing-test`, #72); the machine's speed cannot decide the verdict.
     let (router, app, engine, _home) = build_with_engine();
     app.transient.set_time_scale(0.01);
     for id in ["onboard-hello", "solid"] {

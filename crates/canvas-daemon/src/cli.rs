@@ -1178,7 +1178,13 @@ fn is_connect_failure(error: &ureq::Error) -> bool {
 /// A request limit as a message: "120 s", or "300 ms" for a test's short one.
 fn limit_text(limit: Option<Duration>) -> String {
     match limit {
-        Some(limit) if limit.as_secs() > 0 => format!("{} s", limit.as_secs()),
+        // Whole seconds print as "2 s"; a limit with a fraction prints it ("2.5 s"), never
+        // rounded down to a shorter limit than the one that ran out.
+        Some(limit) if limit.as_secs() > 0 && limit.subsec_millis() == 0 => format!("{} s", limit.as_secs()),
+        Some(limit) if limit.as_secs() > 0 => {
+            let millis = format!("{:03}", limit.subsec_millis());
+            format!("{}.{} s", limit.as_secs(), millis.trim_end_matches('0'))
+        }
         Some(limit) => format!("{} ms", limit.as_millis()),
         None => "its limit".to_string(),
     }
@@ -3047,6 +3053,17 @@ fn prop_kind_summary(kind: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A limit with a fraction of a second is printed with it (#72): 2.5 s is not "2 s".
+    #[test]
+    fn a_limit_with_a_fraction_of_a_second_prints_the_fraction() {
+        assert_eq!(limit_text(Some(Duration::from_millis(2500))), "2.5 s");
+        assert_eq!(limit_text(Some(Duration::from_millis(1250))), "1.25 s");
+        assert_eq!(limit_text(Some(Duration::from_secs(2))), "2 s");
+        assert_eq!(limit_text(Some(Duration::from_millis(300))), "300 ms");
+        assert_eq!(limit_text(Some(Duration::from_micros(2_999_600))), "2.999 s");
+        assert_eq!(limit_text(None), "its limit");
+    }
+
     use super::*;
     use canvas_proto::props::PropKind;
     use std::path::PathBuf;
@@ -3180,24 +3197,53 @@ mod tests {
         port
     }
 
-    /// Runs `answer` on the first connection to `listener`, and gives up if nothing connects
-    /// within 2 s. A client whose whole budget covers the connect can give up before it
-    /// connects, and a thread blocked in `accept` would then hold the test's `join` for ever.
+    /// A server thread from [`serve_once`]: it accepts until the test says to stop.
+    struct Served {
+        handle: std::thread::JoinHandle<()>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Served {
+        /// The request is over: stop accepting (a client that never connected leaves nothing
+        /// blocked) and wait for the thread to end.
+        fn finish(self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.handle.join().ok();
+        }
+    }
+
+    /// Runs `answer` on the first connection to `listener`. It accepts until [`Served::finish`]
+    /// sets the stop flag, with no clock of its own: a client that is late (a busy machine, or a
+    /// stall injected by a test) still finds a listener, and a client that gives up before it
+    /// connects leaves the thread to end at the flag, not at a deadline (class `cause:timing-test`, #72).
     fn serve_once(
         listener: std::net::TcpListener,
         answer: impl FnOnce(std::net::TcpStream) + Send + 'static,
-    ) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
+    ) -> Served {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = std::sync::Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
             listener.set_nonblocking(true).expect("the listener is non-blocking");
-            let started = std::time::Instant::now();
-            while started.elapsed() < Duration::from_secs(2) {
+            while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
                 if let Ok((stream, _)) = listener.accept() {
                     answer(stream);
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-        })
+        });
+        Served { handle, stop }
+    }
+
+    /// Takes the connection and answers nothing: reads what the client sends until the client
+    /// closes the connection, so the daemon stays silent exactly as long as the client waits,
+    /// whatever its limit is. A hang guard ends a client that never closes.
+    fn stay_silent_until_the_client_drops(mut stream: std::net::TcpStream) {
+        use std::io::Read;
+        stream.set_nonblocking(false).expect("the connection blocks");
+        stream.set_read_timeout(Some(Duration::from_secs(30))).expect("the hang guard is set");
+        let mut sink = [0u8; 1024];
+        while matches!(stream.read(&mut sink), Ok(read) if read > 0) {}
     }
 
     /// #328: nothing answered, so nothing was sent, and the message says that -- never that
@@ -3238,11 +3284,8 @@ mod tests {
     fn a_silent_daemon_says_it_did_not_answer_within_the_limit() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
         let port = listener.local_addr().expect("the local address").port();
-        // Take the connection and answer nothing at all, for longer than the client's budget.
-        let server = serve_once(listener, |stream| {
-            std::thread::sleep(Duration::from_secs(2));
-            drop(stream);
-        });
+        // Take the connection and answer nothing at all, until the client gives up.
+        let server = serve_once(listener, stay_silent_until_the_client_drops);
         let agent = bounded_agent_with(CONNECT_TIMEOUT, Duration::from_millis(300));
         let error = client_for(port, agent)
             .request("GET", "/api/v1/status", None)
@@ -3253,7 +3296,45 @@ mod tests {
         );
         assert!(matches!(error, CliError::NoAnswer(_)), "{error}");
         assert_eq!(error.exit_code(), 2);
-        server.join().ok();
+        server.finish();
+    }
+
+    /// #72: the silent daemon stays silent for as long as the client waits, not for a fixed 2 s.
+    /// A client whose limit is longer than that (a stalled machine stretches the wait the same way)
+    /// still sees "did not answer", not a connection closed by the server's own timer.
+    #[test]
+    fn a_silent_daemon_stays_silent_for_a_client_that_waits_longer_than_two_seconds() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = listener.local_addr().expect("the local address").port();
+        let server = serve_once(listener, stay_silent_until_the_client_drops);
+        let agent = bounded_agent_with(CONNECT_TIMEOUT, Duration::from_millis(3_000));
+        let error = client_for(port, agent)
+            .request("GET", "/api/v1/status", None)
+            .expect_err("the daemon never answered");
+        server.finish();
+        assert!(error.to_string().contains("did not answer within 3 s"), "{error}");
+        assert!(matches!(error, CliError::NoAnswer(_)), "{error}");
+    }
+
+    /// #72: a client that reaches the listener late is still served. The helper had a 2 s wall
+    /// deadline on its accept loop, so a client stalled past it read "the daemon is not running"
+    /// from a listener that had already gone. The stall is injected: the client waits 3 s.
+    #[test]
+    fn a_client_that_arrives_late_is_still_served() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = listener.local_addr().expect("the local address").port();
+        let server = serve_once(listener, |mut stream| {
+            stream.set_nonblocking(false).expect("the connection blocks");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        });
+        std::thread::sleep(Duration::from_millis(3_000));
+        let answered = client_for(port, bounded_agent()).request("GET", "/api/v1/status", None);
+        server.finish();
+        let answer = answered.unwrap_or_else(|error| panic!("a late client was refused: {error}"));
+        assert_eq!(answer.to_string().trim(), "{}", "the body the server sent");
     }
 
     /// #328: a body that cannot be read is a failed command, not an empty answer. The limit
@@ -3278,7 +3359,7 @@ mod tests {
             "the connection was made: {error}"
         );
         assert!(error.to_string().contains("io"), "the transport's own text: {error}");
-        server.join().ok();
+        server.finish();
     }
 
     #[test]
