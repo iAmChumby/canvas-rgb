@@ -1,0 +1,274 @@
+{
+  "note": "The Rust fan rule's constants and verdicts for fixed inputs. Printed by crates/canvas-svc/examples/fan_rules_vectors.rs; tools/fan-rules-vectors.ps1 writes this file. The editor's TypeScript mirror (app/web/src/lib/fan-rules.ts) is checked against it. The hotFloor rows use runtime_floor at HOT_TEMP_C: the floor while a header is hot.",
+  "constants": [
+    {
+      "name": "CPU_FAN_HEADER",
+      "value": "cpu_fan"
+    },
+    {
+      "name": "DEFAULT_FLOOR_PERCENT",
+      "value": 20
+    },
+    {
+      "name": "CPU_FAN_MIN_PERCENT",
+      "value": 30
+    },
+    {
+      "name": "GPU_FAN_HEADER_PREFIX",
+      "value": "gpu_fan"
+    },
+    {
+      "name": "GPU_FAN_MIN_PERCENT",
+      "value": 30
+    },
+    {
+      "name": "HOT_TEMP_C",
+      "value": 50
+    },
+    {
+      "name": "HOT_FLOOR_PERCENT",
+      "value": 35
+    },
+    {
+      "name": "HOT_CPU_FAN_FLOOR_PERCENT",
+      "value": 50
+    },
+    {
+      "name": "CPU_IDLE_LIMIT_C",
+      "value": 60
+    }
+  ],
+  "cases": [
+    {
+      "name": "a system header with no configured floor",
+      "rule": "baseFloor",
+      "header": "sys_fan1",
+      "configured": 0,
+      "expected": 20
+    },
+    {
+      "name": "a system header just under the default",
+      "rule": "baseFloor",
+      "header": "sys_fan1",
+      "configured": 19,
+      "expected": 20
+    },
+    {
+      "name": "a system header at the default",
+      "rule": "baseFloor",
+      "header": "sys_fan1",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "a system header just over the default",
+      "rule": "baseFloor",
+      "header": "sys_fan1",
+      "configured": 21,
+      "expected": 21
+    },
+    {
+      "name": "a system header at the top",
+      "rule": "baseFloor",
+      "header": "sys_fan1",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "the CPU header with no configured floor",
+      "rule": "baseFloor",
+      "header": "cpu_fan",
+      "configured": 0,
+      "expected": 30
+    },
+    {
+      "name": "the CPU header with the default floor",
+      "rule": "baseFloor",
+      "header": "cpu_fan",
+      "configured": 20,
+      "expected": 30
+    },
+    {
+      "name": "the CPU header just under its minimum",
+      "rule": "baseFloor",
+      "header": "cpu_fan",
+      "configured": 29,
+      "expected": 30
+    },
+    {
+      "name": "the CPU header at its minimum",
+      "rule": "baseFloor",
+      "header": "cpu_fan",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "the CPU header just over its minimum",
+      "rule": "baseFloor",
+      "header": "cpu_fan",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "a GPU header with no configured floor",
+      "rule": "baseFloor",
+      "header": "gpu_fan1",
+      "configured": 0,
+      "expected": 30
+    },
+    {
+      "name": "a GPU header with the default floor",
+      "rule": "baseFloor",
+      "header": "gpu_fan1",
+      "configured": 20,
+      "expected": 30
+    },
+    {
+      "name": "a GPU header just under its minimum",
+      "rule": "baseFloor",
+      "header": "gpu_fan1",
+      "configured": 29,
+      "expected": 30
+    },
+    {
+      "name": "a GPU header at its minimum",
+      "rule": "baseFloor",
+      "header": "gpu_fan1",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "a GPU header just over its minimum",
+      "rule": "baseFloor",
+      "header": "gpu_fan1",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "a second GPU header above its minimum",
+      "rule": "baseFloor",
+      "header": "gpu_fan2",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "a system header in the hot state",
+      "rule": "hotFloor",
+      "header": "sys_fan1",
+      "configured": 20,
+      "expected": 35
+    },
+    {
+      "name": "a system header at its hot floor",
+      "rule": "hotFloor",
+      "header": "sys_fan1",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "a system header just over its hot floor",
+      "rule": "hotFloor",
+      "header": "sys_fan1",
+      "configured": 36,
+      "expected": 36
+    },
+    {
+      "name": "the CPU header in the hot state",
+      "rule": "hotFloor",
+      "header": "cpu_fan",
+      "configured": 20,
+      "expected": 50
+    },
+    {
+      "name": "the CPU header just under its hot floor",
+      "rule": "hotFloor",
+      "header": "cpu_fan",
+      "configured": 49,
+      "expected": 50
+    },
+    {
+      "name": "the CPU header at its hot floor",
+      "rule": "hotFloor",
+      "header": "cpu_fan",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "the CPU header just over its hot floor",
+      "rule": "hotFloor",
+      "header": "cpu_fan",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "a GPU header in the hot state",
+      "rule": "hotFloor",
+      "header": "gpu_fan1",
+      "configured": 20,
+      "expected": 35
+    },
+    {
+      "name": "a GPU header just under its hot floor",
+      "rule": "hotFloor",
+      "header": "gpu_fan1",
+      "configured": 34,
+      "expected": 35
+    },
+    {
+      "name": "a GPU header at its hot floor",
+      "rule": "hotFloor",
+      "header": "gpu_fan1",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "a GPU header just over its hot floor",
+      "rule": "hotFloor",
+      "header": "gpu_fan1",
+      "configured": 36,
+      "expected": 36
+    },
+    {
+      "name": "a CPU line at the issue's example value",
+      "rule": "cpuLimitInIdleRange",
+      "kind": "cpu",
+      "limit_c": 50,
+      "expected": true
+    },
+    {
+      "name": "a CPU line just under the threshold",
+      "rule": "cpuLimitInIdleRange",
+      "kind": "cpu",
+      "limit_c": 59,
+      "expected": true
+    },
+    {
+      "name": "a CPU line at the threshold",
+      "rule": "cpuLimitInIdleRange",
+      "kind": "cpu",
+      "limit_c": 60,
+      "expected": false
+    },
+    {
+      "name": "a CPU line just over the threshold",
+      "rule": "cpuLimitInIdleRange",
+      "kind": "cpu",
+      "limit_c": 61,
+      "expected": false
+    },
+    {
+      "name": "a GPU line is not the CPU warning",
+      "rule": "cpuLimitInIdleRange",
+      "kind": "gpu",
+      "limit_c": 50,
+      "expected": false
+    },
+    {
+      "name": "a board line is not the CPU warning",
+      "rule": "cpuLimitInIdleRange",
+      "kind": "board",
+      "limit_c": 50,
+      "expected": false
+    }
+  ]
+}

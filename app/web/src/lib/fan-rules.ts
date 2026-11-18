@@ -1,10 +1,19 @@
 // Fan floors as the daemon applies them. Mirrors crates/canvas-proto/src/fans.rs
-// (DEFAULT_FLOOR_PERCENT, CPU_FAN_MIN_PERCENT, HOT_*). The API is still the authority: a value
-// the API refuses comes back as a 422 and is shown inline.
+// (DEFAULT_FLOOR_PERCENT, CPU_FAN_MIN_PERCENT, GPU_FAN_*, HOT_*). The API is still the authority: a
+// value the API refuses comes back as a 422 and is shown inline.
+//
+// The mirror is tied to the spine by shared vectors (#507):
+// app/web/src/lib/__tests__/fan-rules.vectors.json holds the spine's constants and the rules'
+// verdicts, printed by crates/canvas-svc/examples/fan_rules_vectors.rs. The editor's test runs
+// these functions over every row; the Rust test fails when the file is stale.
 
 export const CPU_FAN = "cpu_fan";
 export const DEFAULT_FLOOR = 20;
 export const CPU_FAN_MIN = 30;
+/** GPU headers are `gpu_fan1`, `gpu_fan2`, ... — the prefix the spine matches. */
+export const GPU_FAN = "gpu_fan";
+/** NVML's own manual minimum; the spine will not let a GPU fan go below it. */
+export const GPU_FAN_MIN = 30;
 export const HOT_TEMP_C = 50;
 export const HOT_FLOOR = 35;
 export const HOT_CPU_FAN_FLOOR = 50;
@@ -12,7 +21,9 @@ export const HOT_CPU_FAN_FLOOR = 50;
 /** The lowest percent a header can be set to. */
 export function baseFloor(header: string, configured: number): number {
   const floor = Math.max(configured, DEFAULT_FLOOR);
-  return header === CPU_FAN ? Math.max(floor, CPU_FAN_MIN) : floor;
+  if (header === CPU_FAN) return Math.max(floor, CPU_FAN_MIN);
+  if (header.startsWith(GPU_FAN)) return Math.max(floor, GPU_FAN_MIN);
+  return floor;
 }
 
 /** The floor a manual header is raised to while its curve temperature is at or above 50 C. */

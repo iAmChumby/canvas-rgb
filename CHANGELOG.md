@@ -20,6 +20,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Fans: the editor now uses the daemon's 30% minimum for GPU fan headers, so a GPU header's floor line and the duty offered in bulk actions match what the service applies instead of starting at 20%. (#507)
 - Scenes: a named "not connected" light left in an older lights.json on a device the app does not drive can now be removed from the add-devices list. The daemon takes a snapshot first, takes the light out of every group (dropping a group it leaves empty), and the editor says which groups went. (#414)
 - Scenes: removing a leftover light can no longer race a scene save and silently put the light back — the delete takes the scene order before it writes and moves the saved scene's revision, so a save from before the removal is refused instead of overwriting it; the editor no longer offers Remove for a light the daemon drives that is merely unplugged. (#414)
 - Deleting an effect no longer drops a preview that is live on the lights: the scene that goes on after a delete now waits for a preview that landed while it ran, so the editor's preview stays on the lights until it is ended. (#500)
