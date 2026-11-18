@@ -113,6 +113,7 @@ use canvas_proto::props::{PropKind, PropValue, PropertyDef, Props};
 use canvas_proto::traits::AdapterError;
 
 pub mod codec;
+pub mod probe;
 
 use self::codec::XState;
 
@@ -775,7 +776,18 @@ pub const IDLE_WINDOW: Duration = Duration::from_secs(3);
 /// Blocking: call it from `spawn_blocking`. A chunk that is not answered ends the read with the
 /// reason the pad gave.
 fn read_image(vendor: &mut dyn VendorTransport, pace: Pace) -> Result<Vec<u8>, AdapterError> {
+    read_image_raw(vendor, pace).map(|(img, _)| img)
+}
+
+/// The profile read, keeping the raw reply of every chunk (the ring probe prints and saves them).
+///
+/// Returns the image and the accepted replies, one per chunk, in order.
+fn read_image_raw(
+    vendor: &mut dyn VendorTransport,
+    pace: Pace,
+) -> Result<(Vec<u8>, Vec<Vec<u8>>), AdapterError> {
     let mut img = Vec::with_capacity(codec::IMAGE_LEN);
+    let mut replies: Vec<Vec<u8>> = Vec::new();
     while img.len() < codec::IMAGE_LEN {
         let offset = img.len();
         let len = codec::CHUNK.min(codec::IMAGE_LEN - offset);
@@ -797,6 +809,7 @@ fn read_image(vendor: &mut dyn VendorTransport, pace: Pace) -> Result<Vec<u8>, A
                 match codec::parse_read_reply(&buf[..n], len, offset) {
                     Ok(data) => {
                         chunk = Some(data.to_vec());
+                        replies.push(buf[..n].to_vec());
                         break;
                     }
                     Err(why) => last = why,
@@ -818,7 +831,7 @@ fn read_image(vendor: &mut dyn VendorTransport, pace: Pace) -> Result<Vec<u8>, A
             std::thread::sleep(pace.chunk_pause);
         }
     }
-    Ok(img)
+    Ok((img, replies))
 }
 
 // ------------------------------------------------------------------------------ the write session
