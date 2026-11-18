@@ -14,7 +14,7 @@ use canvas_proto::display::{DisplayConfig, DisplayInfo, DisplaySource};
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
-use crate::displays::{default_config, save, validate, DisplaysFile};
+use crate::displays::{default_config, save, validate};
 use crate::state::App;
 
 /// What a configured display that the enumeration has not found reports.
@@ -82,27 +82,35 @@ pub async fn put_display(
     Json(config): Json<DisplayConfig>,
 ) -> ApiResult<Json<DisplayConfig>> {
     validate(&id, &config).map_err(ApiFailure::validation)?;
-    let changed = {
-        let mut store = app.store.write().await;
-        let mut next: DisplaysFile = store.displays.clone();
-        let changed = match next.displays.iter_mut().find(|c| c.device == config.device) {
-            Some(existing) if *existing == config => false,
-            Some(existing) => {
-                *existing = config.clone();
-                true
+    let persisted = config.clone();
+    // The config is published to memory only after the file is written: a failed save changes
+    // nothing (`GET` and the display task see what they saw before the PUT).
+    let changed = crate::store_io::store_publish(
+        &app,
+        |store| {
+            let changed = match store.displays.displays.iter_mut().find(|c| c.device == persisted.device) {
+                Some(existing) if *existing == persisted => false,
+                Some(existing) => {
+                    *existing = persisted.clone();
+                    true
+                }
+                None => {
+                    store.displays.displays.push(persisted.clone());
+                    true
+                }
+            };
+            Ok(changed)
+        },
+        |store, changed| {
+            if *changed {
+                save(&store.home, &store.displays)
+                    .map_err(|e| ApiFailure::internal(format!("could not save the display config: {e}")))
+            } else {
+                Ok(())
             }
-            None => {
-                next.displays.push(config.clone());
-                true
-            }
-        };
-        if changed {
-            save(&store.home, &next)
-                .map_err(|e| ApiFailure::internal(format!("could not save the display config: {e}")))?;
-            store.displays = next;
-        }
-        changed
-    };
+        },
+    )
+    .await?;
     // Only a real change wakes the task and drops its retry pacing. A repeated PUT of the same
     // config (a client that PUTs on a timer) must not reset a backoff in progress.
     if changed {
@@ -119,20 +127,26 @@ pub async fn delete_display(
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let device = DeviceId(id.clone());
-    {
-        let mut store = app.store.write().await;
-        let position = store
-            .displays
-            .displays
-            .iter()
-            .position(|c| c.device == device)
-            .ok_or_else(|| ApiFailure::not_found(format!("no saved config for display {id}")))?;
-        let mut next = store.displays.clone();
-        next.displays.remove(position);
-        save(&store.home, &next)
-            .map_err(|e| ApiFailure::internal(format!("could not save the display config: {e}")))?;
-        store.displays = next;
-    }
+    let key = device.clone();
+    let label = id.clone();
+    crate::store_io::store_publish(
+        &app,
+        |store| {
+            let position = store
+                .displays
+                .displays
+                .iter()
+                .position(|c| c.device == key)
+                .ok_or_else(|| ApiFailure::not_found(format!("no saved config for display {label}")))?;
+            store.displays.displays.remove(position);
+            Ok(())
+        },
+        |store, ()| {
+            save(&store.home, &store.displays)
+                .map_err(|e| ApiFailure::internal(format!("could not save the display config: {e}")))
+        },
+    )
+    .await?;
     app.displays.changed();
 
     // The task holds the adapter for each enumerate, connect and write. Taking the lock here waits

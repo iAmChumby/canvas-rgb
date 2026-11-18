@@ -50,25 +50,29 @@ pub async fn patch_output(
         apply_power(&app, power)?;
     }
 
-    // Persist.
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        if let Some(brightness) = patch.brightness {
-            store.config.settings.brightness = brightness;
-        }
-        if let Some(warmth) = patch.warmth {
-            store.config.settings.warmth = warmth;
-        }
-        if let Some(power) = patch.power {
-            store.config.settings.power = power;
-        }
-        store
-            .save_config()
-            .map_err(|e| crate::api::ApiFailure::internal(format!("could not save the config: {e}")))?;
-    }
+    // Persist. The memory change and the disk write move together off the runtime worker;
+    // the store lock is free while the disk is busy (#241).
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            if let Some(brightness) = patch.brightness {
+                store.config.settings.brightness = brightness;
+            }
+            if let Some(warmth) = patch.warmth {
+                store.config.settings.warmth = warmth;
+            }
+            if let Some(power) = patch.power {
+                store.config.settings.power = power;
+            }
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| crate::api::ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
 
     Ok(Json(get_output(State(app)).await.0))
 }

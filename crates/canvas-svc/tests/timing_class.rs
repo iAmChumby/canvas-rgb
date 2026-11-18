@@ -106,6 +106,7 @@ const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-core/src/cpu.rs", "sleep(Duration::from_millis(10))", "safe: the poll loop that waits for the engine to park, with a 10 s deadline"),
     ("canvas-daemon/src/logging.rs", "|| std::thread::sleep(std::time::Duration::from_secs(5))", "the property: the sleep is the stuck step run_bounded must give up on"),
     ("canvas-daemon/src/peripherals.rs", "sleep(Duration::from_millis(200))", "safe: asserts the gated sink has NOT written yet"),
+    ("canvas-daemon/src/peripherals.rs", "sleep(Duration::from_millis(5))", "absence check: polls up to 500 ms for a second kept-values write to reach the disk while the first is parked, and asserts none did (the writer mutex holds it back); a slower runner only gives a wrong second write more time to show, #241"),
     ("canvas-daemon/src/thumbnail.rs", "sleep(std::time::Duration::from_millis(100))", "safe: asserts a waiting task has NOT finished"),
     ("canvas-daemon/src/thumbnail.rs", "sleep(retry * 3)", "safe: sleeps past the retry interval; slowness only passes it further"),
     ("canvas-daemon/tests/scenes.rs", "sleep(Duration::from_millis(10))", "safe: the poll loop that waits for the engine to follow a light patch, with a 20 s deadline"),
