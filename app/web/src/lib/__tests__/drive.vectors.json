@@ -1,5 +1,6 @@
 {
   "note": "The Rust drive rule's verdicts for the fixed device ids. Printed by crates/canvas-adapters/examples/drive_vectors.rs; tools/drive-vectors.ps1 writes this file. The editor's TypeScript rule (app/web/src/lib/drive.ts) is checked against it.",
+  "not_driven": ["VID_3151&PID_4015"],
   "cases": [
     {
       "name": "the full keyboard HID path",

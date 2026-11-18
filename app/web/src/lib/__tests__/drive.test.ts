@@ -9,7 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { driven } from "@/lib/drive";
+import { NOT_DRIVEN_DEVICES, driven } from "@/lib/drive";
 
 interface VectorCase {
   name: string;
@@ -19,6 +19,7 @@ interface VectorCase {
 
 interface Vectors {
   note: string;
+  not_driven: string[];
   cases: VectorCase[];
 }
 
@@ -39,6 +40,12 @@ function vectorsPath(): string {
 }
 
 describe("the Rust drive rule's own output", () => {
+  it("drive.ts lists exactly the HID paths the daemon never drives", () => {
+    // A pattern added on one side only, that no case matches, fails here (#501 review).
+    const vectors = JSON.parse(readFileSync(vectorsPath(), "utf8")) as Vectors;
+    expect([...NOT_DRIVEN_DEVICES]).toEqual(vectors.not_driven);
+  });
+
   it("drive.ts matches the Rust drive vectors on every id", () => {
     const vectors = JSON.parse(readFileSync(vectorsPath(), "utf8")) as Vectors;
     // A trimmed or stale file fails here rather than passing quietly.

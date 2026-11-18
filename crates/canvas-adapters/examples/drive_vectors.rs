@@ -138,6 +138,11 @@ pub fn print_json() -> String {
     out.push_str(
         "  \"note\": \"The Rust drive rule's verdicts for the fixed device ids. Printed by crates/canvas-adapters/examples/drive_vectors.rs; tools/drive-vectors.ps1 writes this file. The editor's TypeScript rule (app/web/src/lib/drive.ts) is checked against it.\",\n",
     );
+    // The pattern list itself, so a pattern added on either side that no case below matches
+    // still fails a test (#501 review).
+    let patterns: Vec<String> =
+        canvas_adapters::drive::NOT_DRIVEN.iter().map(|p| json_string(p)).collect();
+    out.push_str(&format!("  \"not_driven\": [{}],\n", patterns.join(", ")));
     out.push_str("  \"cases\": [\n");
     let cases = cases();
     for (index, case) in cases.iter().enumerate() {
