@@ -655,6 +655,12 @@ export function usePatternEditor(
   const enqueueHistory = useCallback(
     (op: (done: () => void) => void) => {
       historyPending.current.push(() => {
+        // A closed editor runs no queued step: a second Undo or Redo waiting behind a write
+        // that lands after the unmount must not write the light (#491, review 5 B9).
+        if (!mounted.current) {
+          releaseHistory();
+          return;
+        }
         try {
           op(releaseHistory);
         } catch {

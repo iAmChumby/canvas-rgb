@@ -234,6 +234,50 @@ describe("#491 the unmount guard", () => {
     expect(api.lights.patch.mock.calls.length).toBe(patchesBefore);
   });
 
+  it("U7: two queued shape undos: the editor closes during the first write, and the second never goes out (r5 B9)", async () => {
+    patchSnap({ lights: [fanLight("strip")], devices: [fanDevice()] });
+    api.lights.patch.mockResolvedValue({ ...fanLight("ring") });
+    api.lights.list.mockResolvedValue({ lights: [fanLight("ring")] });
+    const view = show(blank(8, "strip"));
+    await settle();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: "Ring" }));
+    });
+    await frames();
+    api.lights.patch.mockResolvedValue({ ...fanLight("strip") });
+    api.lights.list.mockResolvedValue({ lights: [fanLight("strip")] });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: "Line" }));
+    });
+    await frames();
+
+    let land: () => void = () => {};
+    api.lights.patch.mockReset().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          land = () => resolve({ ...fanLight("ring") });
+        }),
+    );
+    api.lights.list.mockResolvedValue({ lights: [fanLight("ring")] });
+    // Two presses inside one PATCH round trip: the first writes, the second waits in the lane.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    });
+    const patchesBefore = api.lights.patch.mock.calls.length;
+    expect(patchesBefore).toBe(1);
+    view.unmount();
+    await settle();
+
+    await act(async () => {
+      land();
+      for (let i = 0; i < 40; i++) await Promise.resolve();
+    });
+    await frames();
+    // The queued second undo must not write the light after the editor is gone.
+    expect(api.lights.patch.mock.calls.length).toBe(patchesBefore);
+  });
+
   it("U3: the shape choice's PATCH in flight: the editor closes, and the pattern does not change", async () => {
     patchSnap({ lights: [fanLight("strip")], devices: [fanDevice()] });
     api.lights.patch.mockResolvedValue({ ...fanLight("strip") });
