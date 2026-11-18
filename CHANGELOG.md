@@ -55,6 +55,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Effects: a library tile whose render runs out of time now gives a plain reason, and the time spent loading a slow effect counts toward the render budget instead of being added on top of it. (#58)
 - Installer notes: a failed start of canvas-rgb after an update is now named in the final note with what to do, and an uninstall that found no installation no longer claims it could not stop the service. (#77)
 
+### Security
+
+- The editor's framework, Next.js, is on 16.4.6, which fixes GHSA-mfr8-8qww-v76h (information disclosure across root params when a `use cache` function runs through `unstable_cache()`). The editor is a static export and uses neither feature, so the fix removes a build-time security warning and changes nothing you can see. (#463)
+
 ## [0.17.0] - 2026-11-16
 
 ### Added
