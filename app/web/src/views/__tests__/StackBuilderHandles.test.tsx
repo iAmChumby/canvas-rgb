@@ -3,6 +3,7 @@
 // dial and slider mirroring both, and one gesture being one undo step.
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { plainEntry } from "@/test/historyGuard";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dismissNotifications, NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
@@ -46,6 +47,7 @@ beforeAll(() => {
 });
 
 afterEach(async () => {
+  plainEntry();
   cleanup();
   vi.restoreAllMocks();
   act(() => dismissNotifications());

@@ -58,6 +58,7 @@ export function PatternEditor({
   note,
   onSave,
   onCancel,
+  ownsEntry = false,
 }: {
   /** The loaded pattern: the whole document, frames, motion and unknown fields included. */
   pattern: Pattern;
@@ -66,6 +67,12 @@ export function PatternEditor({
   /** The document to save: the loaded pattern with this frame's colours replaced. */
   onSave?: (pattern: Pattern) => void | Promise<void>;
   onCancel?: () => void;
+  /**
+   * True when the editor is a page of its own, so its history entry is the editor and nothing
+   * else: a rail link replaces that entry, and one Back goes to the page before it. False for the
+   * panel in the effects view, whose entry is the effects page itself and stays behind the link.
+   */
+  ownsEntry?: boolean;
 }) {
   // The draft's epoch, made once when the editor opens: 16 hex characters, as the daemon's own
   // pages make them.
@@ -303,7 +310,9 @@ export function PatternEditor({
    *
    * The guard's entry is a copy of the editor's on top of it. A leave takes it back first, then
    * closes or navigates from the editor's own entry:
-   *   - a rail link's page change is a push, which drops the copy;
+   *   - a rail link's page change is a push, which drops the copy; from the editor's own page it
+   *     replaces the editor's entry, so one Back goes to the page the person came from, and the
+   *     copy stays ahead of the new page, inert;
    *   - a Cancel, or a Back with no page of the app behind, replaces the editor's entry with the
    *     effects page, and the copy stays ahead of it (a browser cannot delete a forward entry);
    *   - a Back with a page behind goes to that page, and both entries stay ahead of it: the copy,
@@ -330,7 +339,7 @@ export function PatternEditor({
     // A rail link the shell held is the page change that goes now. A Back with no page of the
     // app behind the editor closes onto the page the Cancel key goes to, not out of the document.
     if (reason !== "back" && hasPendingNavigation()) {
-      dropSentinel(continueNavigation);
+      dropSentinel(() => continueNavigation({ replace: ownsEntry }));
       return;
     }
     dropSentinel(() => onCancel?.());
