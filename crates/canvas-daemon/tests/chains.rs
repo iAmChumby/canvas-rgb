@@ -889,6 +889,9 @@ async fn a_stale_session_is_a_409() {
 async fn a_failed_raise_leaves_the_header_and_no_record() {
     let rig = rig("failed-raise", fake(EARLIER).await, true).await;
     assert!(connected(&rig).await, "the daemon never applied a device list");
+    // The refusal is meant to be silence: lower the reply deadline here only, so the test does
+    // not wait out the 60 s hang guard on the one request that is supposed to fail (#519).
+    rig.reply_timeout.set(Duration::from_secs(2));
     rig.server.fail_resizes(true);
 
     let (status, body) = start(&rig, 0).await;
@@ -2046,6 +2049,8 @@ async fn a_start_puts_an_earlier_header_back_first() {
     canvas_daemon::chain_records::write_restore(&rig.home, &pending).expect("the restore record");
 
     // While the device still refuses, the start is refused and the record is left as it was.
+    // Lower the reply deadline for this intended silence only (#519).
+    rig.reply_timeout.set(Duration::from_secs(2));
     rig.server.fail_resizes(true);
     let (status, body) = start(&rig, 0).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -2053,6 +2058,9 @@ async fn a_start_puts_an_earlier_header_back_first() {
     assert_eq!(canvas_daemon::chain_records::read_restore(&rig.home), Some(pending.clone()));
 
     // Once it answers, the start puts header 1 back and then opens the setup on header 0.
+    // Restore the hang guard first, so a loaded runner cannot turn a slow-but-live reply into
+    // "not connected" (#519).
+    rig.reply_timeout.set(TEST_REPLY_TIMEOUT);
     rig.server.fail_resizes(false);
     // The silent device dropped the connection; the supervisor makes a new one.
     assert!(
