@@ -21,6 +21,7 @@ import type { FitKind } from "@/proto/FitKind";
 import type { LightView } from "@/proto/LightView";
 import type { Pattern } from "@/proto/Pattern";
 import type { Rgb8 } from "@/proto/Rgb8";
+import type { SequenceShape } from "@/proto/SequenceShape";
 
 /**
  * How a pattern built on `builtOn` lands on a light of `targetLeds` LEDs in `target` arrangement.
@@ -49,9 +50,32 @@ export function kindWords(builtOn: BuiltOn): string {
 }
 
 /**
+ * How a group whose pattern runs as one sequence takes the pattern (#468, `Group.sequence`):
+ * fitted once to every member's LEDs joined end to end, in the run's own shape, so the whole run
+ * lands one way. `undefined` for a group with no sequence, where each light plays the whole
+ * pattern on its own.
+ *
+ * `ledCounts` is the LEDs of the members the pattern lands on, in group order. The daemon's rule:
+ * `group_fits` in `crates/canvas-daemon/src/scenes.rs`, where a ring runs as a ring and a line as
+ * a strip.
+ */
+export function runFit(
+  builtOn: BuiltOn,
+  sequence: SequenceShape | null | undefined,
+  ledCounts: number[],
+): FitKind | undefined {
+  if (!sequence) return undefined;
+  const total = ledCounts.reduce((sum, count) => sum + count, 0);
+  return fitKind(builtOn, total, sequence === "ring" ? "ring" : "strip");
+}
+
+/**
  * How a pattern lands on the lights of one group: how many take it exactly, how many are flagged
  * (stretched, another shape, or a single LED showing the first colour), and how many there are.
  * Nothing is refused, so `flagged` is the rest of `total`.
+ *
+ * A group with a `sequence` fits the pattern once to the whole run, so every light's flag is the
+ * run's — `exact` is every light or none. That is what the daemon reports (#504).
  *
  * A light whose device is not connected, or whose zone reports no LEDs, is not counted: the
  * engine plays nothing there, so it is neither a fit nor stretched. `total` is the lights that
@@ -60,15 +84,20 @@ export function kindWords(builtOn: BuiltOn): string {
 export function groupFit(
   builtOn: BuiltOn,
   lights: LightView[],
+  sequence?: SequenceShape | null,
 ): { exact: number; flagged: number; total: number } {
+  const considered = lights.filter((light) => light.connected && light.led_count > 0);
+  const run = runFit(
+    builtOn,
+    sequence,
+    considered.map((light) => light.led_count),
+  );
   let exact = 0;
-  let total = 0;
-  for (const light of lights) {
-    if (!light.connected || light.led_count <= 0) continue;
-    total += 1;
-    if (fitKind(builtOn, light.led_count, light.light.arrangement) === "exact") exact += 1;
+  for (const light of considered) {
+    const fit = run ?? fitKind(builtOn, light.led_count, light.light.arrangement);
+    if (fit === "exact") exact += 1;
   }
-  return { exact, flagged: total - exact, total };
+  return { exact, flagged: considered.length - exact, total: considered.length };
 }
 
 /**

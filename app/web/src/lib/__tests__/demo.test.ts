@@ -8,6 +8,7 @@ import { htmlLimitSentence } from "@/lib/htmlLimit";
 import type { EffectsResponse } from "@/proto/EffectsResponse";
 import type { Pattern } from "@/proto/Pattern";
 import type { PatternsResponse } from "@/proto/PatternsResponse";
+import type { Scene } from "@/proto/Scene";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { Stack } from "@/proto/Stack";
 import type { StacksResponse } from "@/proto/StacksResponse";
@@ -423,5 +424,66 @@ describe("the demo's fan floor", () => {
     const demo = await freshDemo();
     const answer = await demo.demoRequest("PATCH", "/api/v1/fans/headers/gpu_fan1", { mode: "fixed", percent: 30 });
     expect(answer).toMatchObject({ ok: true, header: "gpu_fan1" });
+  });
+});
+
+describe("the demo's pattern fit note follows the group's shape (#504)", () => {
+  /** A fresh demo backend on `?state=pattern-fits`: two 40-LED fans playing a ring of 40. */
+  async function fitsDemo(): Promise<typeof import("@/lib/demo")> {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/?state=pattern-fits");
+    return import("@/lib/demo");
+  }
+
+  /** The fit the demo reports for each light of one group, in the group's own order. */
+  function fitsOf(answer: ScenesResponse, group: string): string[] {
+    return answer.group_states.find((g) => g.id === group)?.fits.map((f) => f.fit) ?? [];
+  }
+
+  /** The active scene, as `GET /scenes` answers it. */
+  async function activeScene(demo: typeof import("@/lib/demo")): Promise<Scene> {
+    const answer = (await demo.demoRequest("GET", "/api/v1/scenes", undefined)) as ScenesResponse;
+    const scene = answer.scenes.find((s) => s.id === answer.active);
+    if (!scene) throw new Error("the demo has no active scene");
+    return scene;
+  }
+
+  /** Saves `scene` back with the group's `sequence` set, or taken away, as the sheet does. */
+  async function saveShape(
+    demo: typeof import("@/lib/demo"),
+    scene: Scene,
+    sequence: "ring" | "line" | undefined,
+  ): Promise<void> {
+    const next = structuredClone(scene);
+    const group = next.groups.find((g) => g.id === "g-pat-fit");
+    if (!group) throw new Error("the scenario has no Front fans group");
+    if (sequence) group.sequence = sequence;
+    else delete group.sequence;
+    await demo.demoRequest("PUT", `/api/v1/scenes/${next.id}`, {
+      scene: next,
+      expected_rev: scene.rev,
+    });
+  }
+
+  it("One ring reports the fit of the whole run, as the daemon does", async () => {
+    const demo = await fitsDemo();
+    const scene = await activeScene(demo);
+    // Each light on its own: a 40-LED fan against a pattern built on a ring of 40 fits exactly.
+    expect(fitsOf((await demo.demoRequest("GET", "/api/v1/scenes", undefined)) as ScenesResponse, "g-pat-fit")).toEqual([
+      "exact",
+      "exact",
+    ]);
+
+    // One ring, as the group sheet saves it. The run is both fans' 80 LEDs against a ring of 40,
+    // so the daemon stretches it for both (crates/canvas-daemon/src/scenes.rs `group_fits`).
+    await saveShape(demo, scene, "ring");
+    const ringed = (await demo.demoRequest("GET", "/api/v1/scenes", undefined)) as ScenesResponse;
+    expect(fitsOf(ringed, "g-pat-fit")).toEqual(["stretched", "stretched"]);
+
+    // Each light takes the shape away again: the per-light fit is back.
+    const saved = await activeScene(demo);
+    await saveShape(demo, saved, undefined);
+    const each = (await demo.demoRequest("GET", "/api/v1/scenes", undefined)) as ScenesResponse;
+    expect(fitsOf(each, "g-pat-fit")).toEqual(["exact", "exact"]);
   });
 });
