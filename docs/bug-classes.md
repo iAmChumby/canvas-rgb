@@ -448,10 +448,11 @@ line. Three mechanisms, and one bug the timing only exposed.
   (`a_rescan_that_starts_from_an_unsettled_list_awaits_and_ends_with_the_right_answer`,
   `crates/canvas-adapters/tests/openrgb_rescan.rs`) asserted `stall < 600` on the longest gap of a 5 ms ticker,
   and `timing_class.rs` did not know `stall`. `stall`, `stalled`, `stall_ms`, `longest_stall` and
-  `longest_stall_ms` are clock words now. The test judges an event instead: a ticker wakes in the middle of
-  the wait and asks for a refresh, and the fake counts the list reads (`list_reads_probe`); a rescan that
-  awaits answers it with the held list and no read, one that spins runs the ticker only after its hold is
-  gone. **Rule:** a test of "the runtime kept running" asks what state the other task found, not how long it
+  `longest_stall_ms` are clock words now. The test judges an event instead: the rescan and a refresher run in one
+  `tokio::join!`, the refresher waits for the fake to take packet 140 and then asks for a refresh, and the fake
+  counts the list reads (`list_reads_probe`); a rescan that awaits answers it with the held list and no read, one
+  that spins runs the refresher only after its hold is gone. No timer sits between the packet and the refresh.
+  **Rule:** a test of "the runtime kept running" asks what state the other task found, not how long it
   waited to find it.
 - [#429](https://github.com/iAmChumby/canvas-rgb/issues/429):
   `a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry` (`crates/canvas-daemon/tests/chains.rs`)

@@ -586,7 +586,8 @@ async fn a_frame_sent_after_the_rescan_request_and_before_packet_100_never_lands
 /// The window of the test above, with an adapter that holds no list yet (connected, never discovered): the hold
 /// treated an empty list as settled, so `discover()` and the controller lookup of a frame read OpenRGB's list
 /// by position right through it, between the swap and the 100, and cached what they read. The fake is parked
-/// there (swapped, 100 held), and nothing is timed.
+/// there (swapped, 100 held). The only clock is the rescan's first window, set to 30 s so that a stall of the
+/// test runtime cannot release the hold early: the hold lasts until the test releases the 100.
 ///
 /// The verdicts are what the daemon and the lights would see: the refresh answers no list (a list read in the
 /// window is a mixed one, and the daemon would apply it), the fake was asked for no controller, and no frame
@@ -596,7 +597,8 @@ async fn an_empty_list_under_a_rescan_hold_is_not_read_and_no_frame_goes_out_by_
     let server = v5_server(vec![twin("a"), twin("b")]).await;
     server.park_list_change(true);
     server.rescan_order(vec![1, 0]);
-    let mut adapter = adapter(&server);
+    let timing = RescanTiming { first: Duration::from_secs(30), settle: Duration::from_millis(250), cap: Duration::from_secs(60) };
+    let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port()).with_rescan_timing(timing);
     adapter.connect().await.expect("connect");
     let a = DeviceId("openrgb:a".into());
     let b = DeviceId("openrgb:b".into());
@@ -717,19 +719,20 @@ async fn a_read_back_sent_after_the_rescan_request_never_answers_with_another_de
 /// on the list must not make the settle read claim success without reading: the wait loop then never reaches an
 /// await point, one runtime worker spins from the moment the list is quiet, and the answer is "still detecting".
 ///
-/// The runtime is single-threaded, so a task on it can run only while the rescan awaits. A spin from the end
-/// of the settle window (250 ms) to the end of the first window (3 s) lets no other task run, and the spin only
-/// ends when the first window does: the hold is released then and the settle read begins. A ticker that wakes
-/// at 400 ms therefore finds one of two states. Awaiting rescan: the hold is still on, and a refresh asked for
-/// at that moment is answered with the held list and no read of OpenRGB's list. Spinning rescan: the ticker
-/// runs only after the first window, the hold is gone, and its refresh reads the list.
+/// The runtime is single-threaded, so a task on it can run only while the rescan awaits. The list is quiet when
+/// the rescan starts (the test waits out the settle window first), so a wait that spins starts spinning at once
+/// and runs no other task until the first window (3 s) ends, which is when the hold is released and the settle
+/// read begins. A refresher, joined with the rescan, waits for the fake to take packet 140 and then asks for a
+/// refresh. Awaiting rescan: the refresher runs at once, the hold is still on, and the refresh is answered with
+/// the held list and no read of OpenRGB's list. Spinning rescan: the refresher runs only after the first window,
+/// the hold is gone, and its refresh reads the list.
 ///
-/// The verdict is the number of list reads the fake saw by the time the ticker's refresh was answered, not a
-/// duration. A busy machine that delays the ticker by less than the 2.6 s between its timer and the end of
-/// the window leaves it unchanged; the real-time limit only ends a hang.
+/// The verdict is the number of list reads the fake saw by the time the refresh was answered. No timer sits
+/// between the packet and the refresh, so a busy machine cannot move the verdict: the refresh happens after the
+/// fake took packet 140 in the order of events, and the 3 s window only has to outlast the refresh's own round
+/// trip. The real-time limit of 60 s only ends a hang (a paused clock cannot be used: the spin would hang).
 #[tokio::test]
 async fn a_rescan_that_starts_from_an_unsettled_list_awaits_and_ends_with_the_right_answer() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     let server = v5_server(vec![stick("one")]).await;
     server.disable_detection(true);
     let timing = RescanTiming { first: Duration::from_millis(3000), settle: Duration::from_millis(250), cap: Duration::from_secs(8) };
@@ -751,32 +754,28 @@ async fn a_rescan_that_starts_from_an_unsettled_list_awaits_and_ends_with_the_ri
     }
     assert!(refused, "the list change never made the list unsettled");
 
+    // The list is quiet before the rescan starts. Code after the sleep that is no assert.
+    tokio::time::sleep(timing.settle + Duration::from_millis(100)).await;
     let reads_before = server.list_reads_probe()();
-    let reads_at_refresh = std::sync::Arc::new(AtomicU32::new(u32::MAX));
-    let ticker = {
-        let mut refresher = adapter.clone();
-        let probe = server.list_reads_probe();
-        let reads_at_refresh = std::sync::Arc::clone(&reads_at_refresh);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(400)).await;
-            let refreshed = refresher.discover().await;
-            reads_at_refresh.store(probe() - reads_before, Ordering::SeqCst);
-            refreshed.map(|list| list.len())
-        })
+    let mut refresher = adapter.clone();
+    let refresh = async {
+        until("the fake took packet 140", || server.rescan_count() == 1).await;
+        let refreshed = refresher.discover().await;
+        (server.list_reads_probe()() - reads_before, refreshed.map(|list| list.len()))
     };
     // The real-time limit only ends a hang: a wait that never ends fails the test instead of stalling it.
-    let failed = tokio::time::timeout(Duration::from_secs(60), adapter.rescan_shared())
-        .await
-        .expect("the rescan never ended")
-        .expect_err("OpenRGB started no detection");
-    let refreshed = ticker.await.expect("the ticker ends");
+    let (rescanned, (reads_at_refresh, refreshed)) =
+        tokio::time::timeout(Duration::from_secs(60), async { tokio::join!(adapter.rescan_shared(), refresh) })
+            .await
+            .expect("the rescan never ended");
+    let failed = rescanned.expect_err("OpenRGB started no detection");
 
     assert_eq!(rescan_miss(&failed), Some(RescanMiss::NotRedetected), "{failed:?}");
-    assert_eq!(refreshed.expect("the refresh at 400 ms"), 1, "the refresh answered with the held list");
+    assert_eq!(refreshed.expect("the refresh during the rescan"), 1, "the refresh answered with the held list");
     assert_eq!(
-        reads_at_refresh.load(Ordering::SeqCst),
+        reads_at_refresh,
         0,
-        "the refresh at 400 ms read OpenRGB's list: the runtime ran no other task while the rescan waited, so the hold was gone when it ran (a wait that spins never reaches an await)"
+        "the refresh read OpenRGB's list: the runtime ran no other task while the rescan waited, so the hold was gone when it ran (a wait that spins never reaches an await)"
     );
     // The hold is over with the call and the list is the settled one: a frame goes out again.
     adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.expect("a frame after the rescan");
