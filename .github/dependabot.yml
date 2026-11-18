@@ -44,7 +44,7 @@ updates:
       # The editor build runs lint, so it stays on 5.9.x. Remove this ignore when
       # typescript-eslint supports TS 7.
       - dependency-name: "typescript"
-        update-types: ["version-update:semver-major"]
+        versions: ["7.x"]
 
   - package-ecosystem: npm
     directory: "/site"
