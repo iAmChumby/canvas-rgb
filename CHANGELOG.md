@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-18
+
 ### Added
 
 - Patterns: pick the shape a light is in (Line, Ring, or Grid where it is one) on its Devices row or in the pattern editor, paint a Gradient round the ring with Wrap so the end meets the start, and turn on Spin to make the pattern turn along its LEDs at the same speed on any fan; colours blend in OKLab, so red to blue passes through purple. (#468)
@@ -453,7 +455,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.1...v0.16.0
 [0.13.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.0...v0.13.1
