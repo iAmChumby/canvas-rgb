@@ -316,6 +316,7 @@ impl CoreEngine {
                 }
             }
         }
+        let timing = crate::scene_engine::PatternTiming::of_effect(effect.as_deref());
         GroupSlot {
             id: group.id,
             members: group.members,
@@ -327,6 +328,7 @@ impl CoreEngine {
             strip_read,
             effect_generation: 0,
             started: Instant::now(),
+            timing,
             pending_props: None,
             failed,
         }

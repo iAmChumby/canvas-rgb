@@ -1228,6 +1228,40 @@ async fn a_stroke_changes_the_lit_devices_without_rebuilding_the_scene() {
     );
 }
 
+/// The editor's heartbeat sends the document that is already on the lights. The effect it would
+/// install restarts its clock and fits every frame again (`GroupSlot::install`), so a playing
+/// pattern would start over every five seconds: the same document is not installed again, and a
+/// different one is (#481).
+#[tokio::test]
+async fn the_same_document_again_is_not_installed_over_a_running_pattern() {
+    let rig = draft_rig(Vec::new()).await;
+    let blue = Rgb8::new(0, 0, 200);
+    let green = Rgb8::new(0, 200, 0);
+    let draft = pattern_with("Draft", LEDS, blue);
+    let (status, answer) = put_pattern_draft(&rig, &draft, EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "the first document").await;
+    let landed = rig.app.scene.takeover_generation();
+
+    let (status, answer) = put_pattern_draft(&rig, &draft, EPOCH, 2).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["applied"], serde_json::json!(true), "the beat still keeps the lease: {answer}");
+    assert_eq!(
+        rig.app.scene.takeover_generation(),
+        landed,
+        "the same document is not installed again, so its clock keeps running"
+    );
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "the same document still plays").await;
+
+    let (status, answer) = put_pattern_draft(&rig, &pattern_with("Draft", LEDS, green), EPOCH, 3).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        rig.app.scene.takeover_generation() > landed,
+        "a different document is installed, and its clock starts over"
+    );
+    shows_marked(&rig.a, LEDS as usize, 0, green, "the changed document").await;
+}
+
 #[tokio::test]
 async fn an_older_stroke_never_replaces_a_newer_one() {
     let rig = draft_rig(Vec::new()).await;
@@ -1934,4 +1968,238 @@ async fn a_sequence_group_reports_the_fit_of_the_whole_run() {
         want(vec![FitKind::Stretched, FitKind::Stretched, FitKind::Stretched])[..2].to_vec(),
         "a ring of 16"
     );
+}
+
+// ---------------------------------------------------------------- #481: the frames' memory across lights
+
+/// Waits (real time) until `sink`'s newest frame is one `ok` accepts.
+async fn shows_where(sink: &Rec, what: &str, ok: impl Fn(&[Rgb8]) -> bool) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        if sink.last().is_some_and(|f| ok(&f)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{what}: the frame never matched; last frame starts {:?}", sink.last().map(|f| f[..3.min(f.len())].to_vec()));
+}
+
+/// A pattern of `frames` frames of `LEDS` LEDs that each hold 10 ms, so it plays through them (a
+/// pattern with one frame, or with no time in its cycle, stands still and keeps none fitted).
+fn reel(frames: usize, lit: Rgb8) -> Pattern {
+    let mut reel = pattern_with("Reel", LEDS, lit);
+    let frame = reel.frames[0].clone();
+    reel.frames = (0..frames).map(|_| Frame { hold: 10, ..frame.clone() }).collect();
+    reel
+}
+
+/// A scene of two groups: `big` plays `effect` on the lights of `big` (a strip each), `small` plays
+/// the reel on one ring of twelve.
+fn reel_scene(big: &[String], effect: &str, props: Props) -> ScenesFile {
+    let members: Vec<&str> = big.iter().map(String::as_str).collect();
+    ScenesFile {
+        schema_version: SCENES_SCHEMA,
+        active: "main".into(),
+        scenes: vec![Scene {
+            id: "main".into(),
+            name: "Main".into(),
+            rev: 1,
+            groups: vec![
+                group("big", &members, effect, props),
+                group("small", &["fake:a#z0"], "pattern:Reel", Props::new()),
+            ],
+        }],
+    }
+}
+
+/// Four strips of `sizes` LEDs and the ring of twelve the `small` group plays on; the `big` group
+/// plays the reel of 256 frames.
+async fn reel_rig(sizes: [u32; 4]) -> Rig {
+    reel_rig_with(sizes, reel(256, Rgb8::new(0, 0, 200)), "pattern:Reel", Props::new()).await
+}
+
+/// [`reel_rig`] with the reel the store holds, and what the `big` group plays, as given.
+async fn reel_rig_with(sizes: [u32; 4], stored: Pattern, effect: &str, props: Props) -> Rig {
+    let ids: Vec<String> = (0..4).map(|i| format!("fake:big{i}")).collect();
+    let mut devices = vec![device(A), device(B)];
+    let mut lights = vec![light(A), light(B)];
+    for (id, leds) in ids.iter().zip(sizes) {
+        devices.push(device_of(id, leds));
+        lights.push(light_of(id, Arrangement::Strip));
+    }
+    let big: Vec<String> = ids.iter().map(|id| format!("{id}#z0")).collect();
+    rig_full(vec![stored], reel_scene(&big, effect, props), devices, lights).await
+}
+
+#[tokio::test]
+async fn a_pattern_past_the_scenes_frame_budget_is_dark_with_a_sentence_and_the_rest_play() {
+    // 256 frames on four different strips of about 4096 LEDs: 256 x 16 378 fitted LED-frames, past
+    // the 4 000 000 a scene keeps (one such light alone is 1 048 576, 28 MB and 124 ms to fit).
+    let rig = reel_rig([4096, 4095, 4094, 4093]).await;
+    let states = group_states(&rig).await;
+    let said = states.get("big").cloned().flatten().expect("the big group is dark and says why");
+    assert!(
+        said.contains("Reel has 256 frames") && said.contains("4192768") && said.contains("4000000"),
+        "the sentence names the pattern, its frames, its cost and the limit: {said}"
+    );
+    assert!(said.contains("fewer frames") && said.contains("fewer lights"), "and the way out: {said}");
+    assert_eq!(states.get("small"), Some(&None), "the group inside the budget is not failed");
+    // The group that fits plays the reel (LED 0 blue); every light of the group that does not is black.
+    shows_marked(&rig.a, LEDS as usize, 0, Rgb8::new(0, 0, 200), "the group inside the budget").await;
+    for id in ["fake:big0", "fake:big3"] {
+        shows_where(&sink(&rig, id), "a light of the group past the budget", |f| {
+            f.len() > 4000 && f.iter().all(|c| *c == Rgb8::BLACK)
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn lights_of_one_shape_cost_one_fit_so_the_same_four_lights_play() {
+    // The same four strips at 4096 LEDs each share one fitted set: 256 x 4096 = 1 048 576, inside it.
+    let rig = reel_rig([4096; 4]).await;
+    let states = group_states(&rig).await;
+    assert_eq!(states.get("big"), Some(&None), "four lights of one shape are one fit: {states:?}");
+    let want = Rgb8::new(0, 0, 200);
+    // The ring of twelve is stretched onto a strip of 4096 by LED order: its first colour covers the first LEDs.
+    shows_where(&sink(&rig, "fake:big0"), "a light of the shared fit", |f| {
+        f.len() == 4096 && f[0] == want && f[4095] == Rgb8::BLACK
+    })
+    .await;
+}
+
+/// The 256-frame reel on four strips of four different sizes is past the scene's budget on every path
+/// that builds a pattern group, not only the full build (#481): each of the three below leaves the
+/// group dark with the sentence, and the group inside the budget playing.
+const OVER: [u32; 4] = [4096, 4095, 4094, 4093];
+
+fn said_over(states: &std::collections::BTreeMap<String, Option<String>>) -> String {
+    let said = states.get("big").cloned().flatten().expect("the big group is dark and says why");
+    assert!(said.contains("Reel has 256 frames") && said.contains("4000000"), "the sentence names the pattern and the limit: {said}");
+    assert_eq!(states.get("small"), Some(&None), "the group inside the budget is not failed: {states:?}");
+    said
+}
+
+async fn big_strips_go_dark(rig: &Rig, what: &str) {
+    for id in ["fake:big0", "fake:big3"] {
+        shows_where(&sink(rig, id), what, |f| f.len() > 4000 && f.iter().all(|c| *c == Rgb8::BLACK)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_scene_save_that_gives_a_group_the_reel_past_the_budget_leaves_it_dark_with_a_sentence() {
+    // The group plays a solid red on the four strips; the store holds the 256-frame reel.
+    let rig = reel_rig_with(OVER, reel(256, Rgb8::new(0, 0, 200)), "solid", color(RED)).await;
+    shows_where(&sink(&rig, "fake:big0"), "the strips before", |f| f.len() > 4000 && f[0] == rgb(RED)).await;
+    assert_eq!(group_states(&rig).await.get("big"), Some(&None));
+
+    put_main(&rig, |scene| {
+        scene.groups[0].plays = Plays::Effect { effect: "pattern:Reel".into(), props: Props::new() };
+    })
+    .await;
+
+    said_over(&group_states(&rig).await);
+    big_strips_go_dark(&rig, "a group the save gave the reel past the budget").await;
+    shows_marked(&rig.a, LEDS as usize, 0, Rgb8::new(0, 0, 200), "the group inside the budget").await;
+}
+
+#[tokio::test]
+async fn a_pattern_save_that_grows_past_the_budget_leaves_the_groups_playing_it_dark_with_a_sentence() {
+    // The store holds a one-frame reel, which the four strips play inside the budget.
+    let rig = reel_rig_with(OVER, reel(1, Rgb8::new(0, 0, 200)), "pattern:Reel", Props::new()).await;
+    shows_where(&sink(&rig, "fake:big0"), "the strips before", |f| f.len() > 4000 && f[0] == Rgb8::new(0, 0, 200)).await;
+    assert_eq!(group_states(&rig).await.get("big"), Some(&None));
+
+    // The reel is saved again with 256 frames.
+    let (status, answer) = put_pattern_body(&rig, "pattern:Reel", &reel(256, Rgb8::new(0, 0, 200))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    said_over(&group_states(&rig).await);
+    big_strips_go_dark(&rig, "a group playing a pattern saved past the budget").await;
+}
+
+#[tokio::test]
+async fn a_pattern_draft_keeps_the_groups_past_the_budget_dark_with_their_sentence() {
+    // The scene's full build already refused the big group.
+    let rig = reel_rig(OVER).await;
+    said_over(&group_states(&rig).await);
+    big_strips_go_dark(&rig, "the group past the budget before the draft").await;
+
+    // A draft on the rings takes the lights over: the strips are not its kind, so the scene's groups
+    // play on, dimmed. The refused group is still refused.
+    let (status, answer) = put_pattern_draft(&rig, &pattern_with("Draft", LEDS, Rgb8::new(0, 200, 0)), EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, Rgb8::new(0, 200, 0), "the ring of the draft's kind").await;
+    // The takeover's frame is on every light by now. Wait for a few more frames of the strips (the
+    // reel would be in them if it were built), then read what they hold.
+    for id in ["fake:big0", "fake:big3"] {
+        let strip = sink(&rig, id);
+        let until = strip.seen() + 5;
+        shows_where(&strip, "five more frames on the strip", |_| strip.seen() >= until).await;
+        let last = strip.last().expect("a frame");
+        assert!(last.iter().all(|c| *c == Rgb8::BLACK), "{id}: a group past the budget plays under a draft");
+    }
+    said_over(&group_states(&rig).await);
+}
+
+/// Which colour a marker is, as the channel it lights: 0 red, 1 green, 2 blue.
+type Channel = usize;
+
+fn channel_of(c: &Rgb8, channel: Channel) -> u8 {
+    [c.r, c.g, c.b][channel]
+}
+
+/// Where the marker of `channel` is in `frame`: its brightest LED, once it is lit enough to be one
+/// (a turning pattern is blended across two LEDs, and the lights dim it a little).
+fn marker(frame: &[Rgb8], channel: Channel) -> Option<usize> {
+    let (index, level) = frame.iter().enumerate().map(|(i, c)| (i, channel_of(c, channel))).max_by_key(|(_, level)| *level)?;
+    (level > 60).then_some(index)
+}
+
+/// Where the marker of `channel` is in the first frame after the first `since` that has one; waits (real
+/// time) for that frame.
+async fn first_marker_since(sink: &Rec, since: usize, channel: Channel, what: &str) -> usize {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        if let Some(index) = sink.since(since).iter().find_map(|f| marker(f, channel)) {
+            return index;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{what}: no frame showed a marker in channel {channel}");
+}
+
+/// A stroke that changes colours only keeps a spinning ring's angle; a change to the motion starts the
+/// spin over (#481). Each stroke installs a new effect, which restarted the clock and put the ring back
+/// at angle 0 with every stroke.
+#[tokio::test]
+async fn a_spinning_ring_keeps_its_angle_across_a_colour_only_stroke_and_a_motion_change_restarts_it() {
+    let rig = draft_rig(Vec::new()).await;
+    let blue = Rgb8::new(0, 0, 200);
+    let green = Rgb8::new(0, 200, 0);
+    let red = Rgb8::new(200, 0, 0);
+    let spun = |colour: Rgb8, turns: f32| {
+        let mut p = pattern_with("Draft", LEDS, colour);
+        p.motion = Motion::spin(turns);
+        p
+    };
+    // Half a turn a second: a ring of twelve moves a LED every 167 ms.
+    let (status, answer) = put_pattern_draft(&rig, &spun(blue, 0.5), EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    // Let it turn well away from LED 0 (a third of a turn or more).
+    shows_where(&rig.a, "the ring turned away from LED 0", |f| marker(f, 2).is_some_and(|i| (4..=8).contains(&i))).await;
+
+    // The same spin in other colours: it carries on from where it is, never from LED 0.
+    let seen = rig.a.seen();
+    let (status, answer) = put_pattern_draft(&rig, &spun(green, 0.5), EPOCH, 2).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let carried = first_marker_since(&rig.a, seen, 1, "the colour-only stroke").await;
+    assert!((3..=9).contains(&carried), "a colour-only stroke kept the angle; the new colours start at LED {carried}");
+
+    // A different speed is a different motion: the spin starts over at LED 0.
+    let seen = rig.a.seen();
+    let (status, answer) = put_pattern_draft(&rig, &spun(red, 0.25), EPOCH, 3).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let restarted = first_marker_since(&rig.a, seen, 0, "the motion change").await;
+    assert!(matches!(restarted, 0 | 1 | 11), "a motion change starts the spin over; it starts at LED {restarted}");
 }
