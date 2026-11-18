@@ -1943,6 +1943,10 @@ fn read_groups(file: &str) -> Result<Vec<canvas_proto::api::NewGroup>, CliError>
 /// A group keeps the id the scene's group of the same name had, so a group that only changed
 /// its props or its brightness keeps the id the editor knows it by; a new name gets
 /// [`slug`](crate::scenes::slug) and, when that is taken, a number.
+///
+/// It also keeps that group's `sequence` (#504): a groups file cannot name a shape, so a group
+/// of the same name keeps the one the owner set. Without this, every CLI edit quietly turned
+/// "One ring" and "One line" back into "Each light". A new name starts at each light.
 fn groups_with_ids(
     groups: &[canvas_proto::api::NewGroup],
     current: &[canvas_proto::scene::Group],
@@ -1952,13 +1956,15 @@ fn groups_with_ids(
     for group in groups {
         let kept = current
             .iter()
-            .find(|old| old.name == group.name && !used.contains(&old.id))
-            .map(|old| old.id.clone());
-        let id = match kept {
-            Some(id) => id,
-            None => crate::scenes::fresh_id(
-                &crate::scenes::slug(&group.name),
-                used.iter().map(String::as_str),
+            .find(|old| old.name == group.name && !used.contains(&old.id));
+        let (id, sequence) = match kept {
+            Some(old) => (old.id.clone(), old.sequence),
+            None => (
+                crate::scenes::fresh_id(
+                    &crate::scenes::slug(&group.name),
+                    used.iter().map(String::as_str),
+                ),
+                None,
             ),
         };
         used.push(id.clone());
@@ -1969,7 +1975,7 @@ fn groups_with_ids(
             plays: group.plays.clone(),
             mode: group.mode,
             brightness: group.brightness,
-            sequence: None,
+            sequence,
         });
     }
     out
@@ -4719,6 +4725,51 @@ mod tests {
             serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 8 }]),
             "the record follows the scene's rev: {record}"
         );
+    }
+
+    #[test]
+    fn an_edit_keeps_a_group_shape_a_groups_file_cannot_name() {
+        // #504: `Group.sequence` (One ring / One line) has no place in a `NewGroup`, so an edit
+        // takes it from the scene's group of the same name. Without that, every CLI edit turned a
+        // ring or line group back into each light, and nothing said so.
+        let home = TempHome::new("edit-sequence");
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming"),
+        );
+        let mut list = run_scenes();
+        list["scenes"][1]["groups"] = serde_json::json!([
+            { "id": "lamp", "name": "Lamp", "members": ["fake:b#z0", "fake:c#z0"],
+              "plays": { "type": "off" }, "sequence": "ring" },
+            { "id": "wall", "name": "Wall", "members": ["fake:d#z0"], "plays": { "type": "off" },
+              "sequence": "line" },
+        ]);
+        let api = RunApi::answering(list, a_saved_scene());
+        let groups = home.write(
+            "groups.json",
+            r#"[{"name":"Lamp","members":["fake:b#z0","fake:c#z0"],"plays":{"type":"off"},"brightness":40},{"name":"Wall","members":["fake:d#z0"],"plays":{"type":"off"}},{"name":"Desk","members":["fake:e#z0"],"plays":{"type":"off"}}]"#,
+        );
+        let args = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        scenes_edit(&api, &args, false).unwrap();
+
+        let (_, _, body) = api.write();
+        let body: serde_json::Value = serde_json::from_str(body.as_deref().expect("a body")).unwrap();
+        assert_eq!(body["scene"]["groups"][0]["brightness"], 40, "the edit itself landed: {body}");
+        // The daemon stores the body it is sent, so reading it back as a scene is the scene the
+        // editor sees after the edit.
+        let sent: canvas_proto::scene::Scene =
+            serde_json::from_value(body["scene"].clone()).expect("the body is a scene");
+        assert_eq!(
+            sent.groups[0].sequence,
+            Some(canvas_proto::scene::SequenceShape::Ring),
+            "Lamp keeps its One ring: {body}"
+        );
+        assert_eq!(
+            sent.groups[1].sequence,
+            Some(canvas_proto::scene::SequenceShape::Line),
+            "Wall keeps its One line: {body}"
+        );
+        assert_eq!(sent.groups[2].sequence, None, "a new group starts at each light: {body}");
     }
 
     #[test]
