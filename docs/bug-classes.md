@@ -242,6 +242,30 @@ or acts as if a step worked without checking that it did.
   `api/settings.rs:361`, `api/patterns.rs:164`); `scenes::apply_active` (`scenes.rs:692`) takes the
   scene order but no gate and has no product callers, only tests, so it is a trap rather than a
   second sighting. No sibling found; the class fix is not due on this count.
+- [#509](https://github.com/iAmChumby/canvas-rgb/issues/509): on OpenRGB protocol 5 a packet names a
+  controller by its position in OpenRGB's list, and a rescan swaps the list into the server before
+  it sends packet 100 (`ResourceManager.cpp:1041,1045,1067`). The adapter held the list only from
+  packet 100, so a frame, a zone resize or a colour read sent between its own
+  REQUEST_RESCAN_DEVICES and packet 100 reached whatever device then sat at that position
+  (`crates/canvas-adapters/src/openrgb.rs`, `rescan_shared`). Fixed: `rescan_shared` takes a hold
+  (`Session::rescan_requests`, the `RescanHold` guard) before it writes packet 140, a 100 hands the
+  hold to `unsettled`, and `write_packet` re-checks it under the socket lock for every positional
+  packet (`send_frame`, `send_positional`, `request_positional`). While the hold is on, `try_settle`
+  refuses to call the list settled, and the hold ends early once `first` passes with no 100 (OpenRGB
+  sends its 100 inside the packet-140 handler, so none means no detection started); without that
+  guard a rescan from an already-changing list spun a runtime worker until the cap. Protocol 6 names a controller by an
+  id that is never reused and is unchanged. Regression tests on the fakes, with the fake's
+  `park_list_change` holding packet 100 back
+  (`crates/canvas-adapters/tests/openrgb_rescan.rs`): a frame, a resize and a `read_back` sent in the
+  window land on, resize or read no device; the socket-lock re-check has its own tests in
+  `openrgb.rs` (`rescan_hold_tests`). Sibling search: every `controller()` caller (frame, identify,
+  SET_CUSTOM_MODE, resize, `read_back`) and every `send*`/`request*` that carries a position; the
+  read in `enumerate()` is the one deliberate exception (it settles the list). **The rule:** an
+  address that is a position is valid only for the list it was read from; a packet that carries one
+  goes through `write_packet` with `positional` set, and the check sits under the socket lock, where
+  a list change cannot slip between the check and the write. Left: a list change OpenRGB makes on its
+  own (a hot plug) is announced only by its 100, after the swap, and no hold the client takes can
+  cover it.
 - **Class fix:** done (PR #23). Every user-facing claim about system state comes from a field the
   daemon or service measured, never from a constant: `DisplayInfo.blocked_by` (spine) replaces the
   hard-coded ZEUS CAST warning, and the onboarding tag names what was checked ("SignalRGB not seen").
@@ -1312,6 +1336,35 @@ matches, so a narrowed log silently loses it.
 - **How to check a new log line:** a line that lived in the `canvas-rgbd` binary sets
   `target: crate::logging::LOG_TARGET`; `cargo test -p canvas-daemon` fails when a known moved
   line logs without it.
+
+**A third mechanism, same cause: one rule written twice, so a mark and the lights disagree.**
+
+The editor shows a pattern's fit beside a group (`groupFit`/`lightFits` in
+`app/web/src/lib/patternFit.ts`), and the daemon shows its own in the group's list
+(`member_fits` in `crates/canvas-daemon/src/scenes.rs`). The second copy is wired to the
+editor's own reading of `GET /lights`, and a scene save or a scene edit carries the copy's
+answer onward, so a one-sided change makes the mark contradict the picture with no error
+anywhere.
+
+- [#504](https://github.com/iAmChumby/canvas-rgb/issues/504): the demo fitted each light on its
+  own where the daemon fitted the whole run, so it said "Fits" where the lights were Stretched;
+  the editor dropped a listed-but-unplugged light from the run and did not apply the 4096-LED
+  cap; and a `canvas-rgb scenes edit` rebuilt every group without its `sequence`, so a One ring
+  group came back as Each light.
+- **Class fix:** done (#504, #510, #516, and this). One function instead of a copy where the
+  rule can be shared: `canvas_core::arrangement::light_led_count` is what the engine plans,
+  what `member_fits` fits, and what `view` in `crates/canvas-daemon/src/api/lights.rs` answers
+  to the editor. Where a copy stays (the editor's `fitKind`/`runFit`, the demo's), it is pinned
+  by generated vectors: `app/web/src/lib/__tests__/patternFit.vectors.json` is printed by
+  `crates/canvas-daemon/examples/pattern_fit_vectors.rs` and written by
+  `tools/pattern-fit-vectors.ps1`, the editor's test runs its own rules over every row, and
+  `crates/canvas-daemon/tests/pattern_fit_vectors.rs` fails when the file is no longer what the
+  Rust rules make. A row carries the group's members with their stored slice, their zone and
+  the LED count the API answers, so the slice rule, the 4096 cap, a disconnected light and a
+  light with no LEDs each move a verdict.
+- **How to check a new fit rule:** write it once (in `light_led_count` or `fit_kind`), then add
+  a row per branch to the printer and run the script; a copy on the editor's side fails the
+  editor's test until it follows.
 
 ### `cause:regression`: one sampling rule for every effect darkens an effect it was not written for
 

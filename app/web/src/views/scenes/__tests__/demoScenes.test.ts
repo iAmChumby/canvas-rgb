@@ -244,4 +244,21 @@ describe("the demo's scene routes", () => {
     // scene in it.
     expect((refused as ApiFailure).message).toBe(htmlLimitSentence(3));
   });
+
+  it("makes a scene with the groups a create asks for, shape and all (#504)", async () => {
+    const [one, two] = DEMO_LIGHTS;
+    if (!one || !two) throw new Error("the demo has too few lights");
+    const made = (await demoRequest("POST", "/api/v1/scenes", {
+      name: "One request",
+      groups: [
+        { name: "Ring", members: [one.light.id], plays: { type: "off" }, sequence: "ring" },
+        { name: "Plain", members: [two.light.id], plays: { type: "off" } },
+      ],
+    })) as Scene;
+    expect(made.groups.map((g) => g.name)).toEqual(["Ring", "Plain"]);
+    expect(made.groups.map((g) => g.sequence)).toEqual(["ring", undefined]);
+    expect(made.groups[1]?.members).toEqual([two.light.id]);
+    expect(made.groups[0]?.mode).toBe("flow_across");
+    expect(made.groups[0]?.brightness).toBe(100);
+  });
 });

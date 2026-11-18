@@ -130,6 +130,15 @@ async function frames(): Promise<void> {
 }
 
 
+/**
+ * Puts Play on, so the lights are sent the whole document (#481): while it is off they get the selected
+ * frame alone. These tests read the frames, holds and transitions an edit made, which is the document.
+ */
+const playAll = async () => {
+  fireEvent.click(screen.getByRole("button", { name: "Play preview" }));
+  await frames();
+};
+
 const at = (dot: Dot) => ({ clientX: dot.x, clientY: dot.y, pointerId: 1 });
 
 const RED = "#ff0000";
@@ -174,6 +183,7 @@ describe("the frame strip", () => {
   it("adds a blank frame after the selected one and selects it; undo takes it away", async () => {
     show(framed([RED, GREEN]));
     await settle();
+    await playAll();
     fireEvent.click(screen.getByRole("button", { name: "Add frame" }));
     await frames();
     expect(sent().frames).toHaveLength(3);
@@ -191,6 +201,7 @@ describe("the frame strip", () => {
   it("duplicates the selected frame with its hold, and undo is one step", async () => {
     show(framed([RED, GREEN], [100, 700]));
     await settle();
+    await playAll();
     fireEvent.click(key(2));
     fireEvent.click(screen.getByRole("button", { name: "Duplicate frame" }));
     await frames();
@@ -205,6 +216,7 @@ describe("the frame strip", () => {
   it("deletes the selected frame, keeps one, and undo brings it back where it was", async () => {
     show(framed([RED, GREEN, BLUE]));
     await settle();
+    await playAll();
     expect(screen.getByRole("button", { name: "Delete frame" }).hasAttribute("disabled")).toBe(false);
     fireEvent.click(key(2));
     fireEvent.click(screen.getByRole("button", { name: "Delete frame" }));
@@ -223,6 +235,7 @@ describe("the frame strip", () => {
   it("reorders with the arrow keys, says where the frame went, and undo puts it back", async () => {
     show(framed([RED, GREEN, BLUE]));
     await settle();
+    await playAll();
     key(1).focus();
     fireEvent.keyDown(key(1), { key: "ArrowRight" });
     await frames();
@@ -244,6 +257,7 @@ describe("the frame strip", () => {
   it("reorders with the pointer: press, travel past the threshold, drop in a gap", async () => {
     show(framed([RED, GREEN, BLUE]));
     await settle();
+    await playAll();
     // Three keys 100 px apart: the box the pointer is measured against.
     keys().forEach((k, i) => {
       k.getBoundingClientRect = () => ({ left: i * 100, right: i * 100 + 60, top: 0, bottom: 48, width: 60, height: 48, x: i * 100, y: 0, toJSON() {} }) as DOMRect;
@@ -282,6 +296,7 @@ describe("the frame strip", () => {
   it("paints the selected frame only", async () => {
     const { canvas, dots } = show(framed([RED, GREEN]));
     await settle();
+    await playAll();
     fireEvent.click(key(2));
     fireEvent.pointerDown(canvas, at(dots[3]!));
     fireEvent.pointerUp(canvas, { pointerId: 1 });
@@ -302,6 +317,7 @@ describe("transitions", () => {
   it("a connector starts as a cut and its panel makes it a fade of 400 ms, linear", async () => {
     show(framed([RED, GREEN]));
     await settle();
+    await playAll();
     expect(connector(1).getAttribute("aria-label")).toBe("Frame 1 to 2: cut");
     fireEvent.click(connector(1));
     fireEvent.click(screen.getByRole("radio", { name: "Fade" }));
@@ -314,6 +330,7 @@ describe("transitions", () => {
   it("edits the duration and the pace, and undo steps back through them", async () => {
     show(framed([RED, GREEN]));
     await settle();
+    await playAll();
     fireEvent.click(connector(1));
     fireEvent.click(screen.getByRole("radio", { name: "Fade" }));
     const field = screen.getByRole("textbox", { name: "Frame 1 fade duration" });
@@ -337,6 +354,7 @@ describe("transitions", () => {
   it("a duration past the spine's cap is held at it", async () => {
     show(framed([RED, GREEN]));
     await settle();
+    await playAll();
     fireEvent.click(connector(1));
     fireEvent.click(screen.getByRole("radio", { name: "Fade" }));
     const field = screen.getByRole("textbox", { name: "Frame 1 fade duration" });
@@ -350,6 +368,7 @@ describe("transitions", () => {
   it("the last connector is Loop: off stops on the last frame, on writes no playback at all", async () => {
     show(framed([RED, GREEN]));
     await settle();
+    await playAll();
     expect("playback" in sent()).toBe(false);
     const last = screen.getByRole("button", { name: /^After frame 2:/ });
     expect(last.getAttribute("aria-label")).toBe("After frame 2: loops to frame 1, cutting");
@@ -369,6 +388,7 @@ describe("transitions", () => {
     (loaded as unknown as { tags: string[] }).tags = ["kept"];
     show(loaded);
     await settle();
+    await playAll();
     fireEvent.click(connector(1));
     fireEvent.click(screen.getByRole("radio", { name: "Fade" }));
     await frames();
@@ -381,6 +401,7 @@ describe("timing", () => {
   it("edits the selected frame's hold", async () => {
     show(framed([RED, GREEN], [100, 200]));
     await settle();
+    await playAll();
     fireEvent.click(key(2));
     const field = screen.getByRole("textbox", { name: "Frame 2 hold" });
     fireEvent.focus(field);
@@ -398,6 +419,7 @@ describe("timing", () => {
     loaded.frames[0]!.transition = { kind: "fade", ms: 300, easing: "ease_in" };
     show(loaded);
     await settle();
+    await playAll();
     fireEvent.click(screen.getByRole("radio", { name: "fps" }));
     const field = screen.getByRole("textbox", { name: "Frames per second" });
     fireEvent.focus(field);
@@ -417,6 +439,7 @@ describe("timing", () => {
   it("shows mixed, not a made-up 10, when the holds differ, and a typed fps still sets them all (#481)", async () => {
     show(framed([RED, GREEN, BLUE], [100, 900, 40]));
     await settle();
+    await playAll();
     fireEvent.click(screen.getByRole("radio", { name: "fps" }));
     const field = screen.getByRole("textbox", { name: "Frames per second" }) as HTMLInputElement;
     expect(field.value).toBe("");
@@ -488,10 +511,12 @@ describe("saving", () => {
     expect(within(document.body).getByText("No unsaved changes")).toBeTruthy();
   });
 
-  it("an untouched pattern is sent exactly as it was loaded", async () => {
+  it("an untouched pattern is on the lights as its first frame alone, and Play sends it exactly as it was loaded", async () => {
     const loaded = framed([RED, GREEN], [100, 200]);
     show(loaded);
     await settle();
+    expect(sent().frames).toEqual([loaded.frames[0]]);
+    await playAll();
     expect(sent()).toEqual(loaded);
     expect(JSON.stringify(sent())).toBe(JSON.stringify(loaded));
   });

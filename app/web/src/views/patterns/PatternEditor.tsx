@@ -8,6 +8,10 @@
 // editor goes away, which puts the active scene back. The editor never saves by itself: `onSave`
 // hands the whole document up, with every field it does not know still in it.
 //
+// What the lights get is `draftDocument`'s (#481): the selected frame alone while the owner paints,
+// the whole timeline while Play is on. The daemon starts a new document's clock when it lands, so
+// the preview takes its own clock from the moment the PUT that started the lights was answered.
+//
 // The editor guards its page (#474), on a page of its own and in the effects view's panel alike:
 // strokes that are not saved are never dropped without asking, on the Cancel key, on a rail link,
 // on the panel's Back key on a phone, on the browser's Back and on a closed window. The prompt is
@@ -28,6 +32,7 @@ import { messageOf } from "@/lib/errors";
 import { cancelNavigation, continueNavigation, hasPendingNavigation } from "@/lib/navigationGuard";
 import { motionOffNow } from "@/lib/motion";
 import { kindWords } from "@/lib/patternFit";
+import { draftDocument, timingKey } from "@/lib/patternDraft";
 import { isStill, timelineOf } from "@/lib/patternPlay";
 import { spinOf } from "@/lib/spin";
 import { refreshLights, useSnap } from "@/lib/store";
@@ -104,7 +109,28 @@ export function PatternEditor({
   /** The control the prompt opened from: focus goes back there when it closes. */
   const opener = useRef<HTMLElement | null>(null);
 
-  /** Puts a stroke on the lights: the page's epoch and the next sequence. */
+  /**
+   * When the lights' clock started, on the page's own clock (`performance.now()`), or null while the
+   * PUT that started it has not been answered (#481). The daemon installs a new document, and so
+   * starts its clock, when the PUT lands; the middle of the round trip is the best the page can know
+   * of that moment without a field in the answer.
+   */
+  const [lightsClock, setLightsClock] = useState<number | null>(null);
+  /** The newest sequence whose answer set the clock, and the one before which no answer may set it. */
+  const clockSeq = useRef(0);
+  const clockFloor = useRef(0);
+  /**
+   * The timing of the document the daemon is playing, as the answers have told the page, and the clock
+   * it runs on. A PUT of that same document is skipped by the daemon, and a PUT with the same timing
+   * keeps the clock (#481, `PatternTiming`), so neither moves the preview's clock.
+   */
+  const running = useRef<{ timing: string; clock: number } | null>(null);
+
+  /**
+   * Puts a stroke on the lights: the page's epoch and the next sequence. The heartbeat sends the
+   * document already there, which the daemon keeps running: `running` tells that apart from a stroke
+   * that starts the lights over.
+   */
   const send = useCallback(
     async (document: Pattern) => {
       // An in-flight undo or shape write can land after the editor closed and its draft was deleted.
@@ -127,9 +153,21 @@ export function PatternEditor({
         if (answer.epoch !== undefined && answer.epoch !== null) return answer.epoch !== epoch;
         return notApplied.current >= 2;
       };
+      const sentAt = performance.now();
       try {
         const answer = await api.putPatternDraft({ pattern: document, epoch, seq: at });
         if (!alive.current) return;
+        if (answer.applied !== false && at > clockSeq.current && at > clockFloor.current) {
+          clockSeq.current = at;
+          const timing = timingKey(document);
+          const was = running.current;
+          // The same timing (the document again, or other colours): the lights' clock is the one
+          // running. Anything else was installed on the lights when the PUT landed.
+          const clock =
+            was !== null && was.timing === timing ? was.clock : (sentAt + performance.now()) / 2;
+          running.current = { timing, clock };
+          setLightsClock(clock);
+        }
         if (answer.heartbeat_ms > 0) heartbeat.current = answer.heartbeat_ms;
         if (anotherWindow(answer)) setDaemonNote(SUPERSEDED);
         else if (answer.note) setDaemonNote(answer.note);
@@ -149,7 +187,7 @@ export function PatternEditor({
    * beat that lands between a stroke and its render sends that stroke and never the colours the
    * render began in.
    */
-  const latest = useRef<Pattern>(pattern);
+  const latest = useRef<Pattern>(draftDocument(pattern, 0, false));
   const draft = useCallback(
     (document: Pattern) => {
       latest.current = document;
@@ -198,21 +236,24 @@ export function PatternEditor({
     [],
   );
 
+  // Play (#468, #481): whether the lights play the whole timeline. Read by the editor when it
+  // drafts, so a stroke made while it plays goes out as the whole timeline and one made otherwise as
+  // the selected frame alone.
+  const [playing, setPlaying] = useState(false);
+  const playingNow = useRef(false);
+  const isPlaying = useCallback(() => playingNow.current, []);
+
   const editor = usePatternEditor(pattern, {
     onDraft: draft,
     onShapeLight: writeShape,
     getShapeLight,
     onShapeSkipped,
+    isPlaying,
   });
 
   // The preview (#468): Play runs the whole document on the dots with the daemon's own maths
-  // (`lib/patternPlay.ts`); stopped, the dots show the frame being painted. The lights always play the
-  // whole document, since that is what the draft carries.
-  const [playing, setPlaying] = useState(false);
-  const play = useMemo(
-    () => (playing ? { frames: editor.frames, playback: editor.loop ? undefined : { loop: false } } : null),
-    [playing, editor.frames, editor.loop],
-  );
+  // (`lib/patternPlay.ts`); stopped, the dots show the frame being painted. The lights follow Play:
+  // the whole timeline while it plays, the selected frame while it does not (#481).
   const playable = useMemo(
     () => !isStill(timelineOf({ frames: editor.frames, playback: editor.loop ? undefined : { loop: false } })),
     [editor.frames, editor.loop],
@@ -223,6 +264,25 @@ export function PatternEditor({
     : playable
       ? null
       : "Nothing to play: add a frame and give the frames a hold";
+  const playingFrames = playing && cannotPlay === null;
+  const play = useMemo(
+    () => (playingFrames ? { frames: editor.frames, playback: editor.loop ? undefined : { loop: false } } : null),
+    [playingFrames, editor.frames, editor.loop],
+  );
+  // Play or Stop changes what the lights are given: the whole timeline, or the selected frame. The
+  // preview waits for the answer to the PUT that starts the lights before it runs, so the two start
+  // together; an answer to a PUT sent before the key was pressed may not set its clock.
+  const pressed = useRef(false);
+  useEffect(() => {
+    playingNow.current = playingFrames;
+    if (!pressed.current) {
+      pressed.current = true;
+      return;
+    }
+    clockFloor.current = seq.current;
+    setLightsClock(null);
+    editor.refresh();
+  }, [playingFrames, editor.refresh]);
 
   // The shape picker writes the arrangement of the light this pattern was built on (#468). When
   // more than one light is in the pattern's shape, the owner picks which one it writes to (#481);
@@ -519,6 +579,7 @@ export function PatternEditor({
           colours={editor.colours}
           spin={spinOf(editor.motion)}
           play={play}
+          playClock={lightsClock}
           label={`${name}, ${kindWords(editor.builtOn)}`}
           onBegin={editor.beginStroke}
           onStroke={editor.stroke}
@@ -568,7 +629,7 @@ export function PatternEditor({
         selected={editor.selected}
         loop={editor.loop}
         fps={editor.fps}
-        playing={playing && cannotPlay === null}
+        playing={playingFrames}
         cannotPlay={cannotPlay}
         onSelect={editor.selectFrame}
         onAdd={editor.addFrame}

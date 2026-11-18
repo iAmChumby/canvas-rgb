@@ -118,7 +118,7 @@ import type { Pattern } from "@/proto/Pattern";
 import type { PatternsResponse } from "@/proto/PatternsResponse";
 import type { DeletePatternResponse } from "@/proto/DeletePatternResponse";
 import type { LightFit } from "@/proto/LightFit";
-import { fitKind, kindWords, runFit } from "@/lib/patternFit";
+import { kindWords, lightFits } from "@/lib/patternFit";
 import type { StackPreviewRequest } from "@/proto/StackPreviewRequest";
 import type { StackPreviewResponse } from "@/proto/StackPreviewResponse";
 import type { StackSummary } from "@/proto/StackSummary";
@@ -974,6 +974,20 @@ function checkScene(s: DemoState, scene: Scene): void {
 let demoSceneCounter = 0;
 
 /**
+ * A group id base from a group's name, as the daemon's `slug` makes it: every letter and digit
+ * kept and lowered, every other run of characters one dash, and `scene` when nothing is left.
+ */
+function groupSlug(name: string): string {
+  let out = "";
+  for (const c of name) {
+    if (/[\p{L}\p{N}]/u.test(c)) out += c.toLowerCase();
+    else if (out !== "" && !out.endsWith("-")) out += "-";
+  }
+  out = out.replace(/-+$/, "");
+  return out === "" ? "scene" : out;
+}
+
+/**
  * An id no group of `taken` holds: the base when it is free, else the base with a number on the
  * end (`fresh_id` in the daemon).
  */
@@ -1111,22 +1125,41 @@ function createScene(s: DemoState, body: SceneCreate): Scene {
   if (!name) fail(422, "validation", "a scene needs a name");
   demoSceneCounter += 1;
   const copy = body.copy_of ? sceneOrNotFound(s, body.copy_of) : null;
+  // The groups a create asks for, as the daemon mints them: an id from each name, free of every
+  // group id the scenes hold, and the shape it names (#504).
+  const taken = s.scenes.flatMap((x) => x.groups.map((g) => g.id));
+  const asked = copy ? [] : (body.groups ?? []);
   const scene: Scene = {
     id: `scene-${demoSceneCounter}`,
     name,
     rev: 1,
     groups: copy
       ? copy.groups.map((g, i) => ({ ...structuredClone(g), id: `g${demoSceneCounter}-${i + 1}` }))
-      : [
-          {
-            id: `g${demoSceneCounter}-1`,
-            name: "Everything",
-            members: s.lights.map((l) => l.light.id),
-            plays: { type: "off" },
-            mode: "flow_across",
-            brightness: 100,
-          },
-        ],
+      : asked.length > 0
+        ? asked.map((g) => {
+            const id = freshGroupId(groupSlug(g.name), taken);
+            taken.push(id);
+            const group: Group = {
+              id,
+              name: g.name,
+              members: [...g.members],
+              plays: structuredClone(g.plays),
+              mode: g.mode ?? "flow_across",
+              brightness: g.brightness ?? 100,
+            };
+            if (g.sequence) group.sequence = g.sequence;
+            return group;
+          })
+        : [
+            {
+              id: `g${demoSceneCounter}-1`,
+              name: "Everything",
+              members: s.lights.map((l) => l.light.id),
+              plays: { type: "off" },
+              mode: "flow_across",
+              brightness: 100,
+            },
+          ],
   };
   // The daemon's rules hold for a new scene too: a name over 40 characters is refused.
   checkScene(s, scene);
@@ -1555,25 +1588,18 @@ function patternFits(s: DemoState, group: Group): LightFit[] {
   const id = group.plays.type === "effect" ? group.plays.effect : undefined;
   const pattern = id ? s.patterns[id] : undefined;
   if (!pattern) return [];
-  // The members the pattern lands on, in the group's order: the daemon leaves a light with no
-  // LEDs out of the fits, because it plays nothing there.
-  const placed = group.members.flatMap((member) => {
+  // The members the pattern lands on, in the group's order: `lightFits` leaves a light with no
+  // LEDs out, because the daemon's `member_fits` leaves it out. A light whose device is unplugged
+  // keeps its place and its LEDs in the run, as the daemon keeps them (#504).
+  const members = group.members.flatMap((member) => {
     const light = s.lights.find((l) => l.light.id === member);
-    return light && light.connected && light.led_count > 0 ? [light] : [];
+    return light ? [light] : [];
   });
   // A group with a sequence (#468) fits the pattern once to every member's LEDs joined end to
-  // end, so every light reports the fit of that whole run, as the daemon does (`group_fits` in
+  // end, so every light reports the fit of that whole run, as the daemon does (`member_fits` in
   // crates/canvas-daemon/src/scenes.rs). Before #504 this was per light, and "One ring" on two
   // 40-LED fans said "Fits" where the daemon said "Stretched".
-  const run = runFit(
-    pattern.built_on,
-    group.sequence,
-    placed.map((light) => light.led_count),
-  );
-  return placed.map((light) => ({
-    light: light.light.id,
-    fit: run ?? fitKind(pattern.built_on, light.led_count, light.light.arrangement),
-  }));
+  return lightFits(pattern.built_on, members, group.sequence);
 }
 
 function currentProps(e: DemoEffect): Props {

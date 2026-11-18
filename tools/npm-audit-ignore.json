@@ -4,11 +4,5 @@
     "package": "picomatch",
     "reason": "ReDoS through repeated extglobs (high). Every version up to 4.0.7, the latest, is affected and no patched version exists, so no upgrade from here clears it. All lock copies (2.3.2, and 4.0.7 under tinyglobby, vite and vitest) are dev-only: eslint, vite and vitest tooling, never in the static export that ships.",
     "added": "2026-11-17"
-  },
-  {
-    "id": "GHSA-g3hv-75wg-m249",
-    "package": "minimatch",
-    "reason": "Moderate, below the high floor. Patched in 11.0.1, but npm's only fix is a --force upgrade to eslint 10.15.0, outside our range. Every lock copy is dev-only (the eslint chain), never in the static export that ships.",
-    "added": "2026-11-17"
   }
 ]
