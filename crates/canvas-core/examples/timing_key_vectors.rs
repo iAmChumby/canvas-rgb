@@ -119,12 +119,15 @@ fn cases() -> Vec<Case> {
 /// decides whether an install keeps the clock. The fields come from the rule itself
 /// (`canvas_core::pattern_timing_fields`); this printer only writes them down.
 fn timing_json(pattern: &Pattern) -> serde_json::Value {
-    let timing = canvas_core::pattern_timing_fields(pattern);
+    // Destructured, not read field by field: a field added to the rule's plain fields breaks this
+    // line until the printer writes it down, so no timing field can be missing from the vectors.
+    let canvas_core::PatternTimingFields { id, motion, playback, frames } =
+        canvas_core::pattern_timing_fields(pattern);
     json!({
-        "id": timing.id,
-        "motion": timing.motion,
-        "playback": timing.playback,
-        "frames": timing.frames,
+        "id": id,
+        "motion": motion,
+        "playback": playback,
+        "frames": frames,
     })
 }
 
