@@ -214,21 +214,15 @@ pub async fn delete_stack(
     // Its presets and its favourite are keyed by the id and would be unreachable with it gone.
     // They go first: a failed write of effects.json puts them back and leaves the stack alone.
     let sid = stack.id.clone();
-    let (effects_before, presets_removed, favorite_removed) = crate::store_io::store_save_rolled(
+    let (taken_presets, favorite_removed) = crate::store_io::store_save_rolled(
         &app,
         |store| {
             let effects_before = store.effects.clone();
-            let mut presets_removed = 0usize;
-            if let Some(list) = store.effects.presets.remove(&sid) {
-                presets_removed = list.len();
-            }
+            let taken_presets = store.effects.presets.remove(&sid);
             let before = store.effects.favorites.len();
             store.effects.favorites.retain(|favorite| favorite != &sid);
             let favorite_removed = store.effects.favorites.len() != before;
-            Ok((
-                (effects_before.clone(), presets_removed, favorite_removed),
-                effects_before,
-            ))
+            Ok(((taken_presets, favorite_removed), effects_before))
         },
         |store| store.save_effects(),
         |before, store, e, _| {
@@ -237,44 +231,25 @@ pub async fn delete_stack(
         },
     )
     .await?;
+    let presets_removed = taken_presets.as_ref().map_or(0, Vec::len);
 
-    let removed = match app.stacks.delete(&stack.id) {
+    // The stack file is written on a blocking thread: the write syncs to disk.
+    let stacks = Arc::clone(&app.stacks);
+    let target = stack.id.clone();
+    let deleted = tokio::task::spawn_blocking(move || stacks.delete(&target))
+        .await
+        .map_err(|e| ApiFailure::internal(format!("the stack delete did not finish: {e}")))?;
+    let removed = match deleted {
         Ok(Some(removed)) => removed,
         Ok(None) => {
-            let before = effects_before.clone();
-            let _ = crate::store_io::store_save(
-                &app,
-                |store| {
-                    store.effects = before;
-                    Ok(())
-                },
-                |store| {
-                    store
-                        .save_effects()
-                        .map_err(|e| ApiFailure::internal(e.to_string()))
-                },
-            )
-            .await;
+            restore_effects(&app, &sid, taken_presets, favorite_removed).await;
             return Err(ApiFailure::not_found(format!(
                 "no stack with the id or name {id}"
             )));
         }
         Err(e) => {
             // The stack file was not written: put its presets and its favourite back too.
-            let before = effects_before.clone();
-            let _ = crate::store_io::store_save(
-                &app,
-                |store| {
-                    store.effects = before;
-                    Ok(())
-                },
-                |store| {
-                    store
-                        .save_effects()
-                        .map_err(|e| ApiFailure::internal(e.to_string()))
-                },
-            )
-            .await;
+            restore_effects(&app, &sid, taken_presets, favorite_removed).await;
             return Err(ApiFailure::internal(format!(
                 "the stack could not be deleted, and nothing was removed: {e}"
             )));
@@ -319,4 +294,41 @@ pub async fn delete_stack(
         favorite_removed,
         note,
     }))
+}
+
+/// Puts a deleted stack's presets and favourite back after the stack file could not be changed.
+///
+/// Only what the delete took goes back, read and written inside the writer-serialised section: a
+/// copy of all of `effects.json` taken before the delete would overwrite a preset or a favourite
+/// another request saved in between.
+async fn restore_effects(
+    app: &Arc<App>,
+    id: &str,
+    presets: Option<Vec<canvas_proto::props::Preset>>,
+    favorite_removed: bool,
+) {
+    if presets.is_none() && !favorite_removed {
+        return;
+    }
+    let id = id.to_string();
+    let result = crate::store_io::store_save(
+        app,
+        |store| {
+            if let Some(list) = presets {
+                store.effects.presets.insert(id.clone(), list);
+            }
+            if favorite_removed && !store.effects.favorites.contains(&id) {
+                store.effects.favorites.push(id.clone());
+                store.effects.favorites.sort();
+            }
+            Ok(())
+        },
+        |store| {
+            store
+                .save_effects()
+                .map_err(|e| ApiFailure::internal(e.to_string()))
+        },
+    )
+    .await;
+    crate::logging::warn_if_err("a stack's presets could not be put back", result.map_err(|e| e.message));
 }

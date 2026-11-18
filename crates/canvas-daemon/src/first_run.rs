@@ -537,15 +537,25 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
         tracing::info!(scene = %scene.name, groups = scene.groups.len(), effect = FIRST_RUN_EFFECT, "the first run applied the default scene");
     }
 
-    // The zone panel stays open until the user dismisses it.
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        store.config.first_run_done = true;
-        crate::logging::warn_if_err("the first run could not save first_run_done; it will run again", store.save_config());
-    }
+    // The zone panel stays open until the user dismisses it. The save goes through the store
+    // helper, so the file write is off the runtime worker and the store lock (#241).
+    let saved = crate::store_io::store_save(
+        app,
+        |store| {
+            store.config.first_run_done = true;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| crate::api::ApiFailure::internal(e.to_string()))
+        },
+    )
+    .await;
+    crate::logging::warn_if_err(
+        "the first run could not save first_run_done; it will run again",
+        saved.map_err(|e| e.message),
+    );
     tracing::info!("the first run is done");
 }
 

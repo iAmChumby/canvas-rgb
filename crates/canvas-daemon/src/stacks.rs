@@ -559,6 +559,10 @@ struct Running {
 pub struct Stacks {
     home: PathBuf,
     file: RwLock<StackFile>,
+    /// Held from the read of `file` to the swap, so two writes cannot both start from the same
+    /// file. The `file` lock itself is held only for the read and the swap, never across the
+    /// disk write, so a reader never waits for a slow disk (#241).
+    writer: std::sync::Mutex<()>,
     generation: AtomicU64,
     areas: AreaBook,
     fps: Arc<AtomicU32>,
@@ -577,6 +581,7 @@ impl Stacks {
         Self {
             home: home.into(),
             file: RwLock::new(StackFile::default()),
+            writer: std::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
             areas: Arc::new(RwLock::new(AreaMaps::default())),
             fps: Arc::new(AtomicU32::new(canvas_proto::consts::FPS_DEFAULT)),
@@ -731,7 +736,8 @@ impl Stacks {
     /// was, rather than holding a stack the next start will not see.
     pub fn put(&self, stack: Stack, known: &KnownEffects) -> Result<Stack, StacksError> {
         let name = stack.name().to_string();
-        let mut guard = write_recovering(&self.file);
+        let _writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = read_recovering(&self.file).clone();
         let others: Vec<Stack> = guard
             .stacks
             .iter()
@@ -758,7 +764,7 @@ impl Stacks {
         self.keep_aside_after_a_dropped_load()?;
         crate::storage::write_json(&self.path(), &file)
             .map_err(|e| StacksError::Io(e.to_string()))?;
-        *guard = file;
+        *write_recovering(&self.file) = file;
         self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(parsed)
     }
@@ -768,7 +774,8 @@ impl Stacks {
     /// The file is written first, so a delete that cannot be written is an error to the caller
     /// and the stack is still there.
     pub fn delete(&self, id: &str) -> Result<Option<Stack>, StacksError> {
-        let mut guard = write_recovering(&self.file);
+        let _writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = read_recovering(&self.file).clone();
         let Some(index) = guard
             .stacks
             .iter()
@@ -781,7 +788,7 @@ impl Stacks {
         self.keep_aside_after_a_dropped_load()?;
         crate::storage::write_json(&self.path(), &file)
             .map_err(|e| StacksError::Io(e.to_string()))?;
-        *guard = file;
+        *write_recovering(&self.file) = file;
         self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(Some(removed))
     }

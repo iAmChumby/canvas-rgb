@@ -133,18 +133,17 @@ pub async fn put_peripheral_access(
     let device = DeviceId(id.clone());
     // The access is saved first: it is what the daemon may do from now on, whether or not the
     // device answers right now.
-    let home = app.store.read().await.home.clone();
+    // Published to memory only after the file is written: an access that failed to save never
+    // takes effect, which is the fail-closed direction.
     let key = device.clone();
-    crate::store_io::store_save(
+    crate::store_io::store_publish(
         &app,
         |store| {
-            let mut next = store.peripherals.clone();
-            next.set(&key, access);
-            store.peripherals = next;
+            store.peripherals.set(&key, access);
             Ok(())
         },
-        move |store| {
-            crate::peripherals::save(&home, &store.peripherals)
+        |store, ()| {
+            crate::peripherals::save(&store.home, &store.peripherals)
                 .map_err(|e| ApiFailure::internal(format!("could not save the peripheral access: {e}")))
         },
     )

@@ -469,7 +469,7 @@ pub struct App {
     /// Serialises store writes so they land on disk in the order callers made them (#241).
     /// `store_io` takes this before the store lock and holds it while a write is on a blocking
     /// thread; the store lock itself is free while the disk is busy.
-    pub(crate) store_writer: tokio::sync::Mutex<()>,
+    pub(crate) store_writer: Arc<tokio::sync::Mutex<()>>,
     /// The render engine handle.
     pub engine: Arc<dyn Engine>,
     /// The engine's last numbers, kept by [`watch_engine`] so a route never waits for the
@@ -718,7 +718,7 @@ impl App {
             fakes: false,
             scene: Default::default(),
             store: tokio::sync::RwLock::new(store),
-            store_writer: tokio::sync::Mutex::new(()),
+            store_writer: Arc::new(tokio::sync::Mutex::new(())),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),
             frame_lane,

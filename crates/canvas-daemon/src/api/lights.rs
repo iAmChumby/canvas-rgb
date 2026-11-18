@@ -101,90 +101,89 @@ pub async fn patch_light(
     let devices = app.devices.read().await.clone();
     // A rename changes nothing the engine plays; an arrangement, a direction or a first LED does.
     let replan = patch.arrangement.is_some() || patch.reversed.is_some() || patch.first_led.is_some();
-    let (index, light, saved) = {
-        let store = app.store.read().await;
-        let Some(index) = store.lights.lights.iter().position(|light| light.id == id) else {
-            return Err(ApiFailure::not_found(format!("no light with the id {id}")));
-        };
-        // A first LED is a physical LED of this light, so it must fit the count the device has
-        // now. 0 resets it to None. Validate before any field is changed so a refused patch
-        // leaves memory and lights.json as they were (#468).
-        // A first LED of 0 clears it, unless the light runs back: a reversed light with no first
-        // LED plays the old full flip (position 0 on its last LED), so LED 0 as the first LED of a
-        // reversed run has to be stored (#468).
-        let reversed_after = patch.reversed.unwrap_or(store.lights.lights[index].reversed);
-        let first_led = match patch.first_led {
-            None => None,
-            Some(0) if !reversed_after => Some(None),
-            Some(first) => {
-                let current = &store.lights.lights[index];
-                let count = devices
-                    .iter()
-                    .find(|device| device.id == current.device_id)
-                    .and_then(|device| device.zones.iter().find(|zone| zone.index == current.zone_index))
-                    .map(|zone| led_count(current, zone))
-                    .unwrap_or(0);
-                if first >= count {
-                    return Err(ApiFailure::validation(format!(
-                        "a light's first LED must be below its {count} LEDs"
-                    )));
+    // The light is found, validated and changed inside the writer-serialised section, on a copy of
+    // the store that is published only after lights.json is written. A delete of another light
+    // cannot shift an index under the patch, and a refused save changes nothing.
+    let (light, saved) = crate::store_io::store_publish(
+        &app,
+        |store| {
+            let Some(index) = store.lights.lights.iter().position(|light| light.id == id) else {
+                return Err(ApiFailure::not_found(format!("no light with the id {id}")));
+            };
+            // A first LED is a physical LED of this light, so it must fit the count the device has
+            // now. 0 resets it to None. Validate before any field is changed so a refused patch
+            // leaves memory and lights.json as they were (#468).
+            // A first LED of 0 clears it, unless the light runs back: a reversed light with no first
+            // LED plays the old full flip (position 0 on its last LED), so LED 0 as the first LED of a
+            // reversed run has to be stored (#468).
+            let reversed_after = patch.reversed.unwrap_or(store.lights.lights[index].reversed);
+            let first_led = match patch.first_led {
+                None => None,
+                Some(0) if !reversed_after => Some(None),
+                Some(first) => {
+                    let current = &store.lights.lights[index];
+                    let count = devices
+                        .iter()
+                        .find(|device| device.id == current.device_id)
+                        .and_then(|device| device.zones.iter().find(|zone| zone.index == current.zone_index))
+                        .map(|zone| led_count(current, zone))
+                        .unwrap_or(0);
+                    if first >= count {
+                        return Err(ApiFailure::validation(format!(
+                            "a light's first LED must be below its {count} LEDs"
+                        )));
+                    }
+                    Some(Some(first))
                 }
-                Some(Some(first))
+            };
+            let name = match patch.name {
+                None => None,
+                Some(None) => Some(None),
+                Some(Some(raw)) => {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        return Err(ApiFailure::validation(
+                            "a light's name cannot be empty; clear it with null instead",
+                        ));
+                    }
+                    if trimmed.chars().count() > GROUP_NAME_MAX {
+                        return Err(ApiFailure::validation(format!(
+                            "a light's name is at most {GROUP_NAME_MAX} characters"
+                        )));
+                    }
+                    Some(Some(trimmed.to_string()))
+                }
+            };
+            let before = store.lights.lights[index].clone();
+            let mut changed = before.clone();
+            if let Some(name) = name {
+                changed.name = name;
             }
-        };
-        let name = match patch.name {
-            None => None,
-            Some(None) => Some(None),
-            Some(Some(raw)) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    return Err(ApiFailure::validation(
-                        "a light's name cannot be empty; clear it with null instead",
-                    ));
-                }
-                if trimmed.chars().count() > GROUP_NAME_MAX {
-                    return Err(ApiFailure::validation(format!(
-                        "a light's name is at most {GROUP_NAME_MAX} characters"
-                    )));
-                }
-                Some(Some(trimmed.to_string()))
+            if let Some(arrangement) = patch.arrangement {
+                changed.arrangement = arrangement;
             }
-        };
-        let before = store.lights.lights[index].clone();
-        let mut changed = before.clone();
-        if let Some(name) = name {
-            changed.name = name;
-        }
-        if let Some(arrangement) = patch.arrangement {
-            changed.arrangement = arrangement;
-        }
-        if let Some(reversed) = patch.reversed {
-            changed.reversed = reversed;
-        }
-        if let Some(first_led) = first_led {
-            changed.first_led = first_led;
-        }
-        // A patch that changes nothing leaves the file alone: the light on disk is still right.
-        let saved = changed != before;
-        (index, changed, saved)
-    };
-    if saved {
-        let persisted = light.clone();
-        crate::store_io::store_save_rolled(
-            &app,
-            |store| {
-                let old = std::mem::replace(&mut store.lights.lights[index], persisted);
-                Ok(((), old))
-            },
-            |store| store.save_lights(),
-            |old, store, e, _| {
-                // A failed save leaves memory as it was: never ahead of the disk and the engine.
-                store.lights.lights[index] = old;
-                ApiFailure::service_unavailable(format!("the light was not changed: {e}"))
-            },
-        )
-        .await?;
-    }
+            if let Some(reversed) = patch.reversed {
+                changed.reversed = reversed;
+            }
+            if let Some(first_led) = first_led {
+                changed.first_led = first_led;
+            }
+            // A patch that changes nothing leaves the file alone: the light on disk is still right.
+            let saved = changed != before;
+            store.lights.lights[index] = changed.clone();
+            Ok((changed, saved))
+        },
+        |store, (_, saved)| {
+            if *saved {
+                store
+                    .save_lights()
+                    .map_err(|e| ApiFailure::service_unavailable(format!("the light was not changed: {e}")))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .await?;
 
     // The engine follows: a new arrangement or direction is a new plan for the light's group.
     if replan && saved {
@@ -227,64 +226,76 @@ pub async fn delete_light(
     let lock = app.scene.lock().await;
     let _gate = app.draft.gate().lock().await;
 
-    let (removed, emptied, lights, scenes) = {
+    // The cheap refusals first, from a read of the store: a light that is not there, or one on a
+    // driven device, answers before any file is touched. The light is found again inside the
+    // writer-serialised section below, so this read decides nothing about what is written.
+    let home = {
         let store = app.store.read().await;
-        let Some(index) = store.lights.lights.iter().position(|light| light.id == id) else {
+        let Some(light) = store.lights.lights.iter().find(|light| light.id == id) else {
             return Err(ApiFailure::not_found(format!("no light with the id {id}")));
         };
         // A light on a device the daemon drives is removed through chain setup, never here.
-        if crate::is_driven(&store.lights.lights[index].device_id) {
+        if crate::is_driven(&light.device_id) {
             return Err(ApiFailure::conflict(format!(
                 "the light {id} is on a device the daemon drives; remove it through chain setup"
             )));
         }
-        // The snapshot is taken BEFORE any write: the folder holds the owner's files exactly as
-        // they were, so this removal can be undone by hand. Without it, nothing is removed.
-        if let Err(e) = crate::storage::snapshot(&store.home, "before-removing-a-light") {
-            return Err(ApiFailure::service_unavailable(format!(
-                "the light was not removed: a snapshot could not be taken: {e}"
-            )));
-        }
-        let mut lights = store.lights.clone();
-        let mut scenes = store.scenes.clone();
-        let removed = lights.lights[index].clone();
-        lights.lights.remove(index);
-        // The light leaves every group. A group it leaves empty is named in the answer; the repair
-        // below drops it, as it drops any other empty group.
-        let mut emptied: Vec<EmptiedGroup> = Vec::new();
-        for scene in &mut scenes.scenes {
-            let mut changed = false;
-            for group in &mut scene.groups {
-                if group.members.iter().any(|member| member == &id) {
-                    group.members.retain(|member| member != &id);
-                    changed = true;
-                    if group.members.is_empty() {
-                        emptied.push(EmptiedGroup {
-                            scene_id: scene.id.clone(),
-                            group_id: group.id.clone(),
-                            name: group.name.clone(),
-                        });
-                    }
-                }
-            }
-            // Every server-side scene write moves the rev, so a PUT still holding the old one is
-            // refused as stale (409) instead of writing over this change (#497).
-            if changed {
-                scene.rev += 1;
-            }
-        }
-        let _changes = crate::scenes::repair(&mut scenes, &lights);
-        (removed, emptied, lights, scenes)
+        store.home.clone()
     };
-    let next_lights = lights.clone();
-    let next_scenes = scenes.clone();
-    crate::store_io::store_save_rolled(
+    // The snapshot is taken BEFORE any write: the folder holds the owner's files exactly as
+    // they were, so this removal can be undone by hand. Without it, nothing is removed. It copies
+    // files, so it runs on a blocking thread with no store guard held.
+    let snapshot = tokio::task::spawn_blocking(move || {
+        crate::storage::snapshot(&home, "before-removing-a-light")
+    })
+    .await
+    .map_err(|e| ApiFailure::service_unavailable(format!("the light was not removed: {e}")))?;
+    if let Err(e) = snapshot {
+        return Err(ApiFailure::service_unavailable(format!(
+            "the light was not removed: a snapshot could not be taken: {e}"
+        )));
+    }
+    let target = id.clone();
+    let (removed, emptied) = crate::store_io::store_save_rolled(
         &app,
         |store| {
+            // Found by id here, under the writer mutex: an index from before a concurrent delete
+            // or patch would name a different light.
+            let Some(index) = store.lights.lights.iter().position(|light| light.id == target) else {
+                return Err(ApiFailure::not_found(format!("no light with the id {target}")));
+            };
+            let mut lights = store.lights.clone();
+            let mut scenes = store.scenes.clone();
+            let removed = lights.lights.remove(index);
+            // The light leaves every group. A group it leaves empty is named in the answer; the
+            // repair below drops it, as it drops any other empty group.
+            let mut emptied: Vec<EmptiedGroup> = Vec::new();
+            for scene in &mut scenes.scenes {
+                let mut changed = false;
+                for group in &mut scene.groups {
+                    if group.members.iter().any(|member| member == &target) {
+                        group.members.retain(|member| member != &target);
+                        changed = true;
+                        if group.members.is_empty() {
+                            emptied.push(EmptiedGroup {
+                                scene_id: scene.id.clone(),
+                                group_id: group.id.clone(),
+                                name: group.name.clone(),
+                            });
+                        }
+                    }
+                }
+                // Every server-side scene write moves the rev, so a PUT still holding the old one
+                // is refused as stale (409) instead of writing over this change (#497).
+                if changed {
+                    scene.rev += 1;
+                }
+            }
+            let _changes = crate::scenes::repair(&mut scenes, &lights);
             // Kept so a failed save leaves memory as it was: never ahead of the disk and the engine.
-            let before_lights = std::mem::replace(&mut store.lights, next_lights);
-            let before_scenes = std::mem::replace(&mut store.scenes, next_scenes);
-            Ok(((), (before_lights, before_scenes)))
+            let before_lights = std::mem::replace(&mut store.lights, lights);
+            let before_scenes = std::mem::replace(&mut store.scenes, scenes);
+            Ok(((removed, emptied), (before_lights, before_scenes)))
         },
         |store| {
             store.save_lights()?;

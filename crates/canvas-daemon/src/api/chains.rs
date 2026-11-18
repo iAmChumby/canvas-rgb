@@ -432,9 +432,14 @@ async fn commit_the_setup(
 
     // The snapshot comes first, and the intent names it before the resize: a crash from here on
     // is a commit the next start undoes.
-    let snapshot = crate::storage::snapshot(&home, "before-chain-setup").map_err(|e| {
-        ApiFailure::internal(format!("could not take the snapshot before the commit: {e}"))
-    })?;
+    // The snapshot copies files, so it runs on a blocking thread, not a runtime worker.
+    let snapshot_home = home.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        crate::storage::snapshot(&snapshot_home, "before-chain-setup")
+    })
+    .await
+    .map_err(|e| ApiFailure::internal(format!("the snapshot before the commit did not finish: {e}")))?
+    .map_err(|e| ApiFailure::internal(format!("could not take the snapshot before the commit: {e}")))?;
     let Some(snapshot) = snapshot.file_name().and_then(|name| name.to_str()).map(str::to_string)
     else {
         return Err(ApiFailure::internal("the snapshot before the commit has no folder name"));

@@ -578,27 +578,24 @@ pub async fn create_preset(
     check_preset_caps(&request.props)?;
     let props = fit_props_to_schema(&schema, request.props, &name);
     let id = schema.id.clone();
-    let list = {
-        let store = app.store.read().await;
-        let mut list = store.effects.presets.get(&id).cloned().unwrap_or_default();
-        if clash(&schema, &list, &name, None) {
-            return Err(ApiFailure::conflict(format!("{name} is already a preset of this effect")));
-        }
-        if list.len() >= PRESETS_PER_EFFECT_MAX {
-            return Err(ApiFailure::validation(format!(
-                "an effect has at most {PRESETS_PER_EFFECT_MAX} presets"
-            )));
-        }
-        list.push(Preset { name, props });
-        list
-    };
-    let next = list.clone();
-    crate::store_io::store_save_rolled(
+    // Read, checked and replaced inside the writer-serialised section: two creates cannot both
+    // start from the same list, so neither is lost.
+    let list = crate::store_io::store_save_rolled(
         &app,
         |store| {
             let before = store.effects.presets.get(&id).cloned();
-            store.effects.presets.insert(id.clone(), next.clone());
-            Ok(((), (before, id.clone())))
+            let mut list = before.clone().unwrap_or_default();
+            if clash(&schema, &list, &name, None) {
+                return Err(ApiFailure::conflict(format!("{name} is already a preset of this effect")));
+            }
+            if list.len() >= PRESETS_PER_EFFECT_MAX {
+                return Err(ApiFailure::validation(format!(
+                    "an effect has at most {PRESETS_PER_EFFECT_MAX} presets"
+                )));
+            }
+            list.push(Preset { name: name.clone(), props });
+            store.effects.presets.insert(id.clone(), list.clone());
+            Ok((list, (before, id.clone())))
         },
         |store| store.save_effects(),
         |(before, key), store, e, _| {
@@ -625,36 +622,34 @@ pub async fn replace_preset(
     check_preset_caps(&request.props)?;
     let props = fit_props_to_schema(&schema, request.props, &name);
     let id = schema.id.clone();
-    let list = {
-        let store = app.store.read().await;
-        let mut list = store.effects.presets.get(&id).cloned().unwrap_or_default();
-        let index = list
-            .iter()
-            .position(|p| p.name == name)
-            .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
-        if list[index].props != request.expected {
-            return Err(ApiFailure::conflict(format!("{name} was changed in another window")));
-        }
-        if let Some(new_name) = &rename_to {
-            if clash(&schema, &list, new_name, Some(&name)) {
-                return Err(ApiFailure::conflict(format!(
-                    "{new_name} is already a preset of this effect"
-                )));
-            }
-        }
-        list[index].props = props;
-        if let Some(new_name) = rename_to.clone() {
-            list[index].name = new_name;
-        }
-        list
-    };
-    let next = list.clone();
-    crate::store_io::store_save_rolled(
+    // The preset is found and the `expected` props are compared inside the writer-serialised
+    // section: of two replaces holding the same `expected`, the second sees the first's props and
+    // is refused as changed in another window.
+    let list = crate::store_io::store_save_rolled(
         &app,
         |store| {
             let before = store.effects.presets.get(&id).cloned();
-            store.effects.presets.insert(id.clone(), next.clone());
-            Ok(((), (before, id.clone())))
+            let mut list = before.clone().unwrap_or_default();
+            let index = list
+                .iter()
+                .position(|p| p.name == name)
+                .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
+            if list[index].props != request.expected {
+                return Err(ApiFailure::conflict(format!("{name} was changed in another window")));
+            }
+            if let Some(new_name) = &rename_to {
+                if clash(&schema, &list, new_name, Some(&name)) {
+                    return Err(ApiFailure::conflict(format!(
+                        "{new_name} is already a preset of this effect"
+                    )));
+                }
+            }
+            list[index].props = props;
+            if let Some(new_name) = rename_to.clone() {
+                list[index].name = new_name;
+            }
+            store.effects.presets.insert(id.clone(), list.clone());
+            Ok((list, (before, id.clone())))
         },
         |store| store.save_effects(),
         |(before, key), store, e, _| {
@@ -674,23 +669,18 @@ pub async fn delete_preset(
     let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let id = schema.id.clone();
-    let list = {
-        let store = app.store.read().await;
-        let mut list = store.effects.presets.get(&id).cloned().unwrap_or_default();
-        let index = list
-            .iter()
-            .position(|p| p.name == name)
-            .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
-        list.remove(index);
-        list
-    };
-    let next = list.clone();
-    crate::store_io::store_save_rolled(
+    let list = crate::store_io::store_save_rolled(
         &app,
         |store| {
             let before = store.effects.presets.get(&id).cloned();
-            store.effects.presets.insert(id.clone(), next.clone());
-            Ok(((), (before, id.clone())))
+            let mut list = before.clone().unwrap_or_default();
+            let index = list
+                .iter()
+                .position(|p| p.name == name)
+                .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
+            list.remove(index);
+            store.effects.presets.insert(id.clone(), list.clone());
+            Ok((list, (before, id.clone())))
         },
         |store| store.save_effects(),
         |(before, key), store, e, _| {
@@ -964,20 +954,28 @@ pub async fn import_effect(
 
     // The write. A new file is created with a link, so a file that appears between the
     // check and the write is never overwritten.
-    if request.replace {
-        crate::user_effects::write_atomic(&path, request.html.as_bytes())
-            .map_err(|e| ApiFailure::internal(format!("could not write the effect file: {e}")))?;
-    } else {
-        crate::user_effects::write_atomic_new(&path, request.html.as_bytes()).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                ApiFailure::conflict(format!(
-                    "{} appeared while the effect was being imported; ask for a replace to overwrite it",
-                    request.file_name
-                ))
-            } else {
-                ApiFailure::internal(format!("could not write the effect file: {e}"))
-            }
-        })?;
+    // The file write syncs to disk, so it runs on a blocking thread, never on a runtime worker.
+    let replace = request.replace;
+    let html = request.html.clone();
+    let write_path = path.clone();
+    let written = tokio::task::spawn_blocking(move || {
+        if replace {
+            crate::user_effects::write_atomic(&write_path, html.as_bytes())
+        } else {
+            crate::user_effects::write_atomic_new(&write_path, html.as_bytes())
+        }
+    })
+    .await
+    .map_err(|e| ApiFailure::internal(format!("the effect file write did not finish: {e}")))?;
+    if let Err(e) = written {
+        return Err(if !request.replace && e.kind() == std::io::ErrorKind::AlreadyExists {
+            ApiFailure::conflict(format!(
+                "{} appeared while the effect was being imported; ask for a replace to overwrite it",
+                request.file_name
+            ))
+        } else {
+            ApiFailure::internal(format!("could not write the effect file: {e}"))
+        });
     }
 
     // The folder is rescanned, so the effect is in the library at once. The rescan parses the
@@ -1099,7 +1097,11 @@ pub async fn delete_effect(
     // a clash.
     let path = crate::user_effects::existing_file(&app.effects_dir, &file_name)
         .ok_or_else(|| ApiFailure::not_found(format!("no user effect with the id {id}")))?;
-    std::fs::remove_file(&path)
+    // A file removal can stall on a slow disk, so it runs on a blocking thread.
+    let removed_path = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::remove_file(&removed_path))
+        .await
+        .map_err(|e| ApiFailure::internal(format!("the effect file removal did not finish: {e}")))?
         .map_err(|e| ApiFailure::internal(format!("could not remove the effect file: {e}")))?;
 
     // The folder is rescanned, so the effect leaves the library at once.
@@ -1117,15 +1119,25 @@ pub async fn delete_effect(
     let mut presets_removed = 0usize;
     if !query.keep_presets {
         let key = id.clone();
+        // effects.json is rewritten only when the effect had presets, as before #241.
+        let had_presets = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&had_presets);
         presets_removed = crate::store_io::store_save_rolled(
             &app,
             |store| {
                 let Some(list) = store.effects.presets.remove(&key) else {
                     return Ok((0, None));
                 };
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok((list.len(), Some((key.clone(), list))))
             },
-            |store| store.save_effects(),
+            move |store| {
+                if had_presets.load(std::sync::atomic::Ordering::SeqCst) {
+                    store.save_effects()
+                } else {
+                    Ok(())
+                }
+            },
             |before, store, e, _| {
                 if let Some((key, list)) = before {
                     store.effects.presets.insert(key, list);

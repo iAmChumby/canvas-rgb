@@ -14,7 +14,7 @@ use canvas_proto::display::{DisplayConfig, DisplayInfo, DisplaySource};
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
-use crate::displays::{default_config, save, validate, DisplaysFile};
+use crate::displays::{default_config, save, validate};
 use crate::state::App;
 
 /// What a configured display that the enumeration has not found reports.
@@ -82,34 +82,28 @@ pub async fn put_display(
     Json(config): Json<DisplayConfig>,
 ) -> ApiResult<Json<DisplayConfig>> {
     validate(&id, &config).map_err(ApiFailure::validation)?;
-    let home = app.store.read().await.home.clone();
     let persisted = config.clone();
-    let should_save = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = Arc::clone(&should_save);
-    let changed = crate::store_io::store_save(
+    // The config is published to memory only after the file is written: a failed save changes
+    // nothing (`GET` and the display task see what they saw before the PUT).
+    let changed = crate::store_io::store_publish(
         &app,
         |store| {
-            let mut next: DisplaysFile = store.displays.clone();
-            let changed = match next.displays.iter_mut().find(|c| c.device == persisted.device) {
+            let changed = match store.displays.displays.iter_mut().find(|c| c.device == persisted.device) {
                 Some(existing) if *existing == persisted => false,
                 Some(existing) => {
                     *existing = persisted.clone();
                     true
                 }
                 None => {
-                    next.displays.push(persisted.clone());
+                    store.displays.displays.push(persisted.clone());
                     true
                 }
             };
-            if changed {
-                store.displays = next;
-                flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
             Ok(changed)
         },
-        move |store| {
-            if should_save.load(std::sync::atomic::Ordering::SeqCst) {
-                save(&home, &store.displays)
+        |store, changed| {
+            if *changed {
+                save(&store.home, &store.displays)
                     .map_err(|e| ApiFailure::internal(format!("could not save the display config: {e}")))
             } else {
                 Ok(())
@@ -133,10 +127,9 @@ pub async fn delete_display(
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let device = DeviceId(id.clone());
-    let home = app.store.read().await.home.clone();
     let key = device.clone();
     let label = id.clone();
-    crate::store_io::store_save(
+    crate::store_io::store_publish(
         &app,
         |store| {
             let position = store
@@ -145,13 +138,11 @@ pub async fn delete_display(
                 .iter()
                 .position(|c| c.device == key)
                 .ok_or_else(|| ApiFailure::not_found(format!("no saved config for display {label}")))?;
-            let mut next = store.displays.clone();
-            next.displays.remove(position);
-            store.displays = next;
+            store.displays.displays.remove(position);
             Ok(())
         },
-        move |store| {
-            save(&home, &store.displays)
+        |store, ()| {
+            save(&store.home, &store.displays)
                 .map_err(|e| ApiFailure::internal(format!("could not save the display config: {e}")))
         },
     )
