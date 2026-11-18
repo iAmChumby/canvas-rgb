@@ -618,3 +618,55 @@ async fn a_zone_resize_sent_before_packet_100_reaches_no_device() {
     assert_eq!(server.zone_leds(1, 0), Some(8), "stick a's zone was resized: {in_window:?}");
     assert!(in_window.is_err(), "a resize was accepted while the list was between swap and 100");
 }
+
+/// `read_back` asks OpenRGB for a controller's colours by its position, so a read that goes out between the
+/// rescan request and packet 100 answers with whichever stick sits at that position now (#509). The read
+/// passes its settle check before the rescan, and waits for the request gate that an earlier read holds
+/// (the fake keeps that read's reply); the rescan takes its hold and writes packet 140 meanwhile, so the
+/// read's packet goes out after it. The verdict is the colours the read returns: stick a's, or none.
+#[tokio::test]
+async fn a_read_back_sent_after_the_rescan_request_never_answers_with_another_devices_colours() {
+    let server = v5_server(vec![twin("a"), twin("b")]).await;
+    server.park_list_change(true);
+    server.rescan_order(vec![1, 0]);
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 2);
+    let a = DeviceId("openrgb:a".into());
+    let b = DeviceId("openrgb:b".into());
+    let red = [Rgb8 { r: 255, g: 0, b: 0 }; 8];
+    adapter.write_frame(&a, &red).await.expect("a frame for a");
+    until("a's frame landed", || !server.landings().is_empty()).await;
+
+    // The first read holds the request gate: the fake keeps its reply.
+    server.hold_replies(true);
+    let mut reading_b = adapter.clone();
+    let first = tokio::spawn(async move { reading_b.read_back(&DeviceId("openrgb:b".into())).await });
+    until("the first read waits for its reply", || server.held_replies() == 1).await;
+    // The read of a passes its settle check (nothing is held yet) and waits for the gate. The runtime is
+    // single-threaded: a task that has been yielded to has run as far as it can.
+    let mut reading_a = adapter.clone();
+    let second = tokio::spawn(async move { reading_a.read_back(&DeviceId("openrgb:a".into())).await });
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    // The rescan takes its hold, writes packet 140, and the fake swaps its list.
+    let scanner = adapter.clone();
+    let rescan = tokio::spawn(async move { scanner.rescan_shared().await });
+    until("the fake took packet 140 and swapped its list", || server.rescan_count() == 1).await;
+    // The first read is answered, the gate is free, and the second read's packet goes out after packet 140.
+    server.hold_replies(false);
+    server.release_replies();
+    let _ = first.await.expect("the first read ends");
+    let second = second.await.expect("the second read ends");
+
+    server.release_list_change();
+    rescan.await.expect("the task ends").expect("the detection settled");
+    if let Ok(colors) = &second {
+        assert_eq!(colors.as_slice(), red.as_slice(), "the read of stick a answered with the colours of the stick at its old index");
+    }
+    assert!(second.is_err(), "a read was accepted while the list was between swap and 100: {second:?}");
+    // The hold is over with the rescan: a read of b (which sits at index 0 now) answers.
+    adapter.discover().await.expect("discover after the rescan");
+    adapter.read_back(&b).await.expect("a read after the rescan");
+}

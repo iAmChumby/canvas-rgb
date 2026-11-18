@@ -1002,7 +1002,8 @@ impl OpenRgbAdapter {
         self.write_packet(device, &bytes, false, false).await
     }
 
-    /// Sends a packet that names a controller by its position (protocol 5) and changes it: a zone resize.
+    /// Sends a packet that names a controller by its position (protocol 5): a zone resize, or the request of
+    /// a controller's colours.
     /// Refused while the list is unsettled, checked under the socket lock like a frame (see
     /// [`write_packet`](Self::write_packet)).
     async fn send_positional(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<(), AdapterError> {
@@ -1091,6 +1092,19 @@ impl OpenRgbAdapter {
     /// next request. The link is broken and lost, and the supervisor reconnects: a fresh
     /// connection has no stale replies.
     async fn request(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<Vec<u8>, AdapterError> {
+        self.request_as(device, packet_id, payload, false).await
+    }
+
+    /// A [`request`](Self::request) that names a controller by its position on protocol 5 and reports what
+    /// that controller holds (`read_back`): refused under the socket lock while the list is unsettled or a
+    /// rescan was requested, like a frame (see [`write_packet`](Self::write_packet), #509). The list read
+    /// of [`enumerate`](Self::enumerate) is not one: it is what settles the list, and it names
+    /// every controller in turn on purpose.
+    async fn request_positional(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<Vec<u8>, AdapterError> {
+        self.request_as(device, packet_id, payload, true).await
+    }
+
+    async fn request_as(&self, device: u32, packet_id: u32, payload: &[u8], positional: bool) -> Result<Vec<u8>, AdapterError> {
         let _gate = self.link.request_gate.lock().await;
         let (reply, received) = oneshot::channel();
         // Declared after the gate, so it drops first: the slot is cleared while the gate is held.
@@ -1110,7 +1124,11 @@ impl OpenRgbAdapter {
         if !guard(&self.link.session).connected {
             return Err(AdapterError::NotConnected);
         }
-        self.send(device, packet_id, payload).await?;
+        if positional {
+            self.send_positional(device, packet_id, payload).await?;
+        } else {
+            self.send(device, packet_id, payload).await?;
+        }
         in_flight.sent = true;
         match tokio::time::timeout(REPLY_TIMEOUT, received).await {
             Ok(Ok(Reply::Data(reply))) => Ok(reply),
@@ -1660,7 +1678,7 @@ impl DeviceAdapter for OpenRgbAdapter {
 
     async fn read_back(&mut self, device: &DeviceId) -> Result<Vec<Rgb8>, AdapterError> {
         let controller = self.controller(device).await?;
-        let payload = self.request(controller.addr, REQUEST_CONTROLLER_DATA, &self.data_request_payload()).await?;
+        let payload = self.request_positional(controller.addr, REQUEST_CONTROLLER_DATA, &self.data_request_payload()).await?;
         Ok(WireController::decode(&payload, self.protocol_version())?.colors)
     }
 }
@@ -1992,6 +2010,132 @@ mod hostile_tests {
         adapter.connect().await.unwrap();
         let result = tokio::time::timeout(Duration::from_secs(3), adapter.discover()).await;
         assert!(matches!(&result, Ok(Ok(devices)) if devices.len() == 1), "expected the one good controller, got {result:?}");
+    }
+}
+
+// ---- the socket-lock re-check of a positional packet (#509)
+
+/// A packet that names a controller by its position passes the settle check in `controller()` and then waits
+/// for the socket lock. A rescan that takes its hold in between has to stop it: the check under the lock is the
+/// only thing that does. The socket lock is held by the test, so the packet waits at it for as long as the test
+/// wants; one poll of the packet's future runs it as far as the lock, and nothing is timed.
+#[cfg(test)]
+mod rescan_hold_tests {
+    use super::*;
+    use crate::fake::FakeOpenRgbServer;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    const RED: Rgb8 = Rgb8 { r: 255, g: 0, b: 0 };
+
+    fn stick(serial: &str) -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId(format!("openrgb:{serial}")),
+            name: format!("DDR5 {serial}"),
+            vendor: "fake".into(),
+            kind: DeviceKind::Dram,
+            adapter: "openrgb".into(),
+            adapter_index: 0,
+            serial: serial.into(),
+            location: "smbus".into(),
+            zones: vec![ZoneInfo {
+                index: 0,
+                name: "RGB".into(),
+                kind: ZoneKind::Linear,
+                led_count: 8,
+                min_leds: 4,
+                max_leds: 16,
+                resizable: true,
+            }],
+            connected: true,
+        }
+    }
+
+    /// A protocol 5 server with two sticks and an adapter that has read them.
+    async fn connected() -> (FakeOpenRgbServer, OpenRgbAdapter) {
+        let server = FakeOpenRgbServer::start(vec![stick("a"), stick("b")]).await.expect("the fake server");
+        server.server_protocol_version(5);
+        let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
+        adapter.connect().await.expect("connect");
+        assert_eq!(adapter.discover().await.expect("discover").len(), 2);
+        (server, adapter)
+    }
+
+    /// One poll: the future has run as far as it can without the socket lock.
+    fn waits<F: Future>(future: &mut Pin<Box<F>>) -> bool {
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        matches!(future.as_mut().poll(&mut context), Poll::Pending)
+    }
+
+    fn is_unsettled_refusal<T: std::fmt::Debug>(result: &Result<T, AdapterError>) -> bool {
+        matches!(result, Err(AdapterError::Protocol(reason)) if reason == LIST_UNSETTLED_MESSAGE)
+    }
+
+    /// Waits until a frame sent after the refusal has landed: the fake reads one connection in order, so a
+    /// packet sent before it has been handled by then.
+    async fn after_a_later_frame_landed(server: &FakeOpenRgbServer, adapter: &OpenRgbAdapter) {
+        adapter.write_frame_shared(&DeviceId("openrgb:a".into()), &[RED; 8]).await.expect("a frame once the hold is over");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while server.landings().is_empty() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("the later frame never landed");
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_passed_the_settle_check_is_refused_when_the_hold_is_taken_before_its_write() {
+        let (server, adapter) = connected().await;
+        let a = DeviceId("openrgb:a".into());
+        let socket = adapter.link.writer.lock().await;
+        let mut frame = Box::pin(adapter.write_frame_shared(&a, &[RED; 8]));
+        assert!(waits(&mut frame), "the frame did not wait for the socket lock");
+        let hold = adapter.hold_for_rescan();
+        drop(socket);
+        let result = frame.await;
+        assert!(is_unsettled_refusal(&result), "a frame went out after the rescan's hold was taken: {result:?}");
+        drop(hold);
+        after_a_later_frame_landed(&server, &adapter).await;
+        assert_eq!(server.landings().len(), 1, "the refused frame reached OpenRGB: {:?}", server.landings());
+    }
+
+    #[tokio::test]
+    async fn a_resize_that_passed_the_settle_check_is_refused_when_the_hold_is_taken_before_its_write() {
+        let (server, adapter) = connected().await;
+        let a = DeviceId("openrgb:a".into());
+        let socket = adapter.link.writer.lock().await;
+        let mut sizing = adapter.clone();
+        let mut resize = Box::pin(async move { sizing.set_zone_size(&a, 0, 12).await });
+        assert!(waits(&mut resize), "the resize did not wait for the socket lock");
+        let hold = adapter.hold_for_rescan();
+        drop(socket);
+        let result = resize.await;
+        assert!(is_unsettled_refusal(&result), "a resize went out after the rescan's hold was taken: {result:?}");
+        drop(hold);
+        after_a_later_frame_landed(&server, &adapter).await;
+        assert_eq!(server.zone_leds(0, 0), Some(8), "the refused resize reached OpenRGB");
+        assert_eq!(server.resize_count(0) + server.resize_count(1), 0, "the refused resize reached OpenRGB");
+    }
+
+    #[tokio::test]
+    async fn a_read_back_that_passed_the_settle_check_is_refused_when_the_hold_is_taken_before_its_write() {
+        let (server, adapter) = connected().await;
+        let a = DeviceId("openrgb:a".into());
+        let socket = adapter.link.writer.lock().await;
+        let mut reading = adapter.clone();
+        let mut read = Box::pin(async move { reading.read_back(&a).await });
+        assert!(waits(&mut read), "the read did not wait for the socket lock");
+        let hold = adapter.hold_for_rescan();
+        drop(socket);
+        let result = read.await;
+        assert!(is_unsettled_refusal(&result), "a read went out after the rescan's hold was taken: {result:?}");
+        drop(hold);
+        // The refused read left the link whole and its reply slot free: the next read answers.
+        assert!(adapter.is_connected(), "the link broke over a refused read");
+        adapter.clone().read_back(&DeviceId("openrgb:b".into())).await.expect("a read once the hold is over");
+        drop(server);
     }
 }
 
