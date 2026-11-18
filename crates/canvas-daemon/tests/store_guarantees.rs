@@ -395,28 +395,29 @@ async fn a_failed_peripheral_access_save_leaves_the_access_as_it_was() {
     assert_eq!(after, before, "an access that failed to save took effect in memory");
 }
 
-/// Makes a file read-only, and writable again when dropped, so the temp home can be removed.
+/// Makes a file read-only, and puts its original permissions back when dropped, so the temp home
+/// can be removed.
 #[cfg(windows)]
-struct ReadOnly(std::path::PathBuf);
+struct ReadOnly {
+    path: std::path::PathBuf,
+    original: std::fs::Permissions,
+}
 
 #[cfg(windows)]
 impl ReadOnly {
     fn new(path: std::path::PathBuf) -> Self {
-        let mut permissions = std::fs::metadata(&path).expect("the file exists").permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&path, permissions).expect("the file is made read-only");
-        Self(path)
+        let original = std::fs::metadata(&path).expect("the file exists").permissions();
+        let mut read_only = original.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(&path, read_only).expect("the file is made read-only");
+        Self { path, original }
     }
 }
 
 #[cfg(windows)]
 impl Drop for ReadOnly {
     fn drop(&mut self) {
-        if let Ok(metadata) = std::fs::metadata(&self.0) {
-            let mut permissions = metadata.permissions();
-            permissions.set_readonly(false);
-            let _ = std::fs::set_permissions(&self.0, permissions);
-        }
+        let _ = std::fs::set_permissions(&self.path, self.original.clone());
     }
 }
 
