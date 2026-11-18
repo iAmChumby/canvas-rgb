@@ -68,8 +68,10 @@ pub enum SlotKind {
     },
     /// A pattern as the editor holds it: the id it is for. Its colours are on the engine, in the
     /// group the takeover made ([`canvas_proto::pattern::PATTERN_EDIT_GROUP`]); a stroke of the
-    /// same pattern swaps that group's effect and builds nothing.
-    Pattern { pattern_id: String },
+    /// same pattern swaps that group's effect and builds nothing. `pattern` is the document the
+    /// engine plays now: a PUT of the same document (the editor's heartbeat) renews the lease and
+    /// leaves the effect, and its clock, alone (#481).
+    Pattern { pattern_id: String, pattern: Arc<canvas_proto::pattern::Pattern> },
 }
 
 /// A draft on the lights, with what it took over from.
@@ -98,7 +100,7 @@ impl Slot {
         match &self.kind {
             SlotKind::Html { source_hash, .. } => source_hash,
             SlotKind::Stack { structure, .. } => structure,
-            SlotKind::Pattern { pattern_id } => pattern_id,
+            SlotKind::Pattern { pattern_id, .. } => pattern_id,
         }
     }
 
@@ -960,7 +962,7 @@ pub async fn put_pattern(
         effect_id: Some(pattern.id.clone()),
         groups: vec![canvas_proto::pattern::PATTERN_EDIT_GROUP.to_string()],
         lease_until,
-        kind: SlotKind::Pattern { pattern_id: pattern.id.clone() },
+        kind: SlotKind::Pattern { pattern_id: pattern.id.clone(), pattern: Arc::new(pattern.clone()) },
     };
     *app.draft.lock() = Some(slot.clone());
     app.draft.clear_ending();

@@ -92,8 +92,13 @@ pub(crate) struct GroupSlot {
     /// Unique for the engine's whole life. The render thread puts an effect back only when the
     /// slot still has the generation it took it at: a replaced effect is dropped instead.
     pub effect_generation: u64,
-    /// When the effect was installed; `Inputs.time` counts from here.
+    /// When the effect was installed; `Inputs.time` counts from here. A pattern swapped for one with
+    /// the same timing keeps it ([`PatternTiming`], #481).
     pub started: Instant,
+    /// What decides when a pattern's picture moves: set when a pattern is installed, so the next
+    /// install can tell a change of colours from a change of timing without the effect (the render
+    /// thread may hold it).
+    pub timing: Option<PatternTiming>,
     /// Props the effect has not been initialised with yet.
     pub pending_props: Option<Props>,
     /// Why the group is dark: the text of a panic. The effect is not called again until it is
@@ -101,10 +106,40 @@ pub(crate) struct GroupSlot {
     pub failed: Option<String>,
 }
 
+/// What decides when a pattern's picture moves (#481): the pattern, its motion, how its frames play
+/// and each frame's hold and transition. Not the colours. A pattern swapped for another with the
+/// same timing is the same animation in new colours, so it keeps the clock it was running on: a
+/// spinning ring painted stroke by stroke does not start over at angle 0 with every stroke.
+#[derive(Clone, PartialEq)]
+pub(crate) struct PatternTiming {
+    id: String,
+    motion: canvas_proto::pattern::Motion,
+    playback: Option<canvas_proto::pattern::Playback>,
+    frames: Vec<(u32, Option<canvas_proto::pattern::Transition>)>,
+}
+
+impl PatternTiming {
+    /// The timing of `pattern`.
+    pub(crate) fn of(pattern: &canvas_proto::pattern::Pattern) -> Self {
+        Self {
+            id: pattern.id.clone(),
+            motion: pattern.motion.clone(),
+            playback: pattern.playback,
+            frames: pattern.frames.iter().map(|f| (f.hold, f.transition)).collect(),
+        }
+    }
+
+    /// The timing of the pattern `effect` carries, or `None` for any other effect.
+    pub(crate) fn of_effect(effect: Option<&dyn Effect>) -> Option<Self> {
+        effect.and_then(|e| e.as_pattern()).map(Self::of)
+    }
+}
+
 impl GroupSlot {
     /// Installs a freshly built effect in this slot: its needs and how a strip reads it
     /// (`strip_read`, #400) come from that build, read once by the caller, never per frame.
-    /// The effect's clock restarts and its pending props are dropped.
+    /// The effect's clock restarts and its pending props are dropped, unless the effect is a
+    /// pattern with the timing of the one it replaces (#481).
     ///
     /// Returns the effect it replaced, for the caller to drop outside the state lock.
     pub(crate) fn install(
@@ -120,7 +155,11 @@ impl GroupSlot {
         self.needs = needs;
         self.strip_read = strip_read;
         self.effect_generation = generation;
-        self.started = Instant::now();
+        let timing = PatternTiming::of_effect(self.effect.as_deref());
+        if timing.is_none() || timing != self.timing {
+            self.started = Instant::now();
+        }
+        self.timing = timing;
         self.pending_props = None;
         self.failed = failed;
         old
@@ -313,6 +352,9 @@ struct RunGroup {
     factor: f32,
 }
 
+/// A light's LED count and arrangement: what a fitted frame set is keyed by (#481).
+type FitShape = (u32, Arrangement);
+
 /// A spinning pattern's per-light sources and its speed (#468).
 struct SpinPlay {
     /// Laps a second; never 0 (a pattern that does not turn is not a `SpinPlay`).
@@ -326,7 +368,9 @@ struct FramePlay {
     timeline: Timeline,
     /// Per light of the plan, in `plan.lights` order: every frame of the pattern fitted to the
     /// light, in position order (no `reversed` yet; that is applied after the blend and the turn).
-    frames: Vec<Vec<SpinSource>>,
+    /// Lights of one LED count and arrangement read the same set, fitted once (#481): the fit is
+    /// a function of the pattern and that shape, never of the light.
+    frames: Vec<Arc<Vec<SpinSource>>>,
     /// Per light: the blended frame a fade turns into, kept so a tick allocates nothing.
     blended: Vec<SpinSource>,
 }
@@ -380,20 +424,34 @@ impl RunGroup {
             return;
         }
         let mut sources = Vec::new();
-        let mut frame_sets: Vec<Vec<SpinSource>> = Vec::new();
+        let mut frame_sets: Vec<Arc<Vec<SpinSource>>> = Vec::new();
+        // The frame sets made so far, by the shape they were fitted to: a second light of that
+        // shape takes the same set instead of fitting every frame again (#481).
+        let mut made: Vec<(FitShape, Arc<Vec<SpinSource>>)> = Vec::new();
         let fitted: Vec<Vec<Rgb8>> = self
             .shapes
             .iter()
             .map(|(leds, arrangement)| {
                 let colors = fit_colors(source, &pattern.built_on, *leds, *arrangement);
                 if playing_frames {
-                    frame_sets.push(
-                        pattern
-                            .frames
-                            .iter()
-                            .map(|f| SpinSource::new(fit_colors(&f.colors, &pattern.built_on, *leds, *arrangement)))
-                            .collect(),
-                    );
+                    let shape = (*leds, *arrangement);
+                    let set = match made.iter().find(|(known, _)| *known == shape) {
+                        Some((_, set)) => Arc::clone(set),
+                        None => {
+                            let set: Arc<Vec<SpinSource>> = Arc::new(
+                                pattern
+                                    .frames
+                                    .iter()
+                                    .map(|f| {
+                                        SpinSource::new(fit_colors(&f.colors, &pattern.built_on, *leds, *arrangement))
+                                    })
+                                    .collect(),
+                            );
+                            made.push((shape, Arc::clone(&set)));
+                            set
+                        }
+                    };
+                    frame_sets.push(set);
                 } else if spin.is_some() {
                     sources.push(SpinSource::new(colors.clone()));
                 }
@@ -444,8 +502,8 @@ impl RunGroup {
             sources: vec![SpinSource::new(run.clone())],
         });
         if playing_frames {
-            let set: Vec<SpinSource> =
-                pattern.frames.iter().map(|f| SpinSource::new(fit(&f.colors))).collect();
+            let set: Arc<Vec<SpinSource>> =
+                Arc::new(pattern.frames.iter().map(|f| SpinSource::new(fit(&f.colors))).collect());
             self.spin = spin.map(|speed| SpinPlay { turns_per_s: f64::from(speed), sources: Vec::new() });
             self.frames = Some(FramePlay {
                 timeline,
@@ -1165,7 +1223,7 @@ fn play_frames(
     let (Some(set), Some(scratch)) = (frames.get(index), blended.get_mut(index)) else {
         return false;
     };
-    pattern_play::render(set, scratch, beat, spin, out)
+    pattern_play::render(set.as_slice(), scratch, beat, spin, out)
 }
 
 /// Multiplies every colour of one light by the group's brightness (`factor` is 0.0..=1.0).
@@ -1253,6 +1311,7 @@ mod tests {
                 strip_read: StripRead::Cell,
                 effect_generation: 1,
                 started: Instant::now(),
+                timing: None,
                 pending_props: None,
                 failed: None,
             }],
@@ -3387,6 +3446,47 @@ mod tests {
         }
     }
 
+    /// A spinning ring painted stroke by stroke keeps its angle (#481): a swap for the same pattern
+    /// with other colours is the same animation, so the clock it runs on is carried over; a change
+    /// of the motion (or of the frames' timing) starts it over.
+    #[test]
+    fn a_colour_only_swap_of_a_spinning_pattern_keeps_its_angle_and_a_motion_change_restarts_it() {
+        let source: Vec<Rgb8> = (0..8).map(|i| Rgb8::new(20 + 25 * i as u8, 5, 9)).collect();
+        let recoloured: Vec<Rgb8> = (0..8).map(|i| Rgb8::new(9, 5, 20 + 25 * i as u8)).collect();
+        let install = |scene: &mut SceneState, pattern: Pattern| {
+            let effect: Box<dyn Effect> = Box::new(PatternTestEffect::new(pattern));
+            let generation = scene.groups[0].effect_generation + 1;
+            let strip_read = effect.strip_read();
+            scene.groups[0].install(Some(effect), InputNeeds::default(), strip_read, None, generation);
+        };
+        let shown = |scene: &mut SceneState| {
+            let mut runner = SceneRunner::new();
+            frame(scene, &mut runner, &[strip_device("d1", 8)]);
+            take(&mut runner, "d1", 8)
+        };
+        let mut scene = state_playing(&["d1#z0"], vec![ring("d1")], None, 100);
+        install(&mut scene, spinning(8, Arrangement::Ring, source.clone(), 0.25));
+        // Two seconds in: half a lap, four LEDs.
+        scene.groups[0].started = Instant::now() - Duration::from_millis(2000);
+        near(&shown(&mut scene), &rotated(&source, 4), 2);
+
+        // The same animation in other colours: still half a lap in, not back at angle 0.
+        install(&mut scene, spinning(8, Arrangement::Ring, recoloured.clone(), 0.25));
+        near(&shown(&mut scene), &rotated(&recoloured, 4), 2);
+
+        // Another speed is another animation: it starts at angle 0.
+        install(&mut scene, spinning(8, Arrangement::Ring, recoloured.clone(), 0.5));
+        near(&shown(&mut scene), &recoloured, 2);
+
+        // So does a change of the frames' timing: the clock of a pattern with another hold starts over.
+        let backdated = Instant::now() - Duration::from_millis(2000);
+        scene.groups[0].started = backdated;
+        let mut timed = spinning(8, Arrangement::Ring, recoloured.clone(), 0.5);
+        timed.frames[0].hold = 50;
+        install(&mut scene, timed);
+        assert!(scene.groups[0].started > backdated + Duration::from_millis(1000), "a new hold starts the clock over");
+    }
+
     /// A line wraps too: its end feeds its start.
     #[test]
     fn a_line_wraps_as_a_ring_does() {
@@ -4123,6 +4223,7 @@ mod group_preview_tests {
                 strip_read,
                 effect_generation: 1,
                 started: Instant::now(),
+                timing: None,
                 pending_props: None,
                 failed: None,
             }],

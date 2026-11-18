@@ -636,12 +636,19 @@ fn build_and_set(app: &App, lights: &[Light], devices: &[DeviceInfo], scene: &Sc
         .map(|(group, _)| group.id.clone())
         .collect();
 
+    // Which groups keep their pattern's frames fitted, decided before anything is built (#481).
+    let pattern_over = pattern_budget_refusals(app, scene, lights, devices);
+
     let mut groups = Vec::with_capacity(scene.groups.len());
     for (at, group) in scene.groups.iter().enumerate() {
         let (effect, props) = match &group.plays {
             Plays::Off => (None, Props::new()),
             Plays::Effect { effect: id, props } => {
-                if !runs[at] {
+                if let Some(why) = pattern_over.get(&group.id) {
+                    tracing::warn!(group = %group.id, effect = %id, "a group over the scene's pattern budget did not build; its row says why");
+                    failures.insert(group.id.clone(), why.clone());
+                    (None, props.clone())
+                } else if !runs[at] {
                     // Over the limit: the group keeps what the owner saved, and does not run.
                     tracing::warn!(
                         group = %group.id,
@@ -1287,6 +1294,8 @@ fn build_and_set_with(
 ) -> Result<(), String> {
     let mut needs = InputNeeds::default();
     let mut groups = Vec::with_capacity(scene.groups.len());
+    // The scene's patterns keep the same fitted frames whoever builds them (#481).
+    let pattern_over = pattern_budget_refusals(app, scene, lights, devices);
     for group in &scene.groups {
         let (effect, group_props) = if takeover.groups.contains(&group.id) {
             let made = takeover.instance_blocking(&group.id)?;
@@ -1297,6 +1306,10 @@ fn build_and_set_with(
         } else {
             match &group.plays {
                 Plays::Off => (None, Props::new()),
+                Plays::Effect { props, .. } if pattern_over.contains_key(&group.id) => {
+                    failures.insert(group.id.clone(), pattern_over[&group.id].clone());
+                    (None, props.clone())
+                }
                 Plays::Effect { effect: id, props } => match build_effect(app, id, Some(&group.id)) {
                     Ok((built, group_needs)) => {
                         needs.screen |= group_needs.screen;
@@ -1369,13 +1382,20 @@ pub async fn apply_pattern_takeover(
     // A stroke of the pattern already on the lights: the engine holds the pattern's group, with
     // the members this pattern fits, so one swap is the whole change.
     let held = app.scene.held();
-    let same_draft = app.draft.snapshot().is_some_and(|slot| {
-        matches!(
-            &slot.kind,
-            crate::draft::SlotKind::Pattern { pattern_id } if pattern_id == &pattern.id
-        )
+    let playing = app.draft.snapshot().and_then(|slot| match slot.kind {
+        crate::draft::SlotKind::Pattern { pattern_id, pattern: playing } if pattern_id == pattern.id => {
+            Some(playing)
+        }
+        _ => None,
     });
+    let same_draft = playing.is_some();
     if same_draft && held.groups.iter().any(|group| group == canvas_proto::pattern::PATTERN_EDIT_GROUP) {
+        // The very document already on the lights (the editor's heartbeat): nothing to swap. A swap
+        // installs a new effect, which restarts the effect's clock and fits every frame again, so
+        // a playing pattern would start over every heartbeat (#481).
+        if playing.as_deref() == Some(pattern) {
+            return Ok(lit.len());
+        }
         app.engine.set_group_effect(
             canvas_proto::pattern::PATTERN_EDIT_GROUP,
             Some(Box::new(crate::pattern_effect::PatternEffect::new(pattern.clone()))),
@@ -1395,8 +1415,9 @@ pub async fn apply_pattern_takeover(
         let scene = scene.clone();
         let pattern = pattern.clone();
         let lit = lit.clone();
+        let (lights, devices) = (lights.clone(), devices.clone());
         tokio::task::spawn_blocking(move || {
-            build_pattern_takeover(&app, &scene, &pattern, &lit)
+            build_pattern_takeover(&app, &scene, &pattern, &lit, &lights, &devices)
         })
         .await
     };
@@ -1429,6 +1450,8 @@ fn build_pattern_takeover(
     scene: &Scene,
     pattern: &canvas_proto::pattern::Pattern,
     lit: &[LightId],
+    lights: &[Light],
+    devices: &[DeviceInfo],
 ) -> Result<PatternTakeover, String> {
     let mut groups = Vec::with_capacity(scene.groups.len() + 1);
     let mut held = Vec::with_capacity(scene.groups.len() + 1);
@@ -1451,6 +1474,8 @@ fn build_pattern_takeover(
     let dim = |brightness: u8| -> u8 {
         (brightness as u16 * canvas_proto::pattern::PATTERN_EDIT_DIM_PERCENT as u16 / 100) as u8
     };
+    // The dimmed groups play their patterns within the same budget as the scene does (#481).
+    let pattern_over = pattern_budget_refusals(app, scene, lights, devices);
     for group in &scene.groups {
         let members: Vec<LightId> = group
             .members
@@ -1463,6 +1488,10 @@ fn build_pattern_takeover(
         }
         let (effect, props) = match &group.plays {
             Plays::Off => (None, Props::new()),
+            Plays::Effect { props, .. } if pattern_over.contains_key(&group.id) => {
+                failures.insert(group.id.clone(), pattern_over[&group.id].clone());
+                (None, props.clone())
+            }
             Plays::Effect { effect: id, props } => match build_effect(app, id, Some(&group.id)) {
                 Ok((built, group_needs)) => {
                     needs.screen |= group_needs.screen;
@@ -1585,6 +1614,9 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
     // The groups the HTML limit leaves dark, read from the scene the save left, in the order
     // `build_and_set` decided in (#419, #384).
     let over_the_limit = groups_over_the_html_limit(app, new);
+    // The groups whose pattern the scene's frame budget leaves dark, decided the way a full build
+    // decides it, so the same scene is the same either way (#481).
+    let pattern_over = scene_budget_refusals(app, new).await;
     for after in &new.groups {
         // A reorder pairs the groups by id, not by place (#384); a group the save removed is not
         // here, and a group it added has no before, so the shape changed and the whole scene went
@@ -1602,6 +1634,16 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
         let dark = failures.contains_key(&after.id);
         let limited =
             dark && over_the_limit.contains(&after.id) && effect_named(&before.plays) == effect_named(&after.plays);
+        if let (Some(why), Plays::Effect { props, .. }) = (pattern_over.get(&after.id), &after.plays) {
+            // Over the budget, whatever this save changed: the group is dark and its row says why.
+            // A group the budget left dark that fits after this save is built below, as any dark one.
+            failures.insert(after.id.clone(), why.clone());
+            app.engine.set_group_effect(&after.id, None, props);
+            if before.brightness != after.brightness {
+                app.engine.set_group_brightness(&after.id, after.brightness);
+            }
+            continue;
+        }
         if before.plays != after.plays || (dark && !limited) {
             match (&before.plays, &after.plays) {
                 (Plays::Effect { effect: was, .. }, Plays::Effect { effect: now, props }) if was == now && (!dark || limited) => {
@@ -1685,6 +1727,8 @@ pub async fn pattern_changed(app: &Arc<App>, id: &str) {
     }
     let mut failures = app.scene.failures();
     let mut changed = false;
+    // The saved pattern may have more frames than the scene's lights can keep ready (#481).
+    let pattern_over = scene_budget_refusals(app, &scene).await;
     for group in &scene.groups {
         let Plays::Effect { effect, props } = &group.plays else { continue };
         // A group that names the pattern in other case plays it (`Patterns::get` matches that
@@ -1697,6 +1741,11 @@ pub async fn pattern_changed(app: &Arc<App>, id: &str) {
             continue;
         }
         changed = true;
+        if let Some(why) = pattern_over.get(&group.id) {
+            failures.insert(group.id.clone(), why.clone());
+            app.engine.set_group_effect(&group.id, None, props);
+            continue;
+        }
         let built = {
             let app = Arc::clone(app);
             let id = effect.clone();
@@ -1744,9 +1793,34 @@ fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]
     let Some(pattern) = app.patterns.get(effect) else {
         return Vec::new();
     };
+    member_fits(&pattern.built_on, &group.members, group.sequence, lights, devices)
+}
+
+/// The fit of each of a group's member lights against a pattern built on `built_on`, in the
+/// group's member order: one entry per member whose light has LEDs.
+///
+/// A light with no LEDs is left out: its device or zone is gone, or its slice is empty, so the
+/// engine plans nothing there. It is neither exact nor flagged, and the picker's count is of
+/// the lights the pattern lands on. A device that is listed but not connected still has its
+/// LEDs: `light_led_count` asks only for the zone, and the engine's own plan counts them, so
+/// the light keeps its place in the run.
+///
+/// A group with a `sequence` (#468) fits the pattern once to all its lights' LEDs joined end to
+/// end, so every light reports the fit of that whole run, not of its own LED count.
+///
+/// This is the daemon's rule, and `group_fits` is its only reader in the API. The shared
+/// vectors in `app/web/src/lib/__tests__/patternFit.vectors.json` are printed from here
+/// (`crates/canvas-daemon/examples/pattern_fit_vectors.rs`), so the editor's copy is checked
+/// against this rule rather than against a copy of it.
+pub fn member_fits(
+    built_on: &canvas_proto::pattern::BuiltOn,
+    members: &[LightId],
+    sequence: Option<canvas_proto::scene::SequenceShape>,
+    lights: &[Light],
+    devices: &[DeviceInfo],
+) -> Vec<LightFit> {
     // The members that have LEDs, in the group's order, with their counts.
-    let placed: Vec<(&LightId, &Light, u32)> = group
-        .members
+    let placed: Vec<(&LightId, &Light, u32)> = members
         .iter()
         .filter_map(|member| {
             // A member the daemon does not hold has no LEDs to play on.
@@ -1757,20 +1831,20 @@ fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]
         .collect();
     // A sequence (#468): the pattern is fitted once to every member's LEDs joined end to end, as
     // one ring or one line, so every member reports the fit of that whole run.
-    let run = group.sequence.map(|shape| {
+    let run = sequence.map(|shape| {
         let total: u32 = placed.iter().map(|(_, _, count)| *count).sum();
         let arrangement = match shape {
             canvas_proto::scene::SequenceShape::Ring => canvas_proto::scene::Arrangement::Ring,
             canvas_proto::scene::SequenceShape::Line => canvas_proto::scene::Arrangement::Strip,
         };
-        canvas_proto::pattern::fit_kind(&pattern.built_on, total, arrangement)
+        canvas_proto::pattern::fit_kind(built_on, total, arrangement)
     });
     placed
         .into_iter()
         .map(|(member, light, led_count)| LightFit {
             light: member.clone(),
             fit: run.unwrap_or_else(|| {
-                canvas_proto::pattern::fit_kind(&pattern.built_on, led_count, light.arrangement)
+                canvas_proto::pattern::fit_kind(built_on, led_count, light.arrangement)
             }),
         })
         .collect()
@@ -1865,6 +1939,57 @@ fn saved_stack_slots(app: &App, id: &str, known: &crate::stacks::KnownEffects) -
 /// The HTML slots of `stack`, layer by layer.
 fn stack_slots(stack: &canvas_proto::stack::Stack, known: &crate::stacks::KnownEffects) -> usize {
     stack.layers.iter().map(|layer| crate::stacks::html_slots(layer, known)).sum()
+}
+
+/// The groups of `scene` whose pattern would keep more fitted LED-frames than the scene may
+/// ([`SCENE_PATTERN_LED_FRAMES_MAX`], #481), each with the sentence its row carries. The patterns of
+/// the scene's groups are counted in the order of the groups' ids, never of their places, so a
+/// reorder never changes which group runs (the rule #384 set for the HTML runtimes); a group that
+/// does not fit is dark and the others run. Lights of one shape count once, as the engine fits them.
+fn pattern_budget_refusals(app: &App, scene: &Scene, lights: &[Light], devices: &[DeviceInfo]) -> BTreeMap<String, String> {
+    let mut refused = BTreeMap::new();
+    let mut by_id: Vec<&canvas_proto::scene::Group> = scene.groups.iter().collect();
+    by_id.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut kept: u64 = 0;
+    for group in by_id {
+        let Plays::Effect { effect: id, .. } = &group.plays else { continue };
+        if !id.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
+            continue;
+        }
+        let Some(pattern) = app.patterns.get(id) else { continue };
+        let shapes: Vec<(u32, canvas_proto::scene::Arrangement)> = lights
+            .iter()
+            .filter(|light| group.members.contains(&light.id))
+            .map(|light| (canvas_core::arrangement::light_led_count(light, devices), light.arrangement))
+            .collect();
+        let cost = canvas_core::pattern_fit::fitted_led_frames(&pattern, &shapes, group.sequence.is_some());
+        if kept + cost > canvas_core::pattern_fit::SCENE_PATTERN_LED_FRAMES_MAX {
+            refused.insert(group.id.clone(), pattern_budget_sentence(&pattern, cost, kept));
+        } else {
+            kept += cost;
+        }
+    }
+    refused
+}
+
+/// [`pattern_budget_refusals`] for a scene the caller has no lights and devices for: the daemon's
+/// own, as the engine was last handed them. The one budget every path that builds a pattern group
+/// asks (the full build, a takeover, a scene save, a pattern save), so one scene is one answer.
+async fn scene_budget_refusals(app: &App, scene: &Scene) -> BTreeMap<String, String> {
+    let lights = app.store.read().await.lights.lights.clone();
+    let devices = app.devices.read().await.clone();
+    pattern_budget_refusals(app, scene, &lights, &devices)
+}
+
+/// The sentence for a pattern that would keep more fitted frames than a scene may (#481): the
+/// limit, the pattern's own count and what the scene already keeps, and the way out.
+pub fn pattern_budget_sentence(pattern: &canvas_proto::pattern::Pattern, cost: u64, kept: u64) -> String {
+    format!(
+        "{} has {} frames, and on this group's lights that is {cost} fitted LED-frames. A scene keeps {} at most and this one already keeps {kept}. Give the pattern fewer frames, or play it on fewer lights.",
+        pattern.name(),
+        pattern.frames.len(),
+        canvas_core::pattern_fit::SCENE_PATTERN_LED_FRAMES_MAX,
+    )
 }
 
 /// The sentence for a scene that starts more HTML runtimes than it may (#370, design Q3), with the

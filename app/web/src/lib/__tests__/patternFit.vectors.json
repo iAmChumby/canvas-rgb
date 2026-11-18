@@ -4,6 +4,7 @@
     "crates/canvas-proto/src/pattern.rs, fit_kind_follows_the_rule_order",
     "crates/canvas-core/src/pattern_fit.rs, the fit_colors tests (each asserts a fit kind by what the colours do)"
   ],
+  "zone_led_cap": 4096,
   "cases": [
     {
       "name": "a ring of 12 on a ring of 12",
@@ -172,6 +173,154 @@
       "target_leds": 20,
       "target": "grid",
       "fit": "other_shape"
+    }
+  ],
+  "run_cases": [
+    {
+      "name": "no sequence: each light plays the pattern on its own",
+      "from": "scenes.rs member_fits (the no-sequence arm), pattern.rs fit_kind",
+      "built_on": { "led_count": 26, "arrangement": "ring" },
+      "sequence": null,
+      "members": [
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
+        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "connected": true },
+        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "connected": true }
+      ],
+      "fits": [
+        { "light": "fan one", "fit": "stretched" },
+        { "light": "fan two", "fit": "other_shape" },
+        { "light": "strip", "fit": "other_shape" }
+      ]
+    },
+    {
+      "name": "one ring: 8 + 8 + 10 LEDs are exactly the pattern's 26",
+      "from": "scenes.rs member_fits (a sequence), patterns.rs a_sequence_group_reports_the_fit_of_the_whole_run",
+      "built_on": { "led_count": 26, "arrangement": "ring" },
+      "sequence": "ring",
+      "members": [
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
+        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "connected": true },
+        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "connected": true }
+      ],
+      "fits": [
+        { "light": "fan one", "fit": "exact" },
+        { "light": "fan two", "fit": "exact" },
+        { "light": "strip", "fit": "exact" }
+      ]
+    },
+    {
+      "name": "one line: the same 26 LEDs in the shape the pattern was built on",
+      "from": "scenes.rs member_fits (a sequence runs a line as a strip)",
+      "built_on": { "led_count": 26, "arrangement": "strip" },
+      "sequence": "line",
+      "members": [
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
+        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "connected": true },
+        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "connected": true }
+      ],
+      "fits": [
+        { "light": "fan one", "fit": "exact" },
+        { "light": "fan two", "fit": "exact" },
+        { "light": "strip", "fit": "exact" }
+      ]
+    },
+    {
+      "name": "one ring under the pattern: 8 + 8 is 16 of a ring of 26",
+      "from": "patterns.rs a_sequence_group_reports_the_fit_of_the_whole_run (two fans)",
+      "built_on": { "led_count": 26, "arrangement": "ring" },
+      "sequence": "ring",
+      "members": [
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
+        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "connected": true }
+      ],
+      "fits": [
+        { "light": "fan one", "fit": "stretched" },
+        { "light": "fan two", "fit": "stretched" }
+      ]
+    },
+    {
+      "name": "one ring over the pattern: 8 + 8 + 10 + 10 is 36 of a ring of 26",
+      "from": "scenes.rs member_fits (the run sums every member's LEDs)",
+      "built_on": { "led_count": 26, "arrangement": "ring" },
+      "sequence": "ring",
+      "members": [
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
+        { "light": "fan two", "arrangement": "strip", "zone_leds": 8, "connected": true },
+        { "light": "strip", "arrangement": "strip", "zone_leds": 10, "connected": true },
+        { "light": "fan three", "arrangement": "ring", "zone_leds": 10, "connected": true }
+      ],
+      "fits": [
+        { "light": "fan one", "fit": "stretched" },
+        { "light": "fan two", "fit": "stretched" },
+        { "light": "strip", "fit": "stretched" },
+        { "light": "fan three", "fit": "stretched" }
+      ]
+    },
+    {
+      "name": "a member with no LEDs is not in the run, and not in the fits",
+      "from": "scenes.rs member_fits (light_led_count is 0 for an empty zone)",
+      "built_on": { "led_count": 16, "arrangement": "ring" },
+      "sequence": "ring",
+      "members": [
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
+        { "light": "empty zone", "arrangement": "ring", "zone_leds": 0, "connected": true },
+        { "light": "fan two", "arrangement": "ring", "zone_leds": 8, "connected": true }
+      ],
+      "fits": [
+        { "light": "fan one", "fit": "exact" },
+        { "light": "fan two", "fit": "exact" }
+      ]
+    },
+    {
+      "name": "a member whose device is not listed is not in the run either",
+      "from": "scenes.rs member_fits (a member the daemon does not hold has no LEDs)",
+      "built_on": { "led_count": 8, "arrangement": "ring" },
+      "sequence": "ring",
+      "members": [
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
+        { "light": "gone", "arrangement": "ring", "zone_leds": null, "connected": false }
+      ],
+      "fits": [
+        { "light": "fan one", "fit": "exact" }
+      ]
+    },
+    {
+      "name": "a disconnected member keeps its LEDs in the run",
+      "from": "scenes.rs member_fits, canvas-core arrangement.rs light_led_count (asks only for the zone)",
+      "built_on": { "led_count": 16, "arrangement": "ring" },
+      "sequence": "ring",
+      "members": [
+        { "light": "fan one", "arrangement": "ring", "zone_leds": 8, "connected": true },
+        { "light": "fan two", "arrangement": "ring", "zone_leds": 8, "connected": false }
+      ],
+      "fits": [
+        { "light": "fan one", "fit": "exact" },
+        { "light": "fan two", "fit": "exact" }
+      ]
+    },
+    {
+      "name": "a zone past the 4096-LED cap is planned as the cap, in a run",
+      "from": "scenes.rs member_fits, arrangement.rs light_led_count (count.min(MAX_ZONE_LEDS))",
+      "built_on": { "led_count": 4096, "arrangement": "ring" },
+      "sequence": "ring",
+      "members": [
+        { "light": "damaged zone", "arrangement": "ring", "zone_leds": 5000, "connected": true }
+      ],
+      "fits": [
+        { "light": "damaged zone", "fit": "exact" }
+      ]
+    },
+    {
+      "name": "a zone past the 4096-LED cap is planned as the cap, each light its own",
+      "from": "scenes.rs member_fits (the per-light arm), arrangement.rs light_led_count",
+      "built_on": { "led_count": 4096, "arrangement": "ring" },
+      "sequence": null,
+      "members": [
+        { "light": "damaged zone", "arrangement": "ring", "zone_leds": 5000, "connected": true }
+      ],
+      "fits": [
+        { "light": "damaged zone", "fit": "exact" }
+      ]
     }
   ]
 }
