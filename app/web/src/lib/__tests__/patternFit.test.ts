@@ -104,6 +104,31 @@ describe("the pattern fit", () => {
     expect(groupFit(built, [])).toEqual({ exact: 0, flagged: 0, total: 0 });
   });
 
+  it("groupFit fits a sequence group's whole run, as the daemon does (#504)", () => {
+    // A ring of 26 through three lights of 8, 8 and 10: the run is exactly the pattern's length, so
+    // all three take it exactly, where each light on its own is stretched or another shape.
+    const built = on(26, "ring");
+    const three = [
+      light("fan one", 8, "ring"),
+      light("fan two", 8, "strip"),
+      light("strip", 10, "strip"),
+    ];
+    expect(groupFit(built, three, "ring")).toEqual({ exact: 3, flagged: 0, total: 3 });
+    // Two fans of 8 make a run of 16 under a ring of 26: the run is stretched, so both lights say
+    // so. Before #504 the demo said each of them fits.
+    const two = [light("fan one", 8, "ring"), light("fan two", 8, "ring")];
+    expect(groupFit(built, two, "ring")).toEqual({ exact: 0, flagged: 2, total: 2 });
+    // With no sequence each light plays on its own, exactly as before #468.
+    expect(groupFit(built, three)).toEqual({ exact: 0, flagged: 3, total: 3 });
+    expect(groupFit(built, [light("ring 26", 26, "ring")])).toEqual({
+      exact: 1,
+      flagged: 0,
+      total: 1,
+    });
+    // A line runs as a strip: the same 26 LEDs prove the run's own shape is what it is fitted to.
+    expect(groupFit(on(26, "strip"), three, "line")).toEqual({ exact: 3, flagged: 0, total: 3 });
+  });
+
   it("groupFit leaves out a light that is not connected or has no LEDs", () => {
     const built = on(12, "ring");
     // The daemon plays nothing on a light whose device is gone or whose zone has no LEDs, so it is
