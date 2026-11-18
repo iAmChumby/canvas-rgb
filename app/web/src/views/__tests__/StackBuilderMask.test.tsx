@@ -2,6 +2,7 @@
 // mask section's effect, source, invert and amount, all against the demo backend.
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { plainEntry } from "@/test/historyGuard";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
@@ -56,6 +57,7 @@ beforeAll(() => {
 });
 
 afterEach(async () => {
+  plainEntry();
   cleanup();
   // A Revert drops the builder's guard entry with `history.back()`, which lands a turn later.
   // Let it land here: a pending one would otherwise fire during the next test's read and
