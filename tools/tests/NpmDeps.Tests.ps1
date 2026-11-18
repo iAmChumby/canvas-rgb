@@ -376,6 +376,34 @@ try {
         $result = Invoke-Check -Repo $r -AuditJson (New-AuditJson -Advisories $picoHigh)
         Assert-True ($result.Exit -ne 0) "an ignore without a reason is not an ignore: $($result.Output)"
     }
+    # From the adversarial review of #513: three ways the gate could pass when it must fail.
+    Test-Case 'a listed advisory fails when a shipped alias of the package is in the lock file' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        $aliased = @(
+            '    "node_modules/picomatch": { "version": "4.0.7", "license": "MIT", "dev": true },',
+            '    "node_modules/glob-alias": { "name": "picomatch", "version": "4.0.7", "license": "MIT" }'
+        ) -join "`n"
+        New-Lockfile -Root $r -Body $aliased
+        New-IgnoreFile -Root $r -Entries @($picoEntry)
+        $result = Invoke-Check -Repo $r -AuditJson (New-AuditJson -Advisories $picoHigh)
+        Assert-True ($result.Exit -ne 0) "a shipped alias is a shipped copy: $($result.Output)"
+        Assert-True ($result.Output.Contains('node_modules/glob-alias')) "names the alias: $($result.Output)"
+    }
+
+    Test-Case 'an advisory with no severity fails instead of passing as below high' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoDev
+        $json = '{ "auditReportVersion": 2, "vulnerabilities": { "picomatch": { "name": "picomatch", "via": [ { "source": 1, "name": "picomatch", "title": "No severity", "url": "https://github.com/advisories/GHSA-zzzz-yyyy-xxxx" } ], "nodes": ["node_modules/picomatch"] } }, "metadata": {} }'
+        $result = Invoke-Check -Repo $r -AuditJson $json
+        Assert-True ($result.Exit -ne 0) "an unknown severity is not a low one: $($result.Output)"
+    }
+
+    Test-Case 'a report whose vulnerabilities are null fails instead of passing as clean' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoDev
+        $result = Invoke-Check -Repo $r -AuditJson '{ "auditReportVersion": 2, "vulnerabilities": null, "metadata": {} }'
+        Assert-True ($result.Exit -ne 0) "a null list is not an empty one: $($result.Output)"
+    }
 } finally {
     foreach ($r in $repos) {
         if (Test-Path -LiteralPath $r) { Remove-Item -LiteralPath $r -Recurse -Force }

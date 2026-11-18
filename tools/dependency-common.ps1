@@ -310,6 +310,9 @@ function Get-NpmLockPackages {
         $name = $key
         $at = $key.LastIndexOf('node_modules/')
         if ($at -ge 0) { $name = $key.Substring($at + 'node_modules/'.Length) }
+        # An alias ("glob-alias": "npm:picomatch@4") is installed under its alias path, and the
+        # entry names the real package: that is the name advisories and licences are about.
+        if ($null -ne $v.PSObject.Properties['name'] -and $v.name) { $name = [string]$v.name }
         $licence = ''
         if ($null -ne $v.PSObject.Properties['license'] -and $v.license) { $licence = [string]$v.license }
         $version = ''
@@ -599,7 +602,7 @@ function Get-NpmAuditAdvisories {
     #>
     param([string]$Json)
     try { $report = $Json | ConvertFrom-Json } catch { throw 'npm audit printed no JSON report.' }
-    if ($null -eq $report -or $null -eq $report.PSObject.Properties['vulnerabilities']) {
+    if ($null -eq $report -or $null -eq $report.PSObject.Properties['vulnerabilities'] -or $null -eq $report.vulnerabilities) {
         throw 'npm audit printed no vulnerability report (an error, or no network).'
     }
     $seen = @{}
@@ -644,7 +647,9 @@ function Test-NpmAuditReport {
     $ignored = New-Object System.Collections.ArrayList
     $matched = New-Object System.Collections.ArrayList
     foreach ($a in @(Get-NpmAuditAdvisories -Json $Json)) {
-        $floor = ($a.Severity -eq 'high' -or $a.Severity -eq 'critical')
+        # Only a severity npm names as below high is below the floor: a missing or unknown one
+        # fails, as a high one does.
+        $floor = -not (@('info', 'low', 'moderate') -contains $a.Severity)
         $entry = @($Ignore | Where-Object { $_.Id -eq $a.Id -and $_.Package -eq $a.Package }) | Select-Object -First 1
         if ($entry) { [void]$matched.Add("$($entry.Id)|$($entry.Package)") }
         $label = "$($a.Id) $($a.Package) ($($a.Severity))"
