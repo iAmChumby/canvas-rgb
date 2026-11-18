@@ -5,9 +5,13 @@
 .DESCRIPTION
   For every project in the repository (every folder with a package.json):
 
-  1. npm audit --package-lock-only --audit-level=high. A high or critical advisory fails the
-     check. Today the tree has 12 moderate advisories (all in the eslint chain, through
-     minimatch) and no high or critical one.
+  1. npm audit --package-lock-only --json. A high or critical advisory fails the check,
+     unless it is on tools/npm-audit-ignore.json (the npm twin of the ignore list in
+     deny.toml: GHSA id, package, reason, date) AND every copy of the package in the lock file
+     is dev-only. A listed advisory that reaches a shipped copy fails and names the path; a new
+     advisory fails; every waved advisory is printed with its reason; a listed entry that
+     matches no advisory in any project prints a warning so it can be removed. Advisories
+     below high never fail.
   2. The install scripts. Every package in the lock file that has one (the lock file's
      hasInstallScript) must have a row in docs/dependencies.md, and that row must be
      approved: a package that runs code at install time is approved on the record, not by
@@ -27,12 +31,16 @@
   The repository to check. Default: the folder above tools/.
 .PARAMETER SkipAudit
   Do not run npm audit. Only for the tests, which must not need the network.
+.PARAMETER AuditJsonFile
+  Read the audit report (the JSON npm audit --json prints) from this file instead of running
+  npm audit, for every project. For the tests, which must not need the network.
 .EXAMPLE
   powershell -NoProfile -File tools/check-npm-deps.ps1
 #>
 param(
     [string]$Repo = '',
-    [switch]$SkipAudit
+    [switch]$SkipAudit,
+    [string]$AuditJsonFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +64,8 @@ foreach ($path in (Get-RepoFilesNamed -Root $Repo -Name 'package.json')) {
 }
 $projects = @($projects | Sort-Object -Unique)
 
+$ignoreList = @(Read-NpmAuditIgnoreList -Path (Join-Path $Repo 'tools/npm-audit-ignore.json'))
+$matchedIgnores = @{}
 $failures = New-Object System.Collections.ArrayList
 $packageCount = 0
 $scriptCount = 0
@@ -70,24 +80,33 @@ foreach ($project in $projects) {
 
     # 1. the audit floor
     if (-not $SkipAudit) {
-        $old = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            Push-Location $dir
-            $auditOut = @(& npm audit --package-lock-only --audit-level=high 2>&1)
-            $auditCode = $LASTEXITCODE
-        } finally {
-            Pop-Location
-            $ErrorActionPreference = $old
-        }
-        $auditText = (@($auditOut) | ForEach-Object { "$_" }) -join "`n"
-        if ($auditCode -ne 0) {
-            [void]$failures.Add("${project}: npm audit --audit-level=high failed (exit $auditCode).")
-            foreach ($line in @($auditOut)) { Write-Host "  $line" }
+        if ($AuditJsonFile) {
+            $auditText = [System.IO.File]::ReadAllText($AuditJsonFile)
         } else {
-            $summary = @($auditOut) | Where-Object { "$_" -match '\d+ (critical|high|moderate|low|info) severity vulnerabilit' } | Select-Object -First 1
-            $summaryText = if ($summary) { ("$summary").Trim() } else { '' }
-            if ($summaryText) { Write-Host "${project}: audit ok ($summaryText)." } else { Write-Host "${project}: audit ok." }
+            $old = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                Push-Location $dir
+                # npm audit exits 1 when it finds anything; the report is what counts, so the
+                # exit code is ignored and an answer that is not a report fails below.
+                $auditOut = @(& npm audit --package-lock-only --json 2>$null)
+            } finally {
+                Pop-Location
+                $ErrorActionPreference = $old
+            }
+            $auditText = (@($auditOut) | ForEach-Object { "$_" }) -join "`n"
+        }
+        try {
+            $verdict = Test-NpmAuditReport -Json $auditText -LockPackages @(Get-NpmLockPackages -Path $lockPath) -Ignore $ignoreList
+            foreach ($m in $verdict.Matched) { $matchedIgnores[$m] = $true }
+            foreach ($line in $verdict.Ignored) { Write-Host "${project}: $line" }
+            foreach ($f in $verdict.Failures) { [void]$failures.Add("${project}: $f") }
+            if ($verdict.Failures.Count -eq 0) {
+                $n = $verdict.Ignored.Count
+                Write-Host "${project}: audit ok (no high or critical advisory outside the ignore list; $n ignored)."
+            }
+        } catch {
+            [void]$failures.Add("${project}: npm audit gave no usable report: $($_.Exception.Message)")
         }
     }
 
@@ -110,6 +129,14 @@ foreach ($project in $projects) {
             $why = if (-not $p.Licence) { 'no licence' } else { "licence $($p.Licence)" }
             $kind = if ($ships) { 'ships' } else { 'build-time only' }
             [void]$failures.Add("${project}: $($p.Name) $version $($p.Version): $why is not allowed ($kind).")
+        }
+    }
+}
+
+if (-not $SkipAudit) {
+    foreach ($e in $ignoreList) {
+        if (-not $matchedIgnores.ContainsKey("$($e.Id)|$($e.Package)")) {
+            Write-Host "warning: tools/npm-audit-ignore.json: $($e.Id) ($($e.Package)) matches no advisory in any project; remove the entry (added $($e.Added))."
         }
     }
 }

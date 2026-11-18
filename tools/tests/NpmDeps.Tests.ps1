@@ -4,7 +4,8 @@ $ErrorActionPreference = 'Stop'
 
 # Tests for tools/check-npm-deps.ps1. The licence rules and the lock file reader are pure, so
 # they are called directly; the check itself is run against throwaway trees with -SkipAudit, so
-# the tests need no network. The temp folders are removed at the end.
+# the tests need no network (the advisory tests hand the check a canned `npm audit --json` report
+# through -AuditJsonFile). The temp folders are removed at the end.
 
 $script = if ($env:CANVAS_RGB_NPM_CHECK_SCRIPT) { $env:CANVAS_RGB_NPM_CHECK_SCRIPT } else { Join-Path $PSScriptRoot '..\check-npm-deps.ps1' }
 $ps = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
@@ -33,6 +34,30 @@ function New-ThrowawayRepo {
     return $d
 }
 
+function New-AuditJson {
+    <#
+      A canned `npm audit --json` report (auditReportVersion 2): one advisory per (id, package,
+      severity) triple, each under its package the way npm prints it, plus a package that is
+      only vulnerable through it (a string in "via", which is not an advisory).
+    #>
+    param([object[]]$Advisories)
+    $vulns = @()
+    foreach ($a in $Advisories) {
+        $vulns += ('"{0}": {{ "name": "{0}", "severity": "{2}", "isDirect": false, "via": [ {{ "source": 1, "name": "{0}", "dependency": "{0}", "title": "A canned advisory", "url": "https://github.com/advisories/{1}", "severity": "{2}", "range": "<=1.0.0" }} ], "effects": ["downstream"], "range": "<=1.0.0", "nodes": ["node_modules/{0}"], "fixAvailable": false }}' -f $a.Package, $a.Id, $a.Severity)
+        $vulns += ('"downstream-of-{0}": {{ "name": "downstream-of-{0}", "severity": "{1}", "isDirect": false, "via": [ "{0}" ], "effects": [], "range": "*", "nodes": [], "fixAvailable": false }}' -f $a.Package, $a.Severity)
+    }
+    return '{ "auditReportVersion": 2, "vulnerabilities": { ' + ($vulns -join ', ') + ' }, "metadata": {} }'
+}
+
+function New-IgnoreFile {
+    param([string]$Root, [object[]]$Entries)
+    $items = @()
+    foreach ($e in $Entries) {
+        $items += ('{{ "id": "{0}", "package": "{1}", "reason": "{2}", "added": "2026-11-17" }}' -f $e.Id, $e.Package, $e.Reason)
+    }
+    Write-File -Root $Root -Name 'tools/npm-audit-ignore.json' -Text ('[' + ($items -join ',') + ']')
+}
+
 function New-Lockfile {
     <#
       The packages body of a lock file: one string, the lines of the "packages" object.
@@ -53,10 +78,17 @@ function New-Lockfile {
 }
 
 function Invoke-Check {
-    param([string]$Repo)
+    param([string]$Repo, [string]$AuditJson = '')
     $outFile = Join-Path $Repo 'check.out'
     $errFile = Join-Path $Repo 'check.err'
-    $p = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Repo', "`"$Repo`"", '-SkipAudit') -WorkingDirectory $Repo -NoNewWindow -Wait -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    $checkArgs = @('-NoProfile', '-File', "`"$script`"", '-Repo', "`"$Repo`"")
+    if ($AuditJson) {
+        Write-File -Root $Repo -Name 'audit.json' -Text $AuditJson
+        $checkArgs += @('-AuditJsonFile', "`"$(Join-Path $Repo 'audit.json')`"")
+    } else {
+        $checkArgs += '-SkipAudit'
+    }
+    $p = Start-Process -FilePath $ps -ArgumentList $checkArgs -WorkingDirectory $Repo -NoNewWindow -Wait -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
     $combined = ''
     if (Test-Path -LiteralPath $outFile) { $combined += (Get-Content -LiteralPath $outFile -Raw) }
     if (Test-Path -LiteralPath $errFile) { $combined += (Get-Content -LiteralPath $errFile -Raw) }
@@ -250,6 +282,99 @@ try {
         $result = Invoke-Check -Repo $r
         Assert-True ($result.Exit -ne 0) 'non-zero exit'
         Assert-True ($result.Output.Contains('sharp')) "names the package: $($result.Output)"
+    }
+
+    # The advisory gate (issue #496): a high or critical advisory fails unless it is on
+    # tools/npm-audit-ignore.json and every lock copy of the package is dev-only.
+    $picoDev = @(
+        '"node_modules/picomatch": { "version": "2.3.2", "license": "MIT", "dev": true },',
+        '"node_modules/vite/node_modules/picomatch": { "version": "4.0.7", "license": "MIT", "dev": true }'
+    ) -join "`n"
+    $picoShipped = @(
+        '"node_modules/picomatch": { "version": "2.3.2", "license": "MIT", "dev": true },',
+        '"node_modules/next/node_modules/picomatch": { "version": "4.0.7", "license": "MIT" }'
+    ) -join "`n"
+    $picoEntry = @{ Id = 'GHSA-aaaa-bbbb-cccc'; Package = 'picomatch'; Reason = 'no fixed version, dev-only' }
+    $picoHigh = @(@{ Id = 'GHSA-aaaa-bbbb-cccc'; Package = 'picomatch'; Severity = 'high' })
+
+    Test-Case 'a high advisory that is not on the ignore list fails and names it' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoDev
+        $result = Invoke-Check -Repo $r -AuditJson (New-AuditJson -Advisories $picoHigh)
+        Assert-True ($result.Exit -ne 0) "non-zero exit: $($result.Output)"
+        Assert-True ($result.Output.Contains('GHSA-aaaa-bbbb-cccc')) "names the advisory: $($result.Output)"
+        Assert-True ($result.Output.Contains('not on the ignore list')) "says why: $($result.Output)"
+    }
+
+    Test-Case 'a critical advisory that is not on the ignore list fails' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoDev
+        New-IgnoreFile -Root $r -Entries @($picoEntry)
+        $result = Invoke-Check -Repo $r -AuditJson (New-AuditJson -Advisories @(@{ Id = 'GHSA-dddd-eeee-ffff'; Package = 'picomatch'; Severity = 'critical' }))
+        Assert-True ($result.Exit -ne 0) "a new critical fails even with another entry listed: $($result.Output)"
+        Assert-True ($result.Output.Contains('GHSA-dddd-eeee-ffff')) "names the advisory: $($result.Output)"
+    }
+
+    Test-Case 'a listed advisory whose every lock copy is dev-only passes, and the log says what was waved and why' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoDev
+        New-IgnoreFile -Root $r -Entries @($picoEntry)
+        $result = Invoke-Check -Repo $r -AuditJson (New-AuditJson -Advisories $picoHigh)
+        Assert-Equal $result.Exit 0 "exit: $($result.Output)"
+        Assert-True ($result.Output.Contains('ignored: GHSA-aaaa-bbbb-cccc picomatch (high)')) "prints the waved advisory: $($result.Output)"
+        Assert-True ($result.Output.Contains('no fixed version, dev-only')) "prints the reason: $($result.Output)"
+        Assert-True (-not $result.Output.Contains('warning')) "no unmatched-entry warning: $($result.Output)"
+    }
+
+    Test-Case 'a listed advisory with one shipped copy fails and names the package and its path' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoShipped
+        New-IgnoreFile -Root $r -Entries @($picoEntry)
+        $result = Invoke-Check -Repo $r -AuditJson (New-AuditJson -Advisories $picoHigh)
+        Assert-True ($result.Exit -ne 0) "non-zero exit: $($result.Output)"
+        Assert-True ($result.Output.Contains('node_modules/next/node_modules/picomatch')) "names the shipped copy's path: $($result.Output)"
+        Assert-True ($result.Output.Contains('reaches a shipped copy')) "says why: $($result.Output)"
+    }
+
+    Test-Case 'an ignore entry for the right id but another package does not waive the advisory' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoDev
+        New-IgnoreFile -Root $r -Entries @(@{ Id = 'GHSA-aaaa-bbbb-cccc'; Package = 'minimatch'; Reason = 'wrong package' })
+        $result = Invoke-Check -Repo $r -AuditJson (New-AuditJson -Advisories $picoHigh)
+        Assert-True ($result.Exit -ne 0) "non-zero exit: $($result.Output)"
+    }
+
+    Test-Case 'an ignore entry that matches no advisory warns and names it, without failing' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoDev
+        New-IgnoreFile -Root $r -Entries @($picoEntry, @{ Id = 'GHSA-gone-gone-gone'; Package = 'old-pkg'; Reason = 'was fixed' })
+        $result = Invoke-Check -Repo $r -AuditJson (New-AuditJson -Advisories $picoHigh)
+        Assert-Equal $result.Exit 0 "a stale entry is a warning, not a failure: $($result.Output)"
+        Assert-True ($result.Output.Contains('warning')) "warns: $($result.Output)"
+        Assert-True ($result.Output.Contains('GHSA-gone-gone-gone')) "names the stale entry: $($result.Output)"
+    }
+
+    Test-Case 'a moderate advisory does not fail the gate' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoShipped
+        $result = Invoke-Check -Repo $r -AuditJson (New-AuditJson -Advisories @(@{ Id = 'GHSA-mmmm-mmmm-mmmm'; Package = 'picomatch'; Severity = 'moderate' }))
+        Assert-Equal $result.Exit 0 "exit: $($result.Output)"
+    }
+
+    Test-Case 'an answer that is not an audit report fails instead of passing' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoDev
+        $result = Invoke-Check -Repo $r -AuditJson '{ "error": { "code": "ENOTFOUND", "summary": "no network" } }'
+        Assert-True ($result.Exit -ne 0) "no report is not a clean report: $($result.Output)"
+        Assert-True ($result.Output.Contains('no usable report')) "says why: $($result.Output)"
+    }
+
+    Test-Case 'an ignore entry without a reason fails the gate' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body $picoDev
+        Write-File -Root $r -Name 'tools/npm-audit-ignore.json' -Text '[ { "id": "GHSA-aaaa-bbbb-cccc", "package": "picomatch", "added": "2026-11-17" } ]'
+        $result = Invoke-Check -Repo $r -AuditJson (New-AuditJson -Advisories $picoHigh)
+        Assert-True ($result.Exit -ne 0) "an ignore without a reason is not an ignore: $($result.Output)"
     }
 } finally {
     foreach ($r in $repos) {

@@ -293,7 +293,8 @@ function Get-NpmLockPackages {
     .SYNOPSIS
       Every package in a package-lock.json, read from the file alone.
     .OUTPUTS
-      One object per package: Name, Version, Licence, Dev, Optional, HasInstallScript.
+      One object per package: Name, Version, Licence, Dev, Optional, HasInstallScript, Path (the
+      lock file key, for example node_modules/vite/node_modules/picomatch).
     #>
     param([string]$Path)
     $json = Read-DependencyJson -Path $Path
@@ -315,6 +316,7 @@ function Get-NpmLockPackages {
         if ($null -ne $v.PSObject.Properties['version'] -and $v.version) { $version = [string]$v.version }
         [void]$out.Add([pscustomobject]@{
                 Name = $name
+                Path = $key
                 Version = $version
                 Licence = $licence
                 Dev = ($null -ne $v.PSObject.Properties['dev'] -and $v.dev)
@@ -555,4 +557,117 @@ function Test-PackageShips {
     if ($Dev -or $Optional) { return $false }
     if ($script:CanvasBuildTimePackages -contains $Name) { return $false }
     return $true
+}
+
+function Read-NpmAuditIgnoreList {
+    <#
+    .SYNOPSIS
+      The checked-in list of npm advisories the gate waves through (tools/npm-audit-ignore.json).
+    .DESCRIPTION
+      The npm twin of the [advisories] ignore list in deny.toml. The file is a JSON array; each
+      entry has an id (the GHSA id), the package, the reason it stays and the date it was added.
+      An entry missing any of those throws: an ignore without a reason is not an ignore. A
+      missing file is an empty list.
+    #>
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    $json = Read-DependencyJson -Path $Path
+    $out = New-Object System.Collections.ArrayList
+    foreach ($e in @($json)) {
+        foreach ($field in 'id', 'package', 'reason', 'added') {
+            if ($null -eq $e.PSObject.Properties[$field] -or [string]::IsNullOrWhiteSpace([string]$e.$field)) {
+                throw "${Path}: an ignore entry has no '$field'."
+            }
+        }
+        [void]$out.Add([pscustomobject]@{
+                Id = [string]$e.id; Package = [string]$e.package; Reason = [string]$e.reason; Added = [string]$e.added
+            })
+    }
+    return @($out)
+}
+
+function Get-NpmAuditAdvisories {
+    <#
+    .SYNOPSIS
+      The advisories in the JSON that npm audit prints.
+    .DESCRIPTION
+      The report lists vulnerable packages; the advisory itself is the object inside a
+      package's "via" list (a string there only says the package is vulnerable through another
+      one). Each advisory is returned once: Id (the GHSA id, from its URL), Package, Severity,
+      Title. Throws when the text is not an audit report (npm prints {"error": ...} when it
+      cannot reach the registry): a missing answer is not a clean one.
+    #>
+    param([string]$Json)
+    try { $report = $Json | ConvertFrom-Json } catch { throw 'npm audit printed no JSON report.' }
+    if ($null -eq $report -or $null -eq $report.PSObject.Properties['vulnerabilities']) {
+        throw 'npm audit printed no vulnerability report (an error, or no network).'
+    }
+    $seen = @{}
+    $out = New-Object System.Collections.ArrayList
+    foreach ($v in $report.vulnerabilities.PSObject.Properties) {
+        foreach ($via in @($v.Value.via)) {
+            if ($via -isnot [pscustomobject]) { continue }
+            $id = ([string]$via.url).TrimEnd('/')
+            $id = $id.Substring($id.LastIndexOf('/') + 1)
+            if (-not $id) { $id = "source-$($via.source)" }
+            $key = "$id|$($via.name)"
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            [void]$out.Add([pscustomobject]@{
+                    Id = $id; Package = [string]$via.name; Severity = [string]$via.severity; Title = [string]$via.title
+                })
+        }
+    }
+    return @($out)
+}
+
+function Test-NpmAuditReport {
+    <#
+    .SYNOPSIS
+      Judges one project's npm audit report against the ignore list.
+    .DESCRIPTION
+      Every high or critical advisory fails, unless it is on the ignore list (same GHSA id and
+      same package) AND every copy of the package in the lock file is dev-only ("dev": true):
+      a listed advisory that reaches a shipped copy fails and names the copy's path. A lock
+      file with no copy of the package cannot prove anything, so it fails too. Advisories
+      below high never fail; a listed one is still reported.
+    .OUTPUTS
+      Failures (strings), Ignored (one line per waved advisory), Matched (the ignore entries
+      that matched an advisory, as "id|package", so the caller can warn about the rest).
+    #>
+    param(
+        [string]$Json,
+        [object[]]$LockPackages,
+        [object[]]$Ignore = @()
+    )
+    $failures = New-Object System.Collections.ArrayList
+    $ignored = New-Object System.Collections.ArrayList
+    $matched = New-Object System.Collections.ArrayList
+    foreach ($a in @(Get-NpmAuditAdvisories -Json $Json)) {
+        $floor = ($a.Severity -eq 'high' -or $a.Severity -eq 'critical')
+        $entry = @($Ignore | Where-Object { $_.Id -eq $a.Id -and $_.Package -eq $a.Package }) | Select-Object -First 1
+        if ($entry) { [void]$matched.Add("$($entry.Id)|$($entry.Package)") }
+        $label = "$($a.Id) $($a.Package) ($($a.Severity))"
+        if (-not $floor) {
+            if ($entry) { [void]$ignored.Add("ignored: $label, below the high floor anyway: $($entry.Reason)") }
+            continue
+        }
+        if (-not $entry) {
+            [void]$failures.Add("$label is not on the ignore list: $($a.Title).")
+            continue
+        }
+        $copies = @($LockPackages | Where-Object { $_.Name -eq $a.Package })
+        if ($copies.Count -eq 0) {
+            [void]$failures.Add("$label is on the ignore list but the lock file has no copy of $($a.Package), so dev-only cannot be shown.")
+            continue
+        }
+        $shipped = @($copies | Where-Object { -not $_.Dev })
+        if ($shipped.Count -gt 0) {
+            $where = ($shipped | ForEach-Object { "$($_.Path) $($_.Version)" }) -join ', '
+            [void]$failures.Add("$label is on the ignore list but reaches a shipped copy: $where.")
+            continue
+        }
+        [void]$ignored.Add("ignored: $label, all $($copies.Count) lock copies dev-only: $($entry.Reason)")
+    }
+    return [pscustomobject]@{ Failures = @($failures); Ignored = @($ignored); Matched = @($matched) }
 }
