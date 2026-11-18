@@ -256,9 +256,14 @@ pub async fn delete_light(
         )));
     }
     let target = id.clone();
+    // The lights as they were on disk, put aside by `mutate` for `save`: if scenes.json fails after
+    // lights.json was written, the blocking thread writes the old lights file back. The rollback
+    // in `failed` touches memory only, because it runs on a runtime worker under the store lock.
+    let lights_on_disk = Arc::new(std::sync::Mutex::new(None));
+    let put_aside = Arc::clone(&lights_on_disk);
     let (removed, emptied) = crate::store_io::store_save_rolled(
         &app,
-        |store| {
+        move |store| {
             // Found by id here, under the writer mutex: an index from before a concurrent delete
             // or patch would name a different light.
             let Some(index) = store.lights.lights.iter().position(|light| light.id == target) else {
@@ -294,21 +299,30 @@ pub async fn delete_light(
             let _changes = crate::scenes::repair(&mut scenes, &lights);
             // Kept so a failed save leaves memory as it was: never ahead of the disk and the engine.
             let before_lights = std::mem::replace(&mut store.lights, lights);
+            *put_aside.lock().unwrap_or_else(|e| e.into_inner()) = Some(before_lights.clone());
             let before_scenes = std::mem::replace(&mut store.scenes, scenes);
             Ok(((removed, emptied), (before_lights, before_scenes)))
         },
-        |store| {
+        move |store| {
             store.save_lights()?;
-            store.save_scenes()
+            if let Err(e) = store.save_scenes() {
+                // Best effort: put the lights file back too, so a half-written pair is not left
+                // behind. This runs on the blocking thread; the snapshot is dropped after a
+                // failed save, so setting its lights to the old ones changes nothing in memory.
+                if let Some(old) = lights_on_disk.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    store.lights = old;
+                    crate::logging::warn_if_err(
+                        "lights.json could not be put back after scenes.json failed to save",
+                        store.save_lights(),
+                    );
+                }
+                return Err(e);
+            }
+            Ok(())
         },
         |(before_lights, before_scenes), store, e, _| {
             store.lights = before_lights;
             store.scenes = before_scenes;
-            // Best effort: put the lights file back too, so a half-written pair is not left behind.
-            crate::logging::warn_if_err(
-                "lights.json could not be put back after scenes.json failed to save",
-                store.save_lights(),
-            );
             ApiFailure::service_unavailable(format!("the light was not removed: {e}"))
         },
     )

@@ -158,7 +158,12 @@ pub async fn put_stack(
     crate::scenes::check_stack_html_limit(&app, &stack)
         .await
         .map_err(ApiFailure::validation)?;
-    let saved = app.stacks.put(stack, &known).map_err(|error| match error {
+    // The file is written on a blocking thread: the write syncs to disk (#241).
+    let stacks = Arc::clone(&app.stacks);
+    let saved = tokio::task::spawn_blocking(move || stacks.put(stack, &known))
+        .await
+        .map_err(|e| ApiFailure::internal(format!("the stack save did not finish: {e}")))?
+        .map_err(|error| match error {
         StacksError::Invalid(message) => ApiFailure::validation(message),
         StacksError::Conflict(message) => ApiFailure::conflict(message),
         StacksError::Io(message) => {
@@ -186,10 +191,27 @@ pub async fn put_stack(
 /// and that group would go dark. The refusal names the scenes, so the owner knows where it is
 /// used. A forced delete removes the stack, its presets and its favourite, and the group that
 /// played it goes dark with a note (D95.1.6, D95.4.7).
+///
+/// The whole delete runs on a task of its own, as a chain commit does: it is two writes
+/// (`effects.json`, then the stack file) and a client that goes away between them must not leave
+/// the presets gone and the stack standing.
 pub async fn delete_stack(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Query(query): Query<DeleteStackQuery>,
+) -> ApiResult<Json<DeleteStackResponse>> {
+    tokio::spawn(async move { delete_the_stack(app, id, query).await })
+        .await
+        .unwrap_or_else(|e| {
+            Err(ApiFailure::internal(format!("the stack delete did not finish: {e}")))
+        })
+}
+
+/// The delete itself, on the detached task [`delete_stack`] starts.
+async fn delete_the_stack(
+    app: Arc<App>,
+    id: String,
+    query: DeleteStackQuery,
 ) -> ApiResult<Json<DeleteStackResponse>> {
     let stack = app
         .stacks

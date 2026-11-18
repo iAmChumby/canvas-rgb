@@ -2109,56 +2109,6 @@ async fn a_cancel_racing_a_commit_waits_and_the_commit_stands() {
     assert_eq!(read_zones(&rig.home).sizes[BOARD].get(&0).copied(), Some(FINAL));
 }
 
-/// A client that drops while its commit's files are being written (#241): the write, the commit
-/// to memory and the rollback do not belong to the request, so the store ends equal to
-/// lights.json. A commit that applied its plan on the snapshot only, in the request's own future,
-/// left disk changed and memory not, and the next save from memory wrote the old lights back.
-#[tokio::test]
-async fn a_commit_dropped_mid_save_leaves_the_store_equal_to_lights_json() {
-    let rig = rig("commit-dropped", fake(EARLIER).await, true).await;
-    assert!(connected(&rig).await, "the daemon never applied a device list");
-    save_rig_files(&rig).await;
-    let setup = started(&rig, 0).await;
-    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
-
-    // The commit's lights.json write parks here; the intent record and the other files pass.
-    let gate = canvas_daemon::storage::write_gate_in(&rig.home.join(LIGHTS_FILE));
-    gate.hold();
-    let body = SetupCommit { session: setup.session.clone(), parts: seven_parts() };
-    let router = rig.router.clone();
-    let uri = commit_path(0);
-    let text = serde_json::to_string(&body).expect("a commit body");
-    let commit_task = tokio::spawn(async move {
-        router.oneshot(request("POST", &uri, Some(&text))).await.expect("the router answers").status()
-    });
-    assert!(
-        wait_until(Duration::from_secs(30), || gate.wait_until_entered(Duration::ZERO)).await,
-        "the commit never reached the lights.json write"
-    );
-
-    // The client goes away mid-write; the write goes on and finishes.
-    commit_task.abort();
-    assert!(commit_task.await.is_err(), "the request was dropped");
-    gate.release();
-
-    // A save that follows waits for the writer, so it runs after the dropped commit finished. It
-    // touches only effects.json: a settings save here would also start the device refresh, which
-    // reloads the lights and hides the difference.
-    let (status, _) = send(
-        &rig,
-        "PUT",
-        "/api/v1/effects/aurora/favorite",
-        Some(r#"{"favorite":true}"#),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let on_disk = read_lights(&rig.home);
-    let in_memory = rig.app.store.read().await.lights.clone();
-    assert_eq!(in_memory, on_disk, "memory and lights.json disagree after a commit that was dropped");
-    assert_eq!(zone_parts(&on_disk, 0).len(), 7, "the commit's parts are the ones both hold");
-}
-
 /// A start-up replay that waited for the step lock behind a start runs after that setup opened:
 /// the open setup's record and raised header are its own, and the replay leaves them alone.
 #[tokio::test]

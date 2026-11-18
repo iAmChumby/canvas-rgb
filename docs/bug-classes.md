@@ -1394,7 +1394,12 @@ error: a slow or stalled disk looked exactly like a dead daemon (#241).
      that drops mid-save (the editor aborts a fetch during the very stall this fixes) cannot leave
      memory changed and disk not, and the next save cannot start while the write is still on its
      blocking thread, so no two writes to one target share the temp name. Nothing awaits between
-     the mutation and the spawn.
+     the mutation and the spawn. One helper call is cancel-safe on its own; a route that makes
+     two of them in a row has a cancel point between them. `DELETE /patterns/{id}` and
+     `DELETE /stacks/{id}` (a favourite or presets in `effects.json`, then the pattern or stack
+     file) therefore run the whole delete as one detached task the handler awaits through its
+     join handle, as `commit_setup` does for a chain commit: a client that leaves gets both
+     halves or neither. A new route that makes two saves does the same.
   3. **Memory is never ahead of a failed save, where that matters.** `store_save` and
      `store_save_rolled` change memory first: a `GET` that lands while the write is in flight sees
      the new state, and if the write fails the rollback takes it back (the *read window*; main made
@@ -1404,21 +1409,32 @@ error: a slow or stalled disk looked exactly like a dead daemon (#241).
      save changes nothing, no reader sees the change, and a peripheral access that failed to save
      never takes effect (fail closed).
   Each route's own rollback text and its 5xx or 503 are unchanged. `GET /api/v1/settings` and the
-  other readers take only the store lock. The same class holds for the siblings: a snapshot, a
-  file write or a file removal in an async handler runs on `spawn_blocking`, never under a store
-  guard (`api/chains.rs`, `api/lights.rs`, `api/effects.rs`, `api/editor.rs`, `first_run.rs`), and
-  `Patterns`/`Stacks` hold their `RwLock` only for the read and the swap, with a writer mutex
-  across the disk write. The `%ProgramData%` fail-closed checks stay inside the store's save
-  methods and are untouched. The test gate in `storage::write_atomic` is created only by a test
-  (`write_gate()`, `write_gate_in()`): a daemon finds no gate and skips it.
+  other readers take only the store lock. The same class holds for every other write an async
+  handler makes, and each runs on `spawn_blocking`, never under a store guard: the snapshots and
+  the chain records (`chain_records::*_async`, used by every `api/chains.rs` call), the pattern
+  and stack `put`s and deletes, the config import's three writes and its read-back, the first
+  run's zone sizes, the peripheral hub's kept values, the effect import and delete, and the
+  editor's source read. `Patterns`/`Stacks` hold their `RwLock` only for the read and the swap,
+  with a writer mutex across the disk write. A save that must undo a half-written pair does it on
+  the blocking thread inside its `save` closure (the light delete puts `lights.json` back there),
+  not in `failed`, which runs on a worker under the store lock. The `%ProgramData%` fail-closed
+  checks stay inside the store's save methods and are untouched. The test gate in
+  `storage::write_atomic` is created only by a test (`write_gate()`, `write_gate_in()`): a daemon
+  finds no gate and skips it. Not converted, and why: the start-up writes in `main.rs` and the
+  token file run before the API listens, so no reader waits on them; the CLI (`agent_run.rs`,
+  `bin/cli.rs`, `bundle.rs`) is not async code; `openrgb_supervisor::start_server` makes one
+  `create_dir_all` on its own task, holds no lock and syncs nothing; the config import's
+  `stacks.reload_with` and `patterns.reload` read their files under the import's draft gate.
 - **Regression tests:** `crates/canvas-daemon/tests/blocking_saves.rs` parks a `PUT
   /api/v1/settings` in the gate and asserts a concurrent `GET` answers while it is parked.
   `crates/canvas-daemon/tests/store_guarantees.rs` covers the three rules: two preset creates
   queued behind a stalled write both land, a patch racing a delete of another light patches the
   right light, of two replaces with the same `expected` one is refused, a failed displays save and
   a failed peripheral-access save change nothing, and a dropped preset create whose write fails
-  leaves memory equal to disk. `tests/chains.rs` aborts a commit mid-save and compares the store
-  with `lights.json`.
+  leaves memory equal to disk. The same file parks the first write of a pattern delete and of a
+  stack delete, aborts the request, releases the write, and asserts the favourite (or the presets)
+  and the pattern (or the stack) are both there or both gone. The chain commit needs no such
+  test: `commit_setup` already runs on its own task (#457), and `tests/chain_detach.rs` covers it.
 - **How to check a new store write:** it goes through `store_save` (or `store_edit` when it does
   not write). A `Store` save called directly while an `app.store.write()` guard is held is this
   bug again.

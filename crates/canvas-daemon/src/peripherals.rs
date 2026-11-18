@@ -635,7 +635,7 @@ impl PeripheralHub {
             reads.len() != before
         };
         if dropped {
-            self.save_kept();
+            self.save_kept().await;
         }
         found
     }
@@ -737,12 +737,12 @@ impl PeripheralHub {
                 );
                 self.clear_backoff(device);
                 // The values survive a restart now (#127).
-                self.save_kept();
+                self.save_kept().await;
                 Ok((props, read_at_ms))
             }
             Err(error) => {
                 // A failed read leaves nothing kept: the old values may no longer be true.
-                self.forget_read(device);
+                self.forget_read(device).await;
                 if device_failure(&error) {
                     let _ = adapter.disconnect().await;
                 }
@@ -798,10 +798,10 @@ impl PeripheralHub {
     }
 
     /// Forgets the kept values of this device: they are stale.
-    fn forget_read(&self, device: &DeviceId) {
+    async fn forget_read(&self, device: &DeviceId) {
         let removed = self.reads.lock().unwrap_or_else(|e| e.into_inner()).remove(device).is_some();
         if removed {
-            self.save_kept();
+            self.save_kept().await;
         }
     }
 
@@ -861,8 +861,9 @@ impl PeripheralHub {
     }
 
     /// Writes the kept values to their file, when the hub has one. A failed save is a warning:
-    /// the daemon keeps answering from memory.
-    fn save_kept(&self) {
+    /// the daemon keeps answering from memory. The write syncs to disk, so it runs on a blocking
+    /// thread (#241): a stalled disk holds that thread, not a runtime worker.
+    async fn save_kept(&self) {
         let Some(path) = &self.kept_path else {
             return;
         };
@@ -883,7 +884,11 @@ impl PeripheralHub {
                 .collect()
         };
         let file = KeptValuesFile { format: KEPT_FORMAT, devices };
-        if let Err(error) = crate::storage::write_json(path, &file) {
+        let target = path.clone();
+        let written = tokio::task::spawn_blocking(move || crate::storage::write_json(&target, &file))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+        if let Err(error) = written {
             tracing::warn!(
                 path = %path.display(),
                 error = %error,
@@ -901,7 +906,7 @@ impl PeripheralHub {
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
         if !adapter.is_connected() {
-            self.forget_read(device);
+            self.forget_read(device).await;
             adapter.connect().await?;
         }
         let result = adapter.write_effective(device, props).await;
@@ -923,7 +928,7 @@ impl PeripheralHub {
                     }
                 };
                 if merged {
-                    self.save_kept();
+                    self.save_kept().await;
                 }
             }
             Err(error) => {
@@ -931,7 +936,7 @@ impl PeripheralHub {
                 // range, writes off) changed nothing: the kept values stand. A device failure
                 // may have sent part of the write, so how far it got is unknown: they are stale.
                 if device_failure(error) {
-                    self.forget_read(device);
+                    self.forget_read(device).await;
                     let _ = adapter.disconnect().await;
                 }
             }
@@ -958,7 +963,7 @@ impl PeripheralHub {
             .unwrap_or_else(|e| e.into_inner())
             .insert(device.clone(), access.reads);
         if previous.is_some_and(|reads| reads != access.reads) {
-            self.forget_read(device);
+            self.forget_read(device).await;
             self.clear_backoff(device);
         }
         // The gate follows the access, whatever the access is. Writes need reads, so an

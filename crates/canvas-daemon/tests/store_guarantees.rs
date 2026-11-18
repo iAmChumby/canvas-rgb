@@ -23,11 +23,14 @@ use canvas_daemon::api;
 use canvas_daemon::state::App;
 use canvas_daemon::storage::{write_gate_in, Store, WriteGate};
 use canvas_proto::api::routes;
+use canvas_proto::color::Rgb8;
 use canvas_proto::config::Settings;
 use canvas_proto::device::DeviceId;
 use canvas_proto::display::{DisplayConfig, DisplaySource, DisplayUnit};
 use canvas_proto::layout::LedSlice;
+use canvas_proto::pattern::{BuiltOn, Frame, Motion, Pattern};
 use canvas_proto::props::{PropValue, Props};
+use canvas_proto::stack::{BlendMode, LayerArea, Stack, StackLayer};
 use canvas_proto::scene::{Arrangement, Light, LightsFile, LIGHTS_SCHEMA};
 use common::{FakeAdapter, FakeEngine};
 use std::sync::Arc;
@@ -434,4 +437,115 @@ async fn a_dropped_preset_create_whose_write_fails_leaves_memory_equal_to_disk()
         .unwrap_or_default();
     assert_eq!(in_memory, preset_names_on_disk(&home), "memory and effects.json disagree");
     assert!(in_memory.is_empty(), "a preset whose write failed is in memory: {in_memory:?}");
+}
+
+// ---- 3b. a delete of two halves outlives its caller as a whole ----
+
+/// How long a test waits for a detached delete to finish its second half.
+const SETTLE: Duration = Duration::from_secs(20);
+
+/// A pattern of four LEDs, saved straight into the daemon's own pattern store.
+fn save_pattern(app: &Arc<App>, name: &str) -> String {
+    let id = format!("pattern:{name}");
+    let pattern = Pattern {
+        id: id.clone(),
+        built_on: BuiltOn { led_count: 4, arrangement: Arrangement::Ring, grid: None },
+        frames: vec![Frame {
+            colors: vec![Rgb8::BLACK; 4],
+            hold: 0,
+            transition: None,
+            extra: serde_json::Map::new(),
+        }],
+        motion: Motion::none(),
+        playback: None,
+        extra: serde_json::Map::new(),
+    };
+    app.patterns.put(pattern).expect("the pattern is saved");
+    id
+}
+
+/// A stack of one solid layer, saved straight into the daemon's own stack store.
+fn save_stack(app: &Arc<App>, name: &str) -> String {
+    let id = format!("stack:{name}");
+    let stack = Stack {
+        id: id.clone(),
+        layers: vec![StackLayer {
+            id: "l1".into(),
+            name: "Layer".into(),
+            effect: "solid".into(),
+            props: Props::new(),
+            area: LayerArea::Canvas,
+            blend: BlendMode::Normal,
+            opacity: 100,
+            visible: true,
+            mask: None,
+        }],
+    };
+    let known = canvas_daemon::stacks::KnownEffects::from_user(&app.user_effects);
+    app.stacks.put(stack, &known).expect("the stack is saved");
+    id
+}
+
+/// A delete is two writes (effects.json, then the pattern or stack file). A client that drops
+/// while the first is parked must still get both or neither: never the favourite gone and the
+/// pattern left standing.
+#[tokio::test]
+async fn a_dropped_pattern_delete_removes_the_favourite_and_the_pattern_together() {
+    let home = TempHome::new("cancel-delete-pattern");
+    let (router, app) = build(&home, Store::at(&home.path));
+    let id = save_pattern(&app, "Doomed");
+    app.store.write().await.effects.favorites.push(id.clone());
+
+    let gate = write_gate_in(&home.path);
+    gate.hold();
+    let _release = Release(gate.clone());
+    let delete = spawn_send(&router, "DELETE", format!("/api/v1/patterns/{id}"), String::new());
+    wait_until_parked(&gate).await;
+
+    delete.abort();
+    assert!(delete.await.is_err(), "the request task was cancelled");
+    gate.release();
+
+    let deadline = Instant::now() + SETTLE;
+    while app.patterns.get(&id).is_some() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let pattern_there = app.patterns.get(&id).is_some();
+    let favourite_there = app.store.read().await.effects.favorites.contains(&id);
+    assert_eq!(
+        pattern_there, favourite_there,
+        "half a delete: pattern_there={pattern_there} favourite_there={favourite_there}"
+    );
+    assert!(!pattern_there, "the delete finished: both are gone");
+}
+
+/// The same for a stack: its presets must not go while the stack stays.
+#[tokio::test]
+async fn a_dropped_stack_delete_removes_the_presets_and_the_stack_together() {
+    let home = TempHome::new("cancel-delete-stack");
+    let (router, app) = build(&home, Store::at(&home.path));
+    let id = save_stack(&app, "Doomed");
+    app.store.write().await.effects.presets.insert(id.clone(), Vec::new());
+
+    let gate = write_gate_in(&home.path);
+    gate.hold();
+    let _release = Release(gate.clone());
+    let delete = spawn_send(&router, "DELETE", format!("/api/v1/stacks/{id}"), String::new());
+    wait_until_parked(&gate).await;
+
+    delete.abort();
+    assert!(delete.await.is_err(), "the request task was cancelled");
+    gate.release();
+
+    let deadline = Instant::now() + SETTLE;
+    while app.stacks.get(&id).is_some() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let stack_there = app.stacks.get(&id).is_some();
+    let presets_there = app.store.read().await.effects.presets.contains_key(&id);
+    assert_eq!(
+        stack_there, presets_there,
+        "half a delete: stack_there={stack_there} presets_there={presets_there}"
+    );
+    assert!(!stack_there, "the delete finished: both are gone");
 }

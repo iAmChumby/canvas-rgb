@@ -397,10 +397,12 @@ pub async fn size_headers(
             schema_version: canvas_proto::config::ZONES_SCHEMA,
             sizes: guard.clone(),
         };
-        crate::logging::warn_if_err(
-            "the first run could not save the zone sizes",
-            crate::storage::write_json(&home.join(canvas_proto::config::ZONES_FILE), &file),
-        );
+        // On a blocking thread: the write syncs to disk (#241).
+        let (path, to_write) = (home.join(canvas_proto::config::ZONES_FILE), file.clone());
+        let written = tokio::task::spawn_blocking(move || crate::storage::write_json(&path, &to_write))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+        crate::logging::warn_if_err("the first run could not save the zone sizes", written);
         drop(guard);
         // The store's copy is what a chain commit and an export write back: keep it in step.
         crate::store_io::store_edit(app, |store| store.zones.sizes = file.sizes).await;

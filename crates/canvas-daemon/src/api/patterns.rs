@@ -62,7 +62,12 @@ pub async fn put_pattern(
         )));
     }
 
-    let saved = app.patterns.put(pattern).map_err(|error| match error {
+    // The file is written on a blocking thread: the write syncs to disk (#241).
+    let patterns = Arc::clone(&app.patterns);
+    let saved = tokio::task::spawn_blocking(move || patterns.put(pattern))
+        .await
+        .map_err(|e| ApiFailure::internal(format!("the pattern save did not finish: {e}")))?
+        .map_err(|error| match error {
         PatternsError::Invalid(message) => ApiFailure::validation(message),
         PatternsError::Conflict(message) => ApiFailure::conflict(message),
         PatternsError::Io(message) => {
@@ -83,10 +88,27 @@ pub async fn put_pattern(
 /// go dark. The refusal names the scenes, so the owner knows where the pattern is used. A forced
 /// delete removes the pattern and its favourite, and the group that played it goes dark with a
 /// note, as a deleted stack's does.
+///
+/// The whole delete runs on a task of its own, as a chain commit does: it is two writes
+/// (`effects.json`, then the pattern file) and a client that goes away between them must not leave
+/// the favourite gone and the pattern standing.
 pub async fn delete_pattern(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Query(query): Query<DeletePatternQuery>,
+) -> ApiResult<Json<DeletePatternResponse>> {
+    tokio::spawn(async move { delete_the_pattern(app, id, query).await })
+        .await
+        .unwrap_or_else(|e| {
+            Err(ApiFailure::internal(format!("the pattern delete did not finish: {e}")))
+        })
+}
+
+/// The delete itself, on the detached task [`delete_pattern`] starts.
+async fn delete_the_pattern(
+    app: Arc<App>,
+    id: String,
+    query: DeletePatternQuery,
 ) -> ApiResult<Json<DeletePatternResponse>> {
     let pattern = app
         .patterns
