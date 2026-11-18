@@ -37,6 +37,10 @@ use tower::ServiceExt;
 
 /// The token the tests use.
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// A test's reply deadline is a hang guard, not the verdict: a loaded runner must never turn a
+/// slow-but-live reply from the fake into "no reply to packet ... within 5s" (#519).
+const TEST_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 /// The board whose first JARGB header is the chain under test.
 const BOARD: &str = "openrgb:mb";
 /// The earlier length of the board's first header: what first run sized it to.
@@ -163,7 +167,10 @@ async fn rig(name: &str, server: FakeOpenRgbServer) -> Rig {
     let app = Arc::new(App::new(
         store,
         engine,
-        Box::new(OpenRgbAdapter::new("127.0.0.1", server.port())),
+        Box::new(
+            OpenRgbAdapter::new("127.0.0.1", server.port())
+                .with_reply_timeout(TEST_REPLY_TIMEOUT),
+        ),
         TOKEN.into(),
         "0.0.0-test".into(),
         tx,

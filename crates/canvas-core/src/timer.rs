@@ -74,17 +74,14 @@ impl FrameTimer {
         Duration::from_nanos(1_000_000_000 / u64::from(fps))
     }
 
-    /// Sleeps until the next tick at `fps`, then advances the schedule.
-    ///
-    /// Returns the instant the tick was due, which is the frame's logical time.
-    ///
-    /// The first tick is due one interval after the epoch, so the caller always
-    /// waits before the first frame.
-    pub fn sleep_until_next(&mut self, fps: u32) -> Instant {
+    /// The instant the next tick at `fps` is due, given `now`. Pure schedule arithmetic: no
+    /// sleep and no OS call, so a test can inject the instant and assert on the due value
+    /// instead of on how long a machine took to sleep (#519). Advances the tick index.
+    fn next_due(&mut self, fps: u32, now: Instant) -> Instant {
         if fps != self.fps {
             // The first call (fps 0) and every change: start a fresh schedule from now.
             if self.fps != 0 {
-                self.reset_schedule(Instant::now());
+                self.reset_schedule(now);
             }
             self.fps = fps;
         }
@@ -92,7 +89,6 @@ impl FrameTimer {
         // More than one interval behind (a long frame, a stall, a suspend): the missed ticks
         // are not replayed back to back. Restart the schedule from now.
         if let Some(due) = self.epoch.checked_add(interval.saturating_mul(u32::try_from(self.next_tick).unwrap_or(u32::MAX))) {
-            let now = Instant::now();
             if now > due && now - due > interval {
                 self.reset_schedule(now);
             }
@@ -102,7 +98,17 @@ impl FrameTimer {
         let ticks = u32::try_from(self.next_tick).unwrap_or(u32::MAX);
         let due = self.epoch + interval.saturating_mul(ticks);
         self.next_tick = self.next_tick.saturating_add(1);
+        due
+    }
 
+    /// Sleeps until the next tick at `fps`, then advances the schedule.
+    ///
+    /// Returns the instant the tick was due, which is the frame's logical time.
+    ///
+    /// The first tick is due one interval after the epoch, so the caller always
+    /// waits before the first frame.
+    pub fn sleep_until_next(&mut self, fps: u32) -> Instant {
+        let due = self.next_due(fps, Instant::now());
         let now = Instant::now();
         if due > now {
             std::thread::sleep(due - now);
@@ -191,40 +197,40 @@ mod tests {
 
     #[test]
     fn the_schedule_does_not_drift() {
+        // The due instants are arithmetic on the epoch, not on how long the machine took to
+        // sleep: three frames at 100 fps are due 10, 20 and 30 ms after the epoch (#519).
         let mut timer = FrameTimer::new();
-        let start = Instant::now();
-        // Three frames at 100 fps: 30 ms of scheduled time.
-        for _ in 0..3 {
-            timer.sleep_until_next(100);
+        let now = Instant::now();
+        let epoch = now;
+        timer.reset_schedule(epoch);
+        for tick in 1..=3u32 {
+            let due = timer.next_due(100, now);
+            assert_eq!(due, epoch + Duration::from_millis(u64::from(tick) * 10), "tick {tick}");
         }
-        let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(25), "elapsed {elapsed:?}");
-        assert!(elapsed < Duration::from_millis(120), "elapsed {elapsed:?}");
     }
 
     #[test]
     fn lowering_the_fps_after_many_frames_does_not_stall() {
-        // The schedule has run for a while at 60 fps: simulate it by putting the epoch
-        // 2 s in the past with the tick index that 2 s of 60 fps frames would reach.
+        // The schedule has run for a while at 60 fps: put the epoch 2 s in the past with the
+        // tick index that 2 s of 60 fps frames would reach.
         let mut timer = FrameTimer::new();
-        timer.sleep_until_next(60);
-        timer.epoch = Instant::now() - Duration::from_secs(2);
+        let now = Instant::now();
+        timer.next_due(60, now);
+        timer.epoch = now - Duration::from_secs(2);
         timer.next_tick = 121;
-        // Dropping to 30 fps must not wait the 2 s the old tick index implies.
-        let start = Instant::now();
-        timer.sleep_until_next(30);
-        assert!(start.elapsed() < Duration::from_millis(100), "stalled {:?}", start.elapsed());
+        // Dropping to 30 fps restarts the schedule: the next frame is one 30 fps interval
+        // from now, not 2 s from the stale tick index (#519).
+        assert_eq!(timer.next_due(30, now), now + FrameTimer::interval(30));
     }
 
     #[test]
     fn reset_moves_the_next_tick_to_now() {
         let mut timer = FrameTimer::new();
-        timer.sleep_until_next(10);
-        timer.reset_schedule(Instant::now());
-        let start = Instant::now();
-        timer.sleep_until_next(60);
+        let now = Instant::now();
+        timer.next_due(10, now);
+        timer.reset_schedule(now);
         // The next frame is due one 60 fps interval from the reset, not ten frames later.
-        assert!(start.elapsed() < Duration::from_millis(60));
+        assert_eq!(timer.next_due(60, now), now + FrameTimer::interval(60));
     }
 
     #[test]

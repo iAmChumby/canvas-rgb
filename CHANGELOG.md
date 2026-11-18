@@ -21,6 +21,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- The daemon, service and HTML tests no longer fail by chance on a busy machine: chain setup, device rescan, resize, effect-import and boot-color tests wait for the fake OpenRGB server's own events instead of a five-second reply clock, and the paint-effect loop tests no longer judge loop closure against a shared runner's 100 ms frame budget. (#519)
 - Patterns: when you save a pattern with fewer frames, a group that had gone dark because the scene's frame budget was full now comes back on as soon as it fits, without reloading the scene. (#518)
 - The editor keeps answering while the daemon saves a setting or a scene: a slow disk no longer makes the API appear dead while the port stays open, two saves made at once (two presets, say) both land, and a save the editor abandons halfway still finishes or is undone, including deleting a pattern or a stack together with its favourite or presets. (#241)
 - Logging: if the file for today's log is replaced by a link or junction, the daemon now names the path and refuses the write instead of following it; both the rolling log writer and the crash writer check, and a link or junction at the log folder or its parent now stops the daemon's logging from starting, before it prunes anything. (#72)

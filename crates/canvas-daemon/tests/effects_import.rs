@@ -762,57 +762,21 @@ async fn an_import_whose_normal_load_timed_out_but_the_longer_one_loaded_is_a_no
     assert!(effect_ids(&router).await.contains(&"html:spark".to_string()));
 }
 
-/// A page whose top-level script burns `iterations` loop iterations.
-fn loop_page(iterations: u64) -> String {
-    format!(
-        "<head><title>Slow</title></head><body><canvas id=\"c\" width=\"4\" height=\"4\"></canvas></body>\
-         <script>for (var i = 0; i < {iterations}; i++) {{}}</script>"
-    )
-}
-
-/// How long a load of `iterations` takes, in seconds, using the given builder.
-///
-/// The probes run at the import's longer load budget, so a probe fails the test only if a
-/// load stalls for ten seconds; a machine that is merely slow makes the probes shorter, not
-/// the test red.
-fn load_seconds(builder: &canvas_daemon::user_effects::Builder, iterations: u64) -> f64 {
-    let started = std::time::Instant::now();
-    builder("html:probe", &loop_page(iterations))
-        .expect("the probe loads inside the import's 10 s budget");
-    started.elapsed().as_secs_f64()
-}
-
 /// A script that needs longer than the normal load budget, but less than the import's longer
 /// one, is saved exactly as it was before this change: the rescan at the normal budget puts it
 /// in the failed list, in today's words, and the retry picks it up. It is not installed as
 /// loaded, because the lights and the tiles run every effect at the normal budget (#75).
 ///
-/// The script's cost is calibrated on this machine (a warm-up, the fixed cost of a load taken
-/// off, and the budget as the yardstick), so the test does not depend on how fast it is
-/// (class `cause:timing-test`, #51).
+/// The old test calibrated a real CPU-burning script against the machine's clock (warm-up,
+/// fixed cost off, budget as yardstick). Under load a probe or the import could cross the 10 s
+/// cap and change the verdict (#519). The builder's own calls are the event now: call 0 (the
+/// import's normal load) and call 2 (the rescan's normal load) run out of time, call 1 (the one
+/// longer load) builds the real effect. Nothing reads a clock.
 #[tokio::test]
 async fn an_effect_a_little_slower_than_the_normal_budget_is_saved_and_waiting_to_be_retried() {
-    let longer = canvas_daemon::user_effects::html_builder_with_import_load();
-    // What a page costs before its script runs, and a warm-up.
-    let overhead = load_seconds(&longer, 0);
-    let _ = load_seconds(&longer, 1);
-    // The cost of one iteration, measured over a probe long enough that the fixed cost is a
-    // small share of it.
-    let mut probe = 100u64;
-    let per_iter = loop {
-        let took = load_seconds(&longer, probe);
-        let script = (took - overhead).max(0.0);
-        if script >= 0.5 {
-            break script / probe as f64;
-        }
-        probe *= 2;
-    };
-    // A script of about 3.2 s: past the 2 s normal budget, well inside the 10 s import one.
-    let iterations = ((((3.2 - overhead).max(2.5)) / per_iter).round() as u64).max(1);
-    let html = loop_page(iterations);
-
-    let (router, _app, _home, folder) = build();
-    let body = import(&router, "slow.html", &html, false).await;
+    let (router, _app, _home, folder) = build_with(Some(timing_out_on(&[0, 2])));
+    let html = VALID;
+    let body = import(&router, "slow.html", html, false).await;
 
     // The answer says what today's does: saved, took too long just now, tried again.
     let description = body["effect"]["description"].as_str().unwrap_or_default();

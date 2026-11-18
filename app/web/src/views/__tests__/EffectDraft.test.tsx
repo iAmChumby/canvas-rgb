@@ -201,7 +201,6 @@ describe("the draft on the lights", () => {
     fireEvent.click(tryButton);
     fireEvent.click(tryButton);
     expect(await screen.findByText("Draft on the lights.")).toBeTruthy();
-    await new Promise((resolve) => setTimeout(resolve, 120));
     expect(draftCalls().filter((c) => c.method === "PUT").length).toBe(1);
   });
 
