@@ -226,8 +226,24 @@ mod tests {
         crate::test_logs::captured(run)
     }
 
+    /// The hook and its DIRECT_TARGET are process-wide: only one test at a time may install the
+    /// real hook, or one test's target would decide another's verdict.
+    static REAL_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn real_hook_lock() -> std::sync::MutexGuard<'static, ()> {
+        REAL_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Puts the direct writer's target back when the test ends, even on a failed assertion.
+    struct RestoreDirectTarget;
+    impl Drop for RestoreDirectTarget {
+        fn drop(&mut self) {
+            crate::logging::clear_direct_target_for_test();
+        }
+    }
+
     #[test]
     fn a_panic_leaves_its_message_and_location_in_the_log() {
+        let _serial = real_hook_lock();
         let (caught, text) = capture(|| {
             install_panic_hook();
             std::panic::catch_unwind(|| {
@@ -307,8 +323,55 @@ mod tests {
         assert!(!text.contains("queued behind the backlog"), "the stuck queue never reached the file: {text}");
     }
 
+    /// #36, through the PRODUCTION hook: `install_panic_hook` installs
+    /// `logging::write_line_direct_within`, which reads DIRECT_TARGET and writes today's file
+    /// itself. The earlier test injects its own writer, so it passes even if the hook is put back
+    /// on the queue. Here the log queue is stuck (nothing queued reaches the file), the main
+    /// thread panics, and the panic line is in today's file exactly once. With the old queue-only
+    /// hook the file holds nothing, so this test fails.
+    ///
+    /// The direct write waits for the helper's own end (`write_once_within`), so the file is read
+    /// after the line landed: no clock decides the verdict (class `cause:timing-test`, #72).
+    #[test]
+    fn the_real_hook_writes_the_panic_line_to_todays_file_while_the_queue_is_stuck() {
+        let _serial = real_hook_lock();
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-real-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "canvas-rgbd".to_string();
+        crate::logging::set_direct_target_for_test(dir.clone(), name.clone());
+        let _restore = RestoreDirectTarget;
+
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (stuck, stuck_guard) = tracing_appender::non_blocking(StuckWriter(release.clone()));
+        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(stuck).finish();
+        // The keeper first: this capture has a subscriber of its own, so the interest cache must
+        // not answer `never` for a callsite another thread reached (class `cause:timing-test`).
+        crate::test_logs::keep_the_interest_cache_permissive();
+        let caught = tracing::subscriber::with_default(subscriber, || {
+            install_panic_hook();
+            for i in 0..100 {
+                tracing::error!("queued behind the backlog {i}");
+            }
+            std::panic::catch_unwind(|| panic!("the main thread lost its sink behind a stuck queue"))
+        });
+        assert!(caught.is_err());
+
+        let text = std::fs::read_to_string(crate::logging::todays_log_file(&dir, &name)).unwrap_or_default();
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(stuck_guard);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            text.matches("the main thread lost its sink behind a stuck queue").count(),
+            1,
+            "the production hook put the panic line in today's file once: {text:?}"
+        );
+        assert!(!text.contains("queued behind the backlog"), "the stuck queue never reached the file: {text}");
+    }
+
     #[test]
     fn a_static_str_panic_is_logged_too() {
+        let _serial = real_hook_lock();
         let (_, text) = capture(|| {
             install_panic_hook();
             let _ = std::panic::catch_unwind(|| panic!("plain text"));

@@ -620,18 +620,21 @@ line. Three mechanisms, and one bug the timing only exposed.
     fixed cost of a load, then adds scripts until the total passes the budget, so it drives the real
     shared-budget path (`remaining_budget` is also unit-checked); the cost of one script is the best of
     three loads. The tile test sizes its frames from the best of three samples after a warm-up and bounds
-    the hold to the budget plus one calibrated frame (about 0.5 s, a constant once measured).
+    the hold to the budget plus ONE frame, measured from the built effect itself (best of three samples after a warm-up), so the slack follows the machine instead of a constant half second.
   - #59: `app/web/vitest.setup.ts` raises `asyncUtilTimeout` to 10 s and `vitest.config.mts` raises
     `testTimeout` to 20 s, from `vitest.limits.ts`; `src/test/setup.test.tsx` pins both and finds an
     element that appears after 1.5 s. A `findBy*` returns when its element appears, so a pass costs nothing.
   - #36: the main thread's panic line is written straight into the day's log file, in one write bounded
     to 250 ms (`logging::write_line_direct_within`), to the file the appender names for today's UTC date
-    (made if the appender has not made it yet; a reparse point is refused). The tracing copy is only the
+    (made if the appender has not made it yet; a reparse point is refused on BOTH paths now: the direct
+    writer and the rolling appender's own `create_writer`, which pre-opens today's file the same way). The
+    tracing copy is only the
     fallback when that write failed or had not begun at the limit; a write that has begun and lands late
     owns the line, so the line is in the file at most once. A stalled disk can still lose it, and a
     panic on any thread but the main one still goes through the queue. The hook's logic is tested with a
-    stuck queue and an injected writer (`exit_log::the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck`);
-    the production writer it is installed with at startup has no test that fails on the old hook (open).
+    stuck queue and an injected writer (`exit_log::the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck`),
+    and now through the REAL hook too (`the_real_hook_writes_the_panic_line_to_todays_file_while_the_queue_is_stuck`),
+    which installs `install_panic_hook` and fails on the old queue-only hook.
   - #72: `a_panicking_helper_lets_the_caller_write_the_fallback` (`crates/canvas-daemon/src/logging.rs`)
     rode a 50 ms window: the helper's panic had to finish inside it, or the caller read "the helper owns
     the line" and skipped the fallback, and the line was lost. Measured: with `RUST_BACKTRACE=1` the
@@ -718,8 +721,9 @@ line. Three mechanisms, and one bug the timing only exposed.
   the line, the scan cannot see a subscriber).
 - **Sibling search:** the allow-list entries marked "open" are the siblings: `timer.rs` upper bounds
   (3 tests), `effects_import.rs` and `quit.rs` ceilings, the `canvas-core/src/tests.rs` "sleep 300 ms
-  then expect parked" tests and `wave1.rs`, and the `api.rs` onboarding timers (60-350 ms sleeps against
-  100 ms timers on a compressed time scale, `transient.rs`), the riskiest. Also open: a log capture that
+  then expect parked" tests and `wave1.rs`. The `api.rs` onboarding timers (60-350 ms sleeps against
+  100 ms timers on a compressed time scale, `transient.rs`) now run on tokio's paused clock, so the
+  sleeps advance virtual time and no real-time window decides their verdict (#72). Also open: a log capture that
   is still not on a shared helper that carries the keeper. Delete an entry when its test is fixed.
   - **The siblings of #170 and #178 (same shape, not yet fixed):** the other tests in
     `crates/canvas-svc/src/openrgb_tests.rs` that pair a `tokio::time::interval` with
