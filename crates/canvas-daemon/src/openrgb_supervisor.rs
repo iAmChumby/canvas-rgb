@@ -1308,8 +1308,17 @@ mod tests {
                 };
                 let mut lane = OpenRgbAdapter::new("127.0.0.1", server.port()).with_rescan_timing(timing);
                 lane.connect().await.expect("connect");
+                // A real-time guard: an ACK that never comes fails the test, never hangs it. The
+                // clock is still the real one here (paused only below), so std time is the judge.
+                let guard = std::time::Instant::now() + Duration::from_secs(10);
                 let io_done = async {
                     while server.rescan_count() < 1 || lane.rescan_acks() < 1 {
+                        assert!(
+                            std::time::Instant::now() < guard,
+                            "OpenRGB never acknowledged the rescan: acks={}, rescans={}",
+                            lane.rescan_acks(),
+                            server.rescan_count()
+                        );
                         tokio::time::sleep(Duration::from_millis(2)).await;
                     }
                     tokio::time::pause();

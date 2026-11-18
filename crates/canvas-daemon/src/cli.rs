@@ -1180,8 +1180,8 @@ fn limit_text(limit: Option<Duration>) -> String {
         // rounded down to a shorter limit than the one that ran out.
         Some(limit) if limit.as_secs() > 0 && limit.subsec_millis() == 0 => format!("{} s", limit.as_secs()),
         Some(limit) if limit.as_secs() > 0 => {
-            let text = format!("{:.3}", limit.as_secs_f64());
-            format!("{} s", text.trim_end_matches('0'))
+            let millis = format!("{:03}", limit.subsec_millis());
+            format!("{}.{} s", limit.as_secs(), millis.trim_end_matches('0'))
         }
         Some(limit) => format!("{} ms", limit.as_millis()),
         None => "its limit".to_string(),
@@ -3023,6 +3023,7 @@ mod tests {
         assert_eq!(limit_text(Some(Duration::from_millis(1250))), "1.25 s");
         assert_eq!(limit_text(Some(Duration::from_secs(2))), "2 s");
         assert_eq!(limit_text(Some(Duration::from_millis(300))), "300 ms");
+        assert_eq!(limit_text(Some(Duration::from_micros(2_999_600))), "2.999 s");
         assert_eq!(limit_text(None), "its limit");
     }
 
