@@ -1838,6 +1838,51 @@ async fn a_sequence_group_runs_through_its_lights_and_follows_the_scene_api() {
     .await;
 }
 
+/// A scene is made with a ring group in the one create request (#504 item 3), it reads back with
+/// the shape, and the engine runs it as one run through the members.
+#[tokio::test]
+async fn a_scene_made_with_a_ring_group_runs_it_as_a_sequence() {
+    use canvas_proto::api::{NewGroup, SceneCreate};
+    use canvas_proto::scene::SequenceShape;
+    let rig = sequence_rig(Motion::none(), None, [FAN1, FAN2, STRIP]).await;
+    let asked = NewGroup {
+        name: "Made".into(),
+        members: [FAN1, FAN2, STRIP].iter().map(|id| format!("{id}#z0")).collect(),
+        plays: Plays::Effect { effect: RUN.into(), props: Props::new() },
+        mode: GroupMode::FlowAcross,
+        brightness: 100,
+        sequence: Some(SequenceShape::Ring),
+    };
+    let body = serde_json::to_value(SceneCreate {
+        name: "Made".into(),
+        copy_of: None,
+        groups: Some(vec![asked]),
+        dry_run: false,
+    })
+    .unwrap();
+    let (status, made) = send(&rig, "POST", routes::SCENES, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    assert_eq!(made["groups"][0]["sequence"], "ring", "the create answered the shape: {made}");
+
+    // Read it back: the shape is saved, not only answered.
+    let (status, list) = send(&rig, "GET", routes::SCENES, None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let saved = list["scenes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Made")
+        .expect("the made scene is in the list");
+    assert_eq!(saved["groups"][0]["sequence"], "ring", "read back: {list}");
+
+    // Make it the active scene: the engine plays it as one run through the three devices.
+    let id = made["id"].as_str().expect("the scene's id").to_string();
+    let (status, answer) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(serde_json::json!({ "id": id }))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let run = run_pattern(Motion::none()).frames[0].colors.clone();
+    shows_three(&rig, &run[0..8], &run[8..16], &run[16..26], "the made scene's run").await;
+}
+
 /// One shared log of every frame the three devices are handed, in the order they arrive.
 #[derive(Default)]
 struct Tape {

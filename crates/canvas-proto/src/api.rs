@@ -1004,6 +1004,11 @@ pub struct NewGroup {
     #[serde(default = "default_new_group_brightness")]
     #[ts(optional, as = "Option<u8>")]
     pub brightness: u8,
+    /// How a pattern runs through the members (#504), as [`crate::scene::Group::sequence`]. Left
+    /// out: each light plays the whole pattern on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sequence: Option<crate::scene::SequenceShape>,
 }
 
 fn default_new_group_brightness() -> u8 {

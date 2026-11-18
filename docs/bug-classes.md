@@ -1324,6 +1324,35 @@ matches, so a narrowed log silently loses it.
   `target: crate::logging::LOG_TARGET`; `cargo test -p canvas-daemon` fails when a known moved
   line logs without it.
 
+**A third mechanism, same cause: one rule written twice, so a mark and the lights disagree.**
+
+The editor shows a pattern's fit beside a group (`groupFit`/`lightFits` in
+`app/web/src/lib/patternFit.ts`), and the daemon shows its own in the group's list
+(`member_fits` in `crates/canvas-daemon/src/scenes.rs`). The second copy is wired to the
+editor's own reading of `GET /lights`, and a scene save or a scene edit carries the copy's
+answer onward, so a one-sided change makes the mark contradict the picture with no error
+anywhere.
+
+- [#504](https://github.com/iAmChumby/canvas-rgb/issues/504): the demo fitted each light on its
+  own where the daemon fitted the whole run, so it said "Fits" where the lights were Stretched;
+  the editor dropped a listed-but-unplugged light from the run and did not apply the 4096-LED
+  cap; and a `canvas-rgb scenes edit` rebuilt every group without its `sequence`, so a One ring
+  group came back as Each light.
+- **Class fix:** done (#504, #510, #516, and this). One function instead of a copy where the
+  rule can be shared: `canvas_core::arrangement::light_led_count` is what the engine plans,
+  what `member_fits` fits, and what `view` in `crates/canvas-daemon/src/api/lights.rs` answers
+  to the editor. Where a copy stays (the editor's `fitKind`/`runFit`, the demo's), it is pinned
+  by generated vectors: `app/web/src/lib/__tests__/patternFit.vectors.json` is printed by
+  `crates/canvas-daemon/examples/pattern_fit_vectors.rs` and written by
+  `tools/pattern-fit-vectors.ps1`, the editor's test runs its own rules over every row, and
+  `crates/canvas-daemon/tests/pattern_fit_vectors.rs` fails when the file is no longer what the
+  Rust rules make. A row carries the group's members with their stored slice, their zone and
+  the LED count the API answers, so the slice rule, the 4096 cap, a disconnected light and a
+  light with no LEDs each move a verdict.
+- **How to check a new fit rule:** write it once (in `light_led_count` or `fit_kind`), then add
+  a row per branch to the printer and run the script; a copy on the editor's side fails the
+  editor's test until it follows.
+
 ### `cause:regression`: one sampling rule for every effect darkens an effect it was not written for
 
 A strip LED reads a part of the effect's picture, and one rule decided which part for every

@@ -116,13 +116,16 @@ these into presets": ask nothing.
 
 An array of groups. `mode` is `flow_across` (one picture across the group's lights; the default)
 or `each_its_own` (every light shows the whole picture). `brightness` is 0 to 100 (default 100).
-`plays` is `{"type":"off"}` or an effect.
+`plays` is `{"type":"off"}` or an effect. `sequence` is how a pattern runs through the group's
+lights: `"ring"` (one ring through every member), `"line"` (one line with two ends) or `"each"`
+(every light plays the whole pattern, the default). An edit keeps a group's shape when the file
+names none, so write `"sequence": "each"` to take a group back to each light.
 
 ```
 [
   {"name": "Fans", "members": ["<device>#z0", "<device>#z1"],
    "plays": {"type": "effect", "effect": "html:ink-drop", "props": {}},
-   "mode": "flow_across", "brightness": 80},
+   "mode": "flow_across", "brightness": 80, "sequence": "ring"},
   {"name": "Other", "members": ["<device>#z2"], "plays": {"type": "off"}}
 ]
 ```
