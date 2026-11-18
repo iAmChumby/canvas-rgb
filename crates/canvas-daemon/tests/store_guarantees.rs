@@ -395,6 +395,63 @@ async fn a_failed_peripheral_access_save_leaves_the_access_as_it_was() {
     assert_eq!(after, before, "an access that failed to save took effect in memory");
 }
 
+/// Makes a file read-only, and writable again when dropped, so the temp home can be removed.
+#[cfg(windows)]
+struct ReadOnly(std::path::PathBuf);
+
+#[cfg(windows)]
+impl ReadOnly {
+    fn new(path: std::path::PathBuf) -> Self {
+        let mut permissions = std::fs::metadata(&path).expect("the file exists").permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).expect("the file is made read-only");
+        Self(path)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        if let Ok(metadata) = std::fs::metadata(&self.0) {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(&self.0, permissions);
+        }
+    }
+}
+
+/// A light delete writes `lights.json`, then `scenes.json`. When `scenes.json` cannot be written
+/// (a read-only file refuses the rename on Windows), the blocking thread puts `lights.json` back
+/// itself: the answer is a 503, memory keeps both lights, and `lights.json` is byte for byte what
+/// it was (#241: the rollback no longer writes from the store-locked `failed` closure).
+#[cfg(windows)]
+#[tokio::test]
+async fn a_light_delete_whose_scenes_write_fails_puts_lights_json_back() {
+    let home = TempHome::new("delete-rollback");
+    let a = format!("{UNDRIVEN}#z0p1");
+    let b = format!("{UNDRIVEN}#z0p2");
+    let mut store = Store::at(&home.path);
+    store.lights = LightsFile {
+        chains: Vec::new(),
+        schema_version: LIGHTS_SCHEMA,
+        lights: vec![light(&a, "First"), light(&b, "Second")],
+    };
+    store.save_lights().expect("lights.json is written");
+    store.save_scenes().expect("scenes.json is written");
+    let lights_before = std::fs::read(home.path.join(canvas_proto::scene::LIGHTS_FILE)).expect("lights.json");
+    let (router, app) = build(&home, store);
+
+    let _read_only = ReadOnly::new(home.path.join(canvas_proto::scene::SCENES_FILE));
+    let (status, body) = send(&router, "DELETE", &light_path(&a), "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+    let in_memory: Vec<String> =
+        app.store.read().await.lights.lights.iter().map(|l| l.id.clone()).collect();
+    assert_eq!(in_memory, vec![a.clone(), b.clone()], "memory keeps both lights");
+    let lights_after = std::fs::read(home.path.join(canvas_proto::scene::LIGHTS_FILE)).expect("lights.json");
+    assert_eq!(lights_after, lights_before, "lights.json is byte for byte what it was");
+}
+
 // ---- 3. a save outlives its caller ----
 
 /// A client that drops while its preset write is stalled, then a write that fails: the rollback

@@ -127,6 +127,11 @@ impl WriteGate {
         self.inner.changed.notify_all();
     }
 
+    /// How many writes are parked in the gate right now.
+    pub fn parked(&self) -> usize {
+        self.inner.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Waits until a write is parked in the gate. `true` means one got here.
     pub fn wait_until_entered(&self, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;

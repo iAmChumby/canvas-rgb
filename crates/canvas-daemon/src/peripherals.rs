@@ -311,6 +311,9 @@ pub struct PeripheralHub {
     progress: Arc<StdMutex<BTreeMap<String, ReadProgress>>>,
     /// Where the kept values survive a restart. `None` in the unit tests that do not need it.
     kept_path: Option<PathBuf>,
+    /// Serialises the writes of the kept values file (#241): one at a time, each holding the values
+    /// as they were when it took its turn, so the last write on disk is the newest.
+    kept_writer: Arc<tokio::sync::Mutex<()>>,
     /// What Windows (or a test's fake) says about the person's keyboard and mouse.
     idle: Arc<dyn InputIdle>,
 }
@@ -540,6 +543,7 @@ impl PeripheralHub {
             backoff_base: BACKOFF_BASE,
             reads_applied: std::sync::Mutex::new(BTreeMap::new()),
             kept_path,
+            kept_writer: Arc::new(tokio::sync::Mutex::new(())),
             idle,
         }
     }
@@ -863,10 +867,17 @@ impl PeripheralHub {
     /// Writes the kept values to their file, when the hub has one. A failed save is a warning:
     /// the daemon keeps answering from memory. The write syncs to disk, so it runs on a blocking
     /// thread (#241): a stalled disk holds that thread, not a runtime worker.
+    ///
+    /// Three things hold. The writer mutex is taken first and the snapshot of the values is built
+    /// after it, so the last write on disk holds the newest values. The write runs in a spawned
+    /// task that owns the guard, so a caller that is dropped mid-write cannot free the mutex while
+    /// the blocking thread is still on the disk. And two writes never overlap, so they never share
+    /// the temp file name.
     async fn save_kept(&self) {
-        let Some(path) = &self.kept_path else {
+        let Some(path) = self.kept_path.clone() else {
             return;
         };
+        let writer = Arc::clone(&self.kept_writer).lock_owned().await;
         let devices: BTreeMap<String, KeptValues> = {
             let reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
             reads
@@ -884,16 +895,22 @@ impl PeripheralHub {
                 .collect()
         };
         let file = KeptValuesFile { format: KEPT_FORMAT, devices };
-        let target = path.clone();
-        let written = tokio::task::spawn_blocking(move || crate::storage::write_json(&target, &file))
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
-        if let Err(error) = written {
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "the kept peripheral values could not be saved"
-            );
+        let task = tokio::spawn(async move {
+            let _writer = writer;
+            let target = path.clone();
+            let written = tokio::task::spawn_blocking(move || crate::storage::write_json(&target, &file))
+                .await
+                .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+            if let Err(error) = written {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "the kept peripheral values could not be saved"
+                );
+            }
+        });
+        if let Err(error) = task.await {
+            tracing::warn!(error = %error, "the kept peripheral values write did not finish");
         }
     }
 
@@ -1440,5 +1457,77 @@ mod tests {
         assert!(device_failure(&AdapterError::Io(std::io::Error::other("gone"))));
         assert!(!device_failure(&AdapterError::Protocol("no such setting".into())));
         assert!(!device_failure(&AdapterError::Unsupported("writes are off")));
+    }
+    /// A kept-values write parked on the disk, whose caller then goes away, still owns the file: a
+    /// later save waits for it instead of writing beside it on the shared temp name, and the file
+    /// that ends up on disk holds the newer values (#241).
+    #[tokio::test]
+    async fn a_kept_values_write_outlives_its_caller_and_the_next_one_waits_for_it() {
+        let home = std::env::temp_dir()
+            .join(format!("canvas-rgb-kept-writer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("the home is created");
+        let hub = Arc::new(PeripheralHub::with_home(Vec::new(), home.clone()));
+        let id = DeviceId("kept:mouse".into());
+        let set = |value: f64| {
+            let mut props = Props::new();
+            props.insert("dpi".into(), canvas_proto::props::PropValue::Number(value));
+            hub.reads.lock().unwrap().insert(
+                id.clone(),
+                Kept { adapter: "held".into(), props, read_at_ms: 1, started_seq: 0 },
+            );
+        };
+
+        // Lets every parked write go even when an assertion fails, so the runtime can shut down.
+        struct Release(crate::storage::WriteGate);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.release();
+            }
+        }
+        let gate = crate::storage::write_gate_in(&home);
+        gate.hold();
+        let _release = Release(gate.clone());
+        set(800.0);
+        let first = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.save_kept().await }
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while gate.parked() == 0 {
+            assert!(Instant::now() < deadline, "the first write never reached the disk");
+            tokio::task::yield_now().await;
+        }
+
+        // The first caller goes away mid-write; a second save starts with newer values.
+        first.abort();
+        assert!(first.await.is_err(), "the first caller was cancelled");
+        set(1600.0);
+        let second = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.save_kept().await }
+        });
+        // Two writes must never be on the disk at once. Wait (bounded) for a second one to show
+        // up in the gate; with the writer held it never does.
+        let until = Instant::now() + Duration::from_millis(500);
+        while gate.parked() < 2 && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(gate.parked(), 1, "a second write reached the disk beside the first");
+
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(20), second)
+            .await
+            .expect("the second save finished")
+            .expect("the second save did not panic");
+        let bytes = std::fs::read(kept_values_path(&home)).expect("the kept values file exists");
+        let file: KeptValuesFile = serde_json::from_slice(&bytes).expect("the file parses");
+        let kept = file.devices.get("kept:mouse").expect("the device is in the file");
+        assert_eq!(
+            kept.values.get("dpi"),
+            Some(&canvas_proto::props::PropValue::Number(1600.0)),
+            "the file holds the newer values"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

@@ -1442,7 +1442,10 @@ error: a slow or stalled disk looked exactly like a dead daemon (#241).
   handler makes, and each runs on `spawn_blocking`, never under a store guard: the snapshots and
   the chain records (`chain_records::*_async`, used by every `api/chains.rs` call), the pattern
   and stack `put`s and deletes, the config import's three writes and its read-back, the first
-  run's zone sizes, the peripheral hub's kept values, the effect import and delete, and the
+  run's zone sizes, the peripheral hub's kept values (`save_kept`, serialised by the hub's `kept_writer`: it takes
+  the mutex first, builds the snapshot of the values after that, and writes in a spawned task that
+  owns the guard, so a dropped caller cannot free the mutex mid-write, two writes never overlap and
+  the last writer holds the newest values), the effect import and delete, and the
   editor's source read. `Patterns`/`Stacks` hold their `RwLock` only for the read and the swap,
   with a writer mutex across the disk write. A save that must undo a half-written pair does it on
   the blocking thread inside its `save` closure (the light delete puts `lights.json` back there),
