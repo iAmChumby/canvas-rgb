@@ -62,6 +62,17 @@ fn reply_stall() -> std::time::Duration {
         .unwrap_or_default()
 }
 
+/// Like [`reply_stall`], but applied only to the first reply of each connection: that is the
+/// handshake reply the adapter's 5 s deadline can time out on, and stalling just it proves the
+/// flake without pushing a rescan's own budget past its line (#519).
+fn first_reply_stall() -> std::time::Duration {
+    std::env::var("CANVAS_RGB_FAKE_REPLY_STALL_FIRST_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or_default()
+}
+
 /// The protocol version OpenRGB release_1.1 speaks (`NetworkProtocol.h:28`).
 const SERVER_PROTOCOL_VERSION: u32 = 6;
 
@@ -880,6 +891,7 @@ async fn serve(
 ) -> std::io::Result<()> {
     guard(&state).open.insert(connection);
     let _open = Open { state: Arc::clone(&state), connection };
+    let mut replies = 0_u64;
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0_u8; 4096];
     loop {
@@ -1017,7 +1029,8 @@ async fn serve(
                 changes.send_modify(|n| *n += 1);
                 continue;
             }
-            let stall = reply_stall();
+            let stall = if replies == 0 { first_reply_stall() } else { reply_stall() };
+            replies += 1;
             if !stall.is_zero() {
                 tokio::time::sleep(stall).await;
             }
