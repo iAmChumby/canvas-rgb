@@ -1228,6 +1228,40 @@ async fn a_stroke_changes_the_lit_devices_without_rebuilding_the_scene() {
     );
 }
 
+/// The editor's heartbeat sends the document that is already on the lights. The effect it would
+/// install restarts its clock and fits every frame again (`GroupSlot::install`), so a playing
+/// pattern would start over every five seconds: the same document is not installed again, and a
+/// different one is (#481).
+#[tokio::test]
+async fn the_same_document_again_is_not_installed_over_a_running_pattern() {
+    let rig = draft_rig(Vec::new()).await;
+    let blue = Rgb8::new(0, 0, 200);
+    let green = Rgb8::new(0, 200, 0);
+    let draft = pattern_with("Draft", LEDS, blue);
+    let (status, answer) = put_pattern_draft(&rig, &draft, EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "the first document").await;
+    let landed = rig.app.scene.takeover_generation();
+
+    let (status, answer) = put_pattern_draft(&rig, &draft, EPOCH, 2).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["applied"], serde_json::json!(true), "the beat still keeps the lease: {answer}");
+    assert_eq!(
+        rig.app.scene.takeover_generation(),
+        landed,
+        "the same document is not installed again, so its clock keeps running"
+    );
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "the same document still plays").await;
+
+    let (status, answer) = put_pattern_draft(&rig, &pattern_with("Draft", LEDS, green), EPOCH, 3).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        rig.app.scene.takeover_generation() > landed,
+        "a different document is installed, and its clock starts over"
+    );
+    shows_marked(&rig.a, LEDS as usize, 0, green, "the changed document").await;
+}
+
 #[tokio::test]
 async fn an_older_stroke_never_replaces_a_newer_one() {
     let rig = draft_rig(Vec::new()).await;
@@ -1934,4 +1968,97 @@ async fn a_sequence_group_reports_the_fit_of_the_whole_run() {
         want(vec![FitKind::Stretched, FitKind::Stretched, FitKind::Stretched])[..2].to_vec(),
         "a ring of 16"
     );
+}
+
+// ---------------------------------------------------------------- #481: the frames' memory across lights
+
+/// Waits (real time) until `sink`'s newest frame is one `ok` accepts.
+async fn shows_where(sink: &Rec, what: &str, ok: impl Fn(&[Rgb8]) -> bool) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        if sink.last().is_some_and(|f| ok(&f)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{what}: the frame never matched; last frame starts {:?}", sink.last().map(|f| f[..3.min(f.len())].to_vec()));
+}
+
+/// A pattern of `frames` frames of `LEDS` LEDs that each hold 10 ms, so it plays through them (a
+/// pattern with one frame, or with no time in its cycle, stands still and keeps none fitted).
+fn reel(frames: usize, lit: Rgb8) -> Pattern {
+    let mut reel = pattern_with("Reel", LEDS, lit);
+    let frame = reel.frames[0].clone();
+    reel.frames = (0..frames).map(|_| Frame { hold: 10, ..frame.clone() }).collect();
+    reel
+}
+
+/// A scene of two groups: `big` plays the reel on the lights of `big` (a strip each), `small` plays
+/// it on one ring of twelve.
+fn reel_scene(big: &[String]) -> ScenesFile {
+    let members: Vec<&str> = big.iter().map(String::as_str).collect();
+    ScenesFile {
+        schema_version: SCENES_SCHEMA,
+        active: "main".into(),
+        scenes: vec![Scene {
+            id: "main".into(),
+            name: "Main".into(),
+            rev: 1,
+            groups: vec![
+                group("big", &members, "pattern:Reel", Props::new()),
+                group("small", &["fake:a#z0"], "pattern:Reel", Props::new()),
+            ],
+        }],
+    }
+}
+
+/// Four strips of `sizes` LEDs and the ring of twelve the `small` group plays on.
+async fn reel_rig(sizes: [u32; 4]) -> Rig {
+    let blue = Rgb8::new(0, 0, 200);
+    let ids: Vec<String> = (0..4).map(|i| format!("fake:big{i}")).collect();
+    let mut devices = vec![device(A), device(B)];
+    let mut lights = vec![light(A), light(B)];
+    for (id, leds) in ids.iter().zip(sizes) {
+        devices.push(device_of(id, leds));
+        lights.push(light_of(id, Arrangement::Strip));
+    }
+    let big: Vec<String> = ids.iter().map(|id| format!("{id}#z0")).collect();
+    rig_full(vec![reel(256, blue)], reel_scene(&big), devices, lights).await
+}
+
+#[tokio::test]
+async fn a_pattern_past_the_scenes_frame_budget_is_dark_with_a_sentence_and_the_rest_play() {
+    // 256 frames on four different strips of about 4096 LEDs: 256 x 16 378 fitted LED-frames, past
+    // the 4 000 000 a scene keeps (one such light alone is 1 048 576, 28 MB and 124 ms to fit).
+    let rig = reel_rig([4096, 4095, 4094, 4093]).await;
+    let states = group_states(&rig).await;
+    let said = states.get("big").cloned().flatten().expect("the big group is dark and says why");
+    assert!(
+        said.contains("Reel has 256 frames") && said.contains("4192768") && said.contains("4000000"),
+        "the sentence names the pattern, its frames, its cost and the limit: {said}"
+    );
+    assert!(said.contains("fewer frames") && said.contains("fewer lights"), "and the way out: {said}");
+    assert_eq!(states.get("small"), Some(&None), "the group inside the budget is not failed");
+    // The group that fits plays the reel (LED 0 blue); every light of the group that does not is black.
+    shows_marked(&rig.a, LEDS as usize, 0, Rgb8::new(0, 0, 200), "the group inside the budget").await;
+    for id in ["fake:big0", "fake:big3"] {
+        shows_where(&sink(&rig, id), "a light of the group past the budget", |f| {
+            f.len() > 4000 && f.iter().all(|c| *c == Rgb8::BLACK)
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn lights_of_one_shape_cost_one_fit_so_the_same_four_lights_play() {
+    // The same four strips at 4096 LEDs each share one fitted set: 256 x 4096 = 1 048 576, inside it.
+    let rig = reel_rig([4096; 4]).await;
+    let states = group_states(&rig).await;
+    assert_eq!(states.get("big"), Some(&None), "four lights of one shape are one fit: {states:?}");
+    let want = Rgb8::new(0, 0, 200);
+    // The ring of twelve is stretched onto a strip of 4096 by LED order: its first colour covers the first LEDs.
+    shows_where(&sink(&rig, "fake:big0"), "a light of the shared fit", |f| {
+        f.len() == 4096 && f[0] == want && f[4095] == Rgb8::BLACK
+    })
+    .await;
 }

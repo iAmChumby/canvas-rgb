@@ -28,6 +28,7 @@ import {
   stopsFromColours,
   type GradientStop,
 } from "@/lib/gradient";
+import { draftDocument } from "@/lib/patternDraft";
 import {
   addFrame as addFrameTo,
   applyFps as applyFpsTo,
@@ -111,6 +112,8 @@ export interface PatternEditorState {
   /** A stop's drag began / ended: the moves between are one history entry. */
   beginStopDrag(): void;
   endStopDrag(): void;
+  /** Puts the document on the lights again, as it is drafted now: the owner pressed Play or Stop (#481). */
+  refresh(): void;
   /** The frames, in play order. */
   frames: Frame[];
   /** The frame being painted. */
@@ -175,6 +178,11 @@ export function usePatternEditor(
     getShapeLight?(lightId: string): Arrangement | undefined;
     /** The owner says why a write was skipped because the light had changed elsewhere (#491). */
     onShapeSkipped?(step: ShapeStep, expected: Arrangement, current: Arrangement): void;
+    /**
+     * True while the owner plays the frames in time. The draft carries the whole timeline then, and
+     * the selected frame alone otherwise, so painting frame 2 never animates the lights (#481).
+     */
+    isPlaying?(): boolean;
   },
 ): PatternEditorState {
   // The loaded document: the frame's colours padded to the device's LED count, so a pattern that
@@ -252,6 +260,12 @@ export function usePatternEditor(
     skippedShape.current = opts.onShapeSkipped;
   }, [opts.onShapeSkipped]);
 
+  /** Whether the lights play the whole timeline now, kept current without re-making the callbacks. */
+  const playingNow = useRef(opts.isPlaying);
+  useEffect(() => {
+    playingNow.current = opts.isPlaying;
+  }, [opts.isPlaying]);
+
   const flush = useCallback(() => {
     frame.current = null;
     const next = pending.current;
@@ -306,6 +320,17 @@ export function usePatternEditor(
     [flush],
   );
 
+  /**
+   * Queues what the lights get for these frames (#481): the selected frame as a still while the owner
+   * paints, the whole timeline while the owner plays. Painting must not animate the lights, and a
+   * pattern of one frame is fitted once instead of every frame again for every stroke.
+   */
+  const present = useCallback(
+    (frames: FrameDoc) =>
+      schedule(draftDocument(compose(frames), selectedRef.current, playingNow.current?.() ?? false)),
+    [compose, schedule],
+  );
+
   /** Makes these frames and this selection the document, and sends it to the lights. */
   const applyDoc = useCallback(
     (next: FrameDoc, at: number) => {
@@ -315,9 +340,9 @@ export function usePatternEditor(
       coloursRef.current = next.frames[index]?.colors ?? [];
       setDocState(next);
       setSelectedState(index);
-      schedule(compose(next));
+      present(next);
     },
-    [compose, schedule],
+    [present],
   );
 
   /** The selected frame's colours replaced. */
@@ -346,9 +371,9 @@ export function usePatternEditor(
       }
       motionRef.current = next;
       setMotionState(next);
-      schedule(compose(docRef.current));
+      present(docRef.current);
     },
-    [compose, pushUndo, schedule],
+    [present, pushUndo],
   );
 
   const beginMotionDrag = useCallback(() => {
@@ -516,9 +541,9 @@ export function usePatternEditor(
       // A ring wraps its gradient; a line does not: the stops are re-laid for the new shape.
       const g = gradientRef.current;
       if (g && g.wrap !== (shape === "ring")) applyGradient({ ...g, wrap: shape === "ring" }, "silent");
-      else schedule(compose(docRef.current));
+      else present(docRef.current);
     },
-    [applyGradient, compose, pushUndo, schedule],
+    [applyGradient, present, pushUndo],
   );
 
   const beginStroke = useCallback(() => {
@@ -808,9 +833,13 @@ export function usePatternEditor(
       selectedRef.current = index;
       coloursRef.current = docRef.current.frames[index]?.colors ?? [];
       setSelectedState(index);
+      // The lights show the frame being painted (#481); while the frames play they play on.
+      present(docRef.current);
     },
-    [],
+    [present],
   );
+
+  const refresh = useCallback(() => present(docRef.current), [present]);
 
   const addFrame = useCallback(() => {
     const made = addFrameTo(docRef.current, selectedRef.current);
@@ -891,6 +920,7 @@ export function usePatternEditor(
     setWrap,
     beginStopDrag,
     endStopDrag,
+    refresh,
     frames: doc.frames,
     selected,
     selectFrame,

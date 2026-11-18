@@ -313,6 +313,9 @@ struct RunGroup {
     factor: f32,
 }
 
+/// A light's LED count and arrangement: what a fitted frame set is keyed by (#481).
+type FitShape = (u32, Arrangement);
+
 /// A spinning pattern's per-light sources and its speed (#468).
 struct SpinPlay {
     /// Laps a second; never 0 (a pattern that does not turn is not a `SpinPlay`).
@@ -326,7 +329,9 @@ struct FramePlay {
     timeline: Timeline,
     /// Per light of the plan, in `plan.lights` order: every frame of the pattern fitted to the
     /// light, in position order (no `reversed` yet; that is applied after the blend and the turn).
-    frames: Vec<Vec<SpinSource>>,
+    /// Lights of one LED count and arrangement read the same set, fitted once (#481): the fit is
+    /// a function of the pattern and that shape, never of the light.
+    frames: Vec<Arc<Vec<SpinSource>>>,
     /// Per light: the blended frame a fade turns into, kept so a tick allocates nothing.
     blended: Vec<SpinSource>,
 }
@@ -380,20 +385,34 @@ impl RunGroup {
             return;
         }
         let mut sources = Vec::new();
-        let mut frame_sets: Vec<Vec<SpinSource>> = Vec::new();
+        let mut frame_sets: Vec<Arc<Vec<SpinSource>>> = Vec::new();
+        // The frame sets made so far, by the shape they were fitted to: a second light of that
+        // shape takes the same set instead of fitting every frame again (#481).
+        let mut made: Vec<(FitShape, Arc<Vec<SpinSource>>)> = Vec::new();
         let fitted: Vec<Vec<Rgb8>> = self
             .shapes
             .iter()
             .map(|(leds, arrangement)| {
                 let colors = fit_colors(source, &pattern.built_on, *leds, *arrangement);
                 if playing_frames {
-                    frame_sets.push(
-                        pattern
-                            .frames
-                            .iter()
-                            .map(|f| SpinSource::new(fit_colors(&f.colors, &pattern.built_on, *leds, *arrangement)))
-                            .collect(),
-                    );
+                    let shape = (*leds, *arrangement);
+                    let set = match made.iter().find(|(known, _)| *known == shape) {
+                        Some((_, set)) => Arc::clone(set),
+                        None => {
+                            let set: Arc<Vec<SpinSource>> = Arc::new(
+                                pattern
+                                    .frames
+                                    .iter()
+                                    .map(|f| {
+                                        SpinSource::new(fit_colors(&f.colors, &pattern.built_on, *leds, *arrangement))
+                                    })
+                                    .collect(),
+                            );
+                            made.push((shape, Arc::clone(&set)));
+                            set
+                        }
+                    };
+                    frame_sets.push(set);
                 } else if spin.is_some() {
                     sources.push(SpinSource::new(colors.clone()));
                 }
@@ -444,8 +463,8 @@ impl RunGroup {
             sources: vec![SpinSource::new(run.clone())],
         });
         if playing_frames {
-            let set: Vec<SpinSource> =
-                pattern.frames.iter().map(|f| SpinSource::new(fit(&f.colors))).collect();
+            let set: Arc<Vec<SpinSource>> =
+                Arc::new(pattern.frames.iter().map(|f| SpinSource::new(fit(&f.colors))).collect());
             self.spin = spin.map(|speed| SpinPlay { turns_per_s: f64::from(speed), sources: Vec::new() });
             self.frames = Some(FramePlay {
                 timeline,
@@ -1165,7 +1184,7 @@ fn play_frames(
     let (Some(set), Some(scratch)) = (frames.get(index), blended.get_mut(index)) else {
         return false;
     };
-    pattern_play::render(set, scratch, beat, spin, out)
+    pattern_play::render(set.as_slice(), scratch, beat, spin, out)
 }
 
 /// Multiplies every colour of one light by the group's brightness (`factor` is 0.0..=1.0).
