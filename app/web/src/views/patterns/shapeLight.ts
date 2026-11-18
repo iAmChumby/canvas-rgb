@@ -13,10 +13,11 @@ import type { LightView } from "@/proto/LightView";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 
 /**
- * The light a pattern built on `builtOn` is laid out by, or null when none of the lights fits: one
- * with this many LEDs and, for a grid, a matrix zone of the same cells.
+ * The lights a pattern built on `builtOn` could be laid out by, best first: ones with this many LEDs
+ * and, for a grid, a matrix zone of the same cells. More than one can fit (#481), so the header's
+ * shape picker offers a chooser rather than silently writing the first in the list.
  */
-export function referenceLight(builtOn: BuiltOn, lights: LightView[] | null, devices: DeviceInfo[] | null = null): LightView | null {
+export function referenceLights(builtOn: BuiltOn, lights: LightView[] | null, devices: DeviceInfo[] | null = null): LightView[] {
   const fits = (view: LightView): boolean => {
     if (view.led_count !== builtOn.led_count || view.led_count <= 0) return false;
     if (!builtOn.grid) return true;
@@ -24,7 +25,20 @@ export function referenceLight(builtOn: BuiltOn, lights: LightView[] | null, dev
     return zone?.kind.type === "matrix" && zone.kind.width === builtOn.grid.width && zone.kind.height === builtOn.grid.height;
   };
   const rank = (view: LightView) => (view.connected ? 0 : 2) + (view.light.arrangement === builtOn.arrangement ? 0 : 1);
-  return (lights ?? []).filter(fits).sort((a, b) => rank(a) - rank(b))[0] ?? null;
+  return (lights ?? []).filter(fits).sort((a, b) => rank(a) - rank(b));
+}
+
+/**
+ * The lights the header's chooser offers for a shape change (#481). The chooser says which light the
+ * shape change writes to, so it lists only lights already in the pattern's shape: a light of another
+ * arrangement would be a second shape change made from the chooser. When no light of this size is in
+ * the pattern's shape at all, every light of the size is offered, because then the shape picker's own
+ * change is what brings one into step.
+ */
+export function choosableLights(builtOn: BuiltOn, lights: LightView[] | null, devices: DeviceInfo[] | null = null): LightView[] {
+  const fits = referenceLights(builtOn, lights, devices);
+  const same = fits.filter((view) => view.light.arrangement === builtOn.arrangement);
+  return same.length > 0 ? same : fits;
 }
 
 /** The zone a light is, from the devices the daemon lists. */

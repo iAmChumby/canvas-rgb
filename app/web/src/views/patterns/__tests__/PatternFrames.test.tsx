@@ -414,6 +414,20 @@ describe("timing", () => {
     expect(sent().frames[0]!.transition).toEqual({ kind: "fade", ms: 300, easing: "ease_in" });
   });
 
+  it("shows mixed, not a made-up 10, when the holds differ, and a typed fps still sets them all (#481)", async () => {
+    show(framed([RED, GREEN, BLUE], [100, 900, 40]));
+    await settle();
+    fireEvent.click(screen.getByRole("radio", { name: "fps" }));
+    const field = screen.getByRole("textbox", { name: "Frames per second" }) as HTMLInputElement;
+    expect(field.value).toBe("");
+    expect(field.placeholder).toBe("mixed");
+    fireEvent.focus(field);
+    fireEvent.change(field, { target: { value: "12" } });
+    fireEvent.blur(field);
+    await frames();
+    expect(holds()).toEqual([83, 83, 83]);
+  });
+
   it("opens in fps when the holds are alike and every frame cuts", async () => {
     show(framed([RED, GREEN, BLUE], [100, 100, 100]));
     await settle();

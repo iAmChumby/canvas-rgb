@@ -9,7 +9,7 @@
 // before the first stop and after the last stay as those stops. Blending is in OKLab, the same
 // helper the daemon's Spin uses (`lib/oklab.ts`).
 
-import { hsvToHex } from "@/lib/color";
+import { BLACK_HEX, hsvToHex } from "@/lib/color";
 import { mixOklab } from "@/lib/oklab";
 
 export interface GradientStop {
@@ -37,6 +37,26 @@ export function seedStops(hue: number, wrap: boolean): GradientStop[] {
     at: wrap ? k / count : k / (count - 1),
     colour: hsvToHex({ h: (hue + (360 * k) / count) % 360, s: 0.85, v: 1 }),
   }));
+}
+
+/**
+ * Stops describing colours already painted on the device (#481): one stop per LED while there are
+ * few enough, otherwise an even sample of at most `MAX_STOPS`. On a device whose every LED has its
+ * own stop, applying the stops gives the same colours back; a larger device is only sampled, so the
+ * editor must not write the sampled blend back until the owner edits a stop.
+ */
+export function stopsFromColours(colours: readonly string[], wrap: boolean): GradientStop[] {
+  const n = colours.length;
+  if (n === 0) return seedStops(0, wrap);
+  const take = Math.min(n, MAX_STOPS);
+  const stops: GradientStop[] = [];
+  for (let k = 0; k < take; k++) {
+    const i = take === n ? k : Math.round((k * (n - 1)) / (take - 1));
+    stops.push({ at: ledPosition(i, n, wrap), colour: colours[i] ?? BLACK_HEX });
+  }
+  // A gradient keeps at least two stops; a one-LED device gets a flat pair.
+  if (stops.length === 1) stops.push({ at: wrap ? 0.5 : 1, colour: stops[0]!.colour });
+  return stops;
 }
 
 /** Where LED `index` of `leds` sits on 0..1 (see the header): `i / n` when wrapped, `i / (n - 1)` on a line. */
