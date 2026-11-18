@@ -119,6 +119,7 @@ mod tests {
             plays: Plays::Effect { effect: "solid".into(), props: Props::new() },
             mode: GroupMode::default(),
             brightness: 100,
+            sequence: None,
         }
     }
 

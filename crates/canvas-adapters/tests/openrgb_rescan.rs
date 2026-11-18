@@ -12,7 +12,7 @@
 //! no real hardware. Each wait is on state the assert reads; the long limit only ends a test that
 //! would hang.
 
-use canvas_adapters::fake::FakeOpenRgbServer;
+use canvas_adapters::fake::{DeviceEvent, FakeOpenRgbServer};
 use canvas_adapters::openrgb::{rescan_miss, OpenRgbAdapter, RescanMiss, RescanTiming};
 use canvas_proto::{AdapterError, DeviceAdapter, DeviceId, DeviceInfo, DeviceKind, Rgb8, ZoneInfo, ZoneKind};
 use std::time::Duration;
@@ -481,6 +481,13 @@ async fn a_settled_shorter_list_replaces_the_one_frames_are_written_to() {
 /// list has settled, the first frame to it must say SET_CUSTOM_MODE, or its lights stay on the
 /// built-in effect. No frame is written during the wait (the list is changing), and every frame
 /// after it lands.
+///
+/// The verdict is what the new object was sent, in the order the fake saw it (#499), read once the
+/// frame after the wait has reached it. It is not a count read at some moment: the frames before the
+/// detection leave the colours white and the mode count at 1 on the old object, so neither says that
+/// this frame arrived, and a count read right after `write_frame` returns can come before the fake
+/// has read the packet. Which task settles the list (the loop's frame or the rescan) and how many
+/// frames the loop sends after it change nothing the assert reads.
 #[tokio::test]
 async fn frames_resume_with_the_custom_mode_set_again_once_the_list_has_settled() {
     let server = v5_server(vec![stick("one"), stick("two")]).await;
@@ -505,10 +512,21 @@ async fn frames_resume_with_the_custom_mode_set_again_once_the_list_has_settled(
     }
     let settled = rescan.await.expect("the task ends");
     settled.expect("the detection settled");
-    assert!(refused > 10, "the loop did not run during the wait: {refused} frames refused");
+    // The wait is 300 ms of an empty list and the loop tries every 5 ms; one refusal is enough to show
+    // it ran while the list was changing (a starved machine runs it far fewer times than 10).
+    assert!(refused > 0, "the loop did not run during the wait: {refused} frames refused");
     assert_eq!(server.frames_to_unregistered(), 0, "a frame was sent to a controller OpenRGB had not registered");
 
     adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.expect("a frame after the list settled");
-    assert_eq!(server.wait_for_colors(0, &[Rgb8::WHITE; 8]).await, vec![Rgb8::WHITE; 8], "the frame after the wait did not land");
-    assert_eq!(server.custom_mode_writes(0), 2, "the controller that registered again was never put in custom mode");
+    let told = server.wait_for_events(0, |events| events.contains(&DeviceEvent::UpdateLeds)).await;
+    assert_eq!(
+        told.get(..2),
+        Some([DeviceEvent::SetCustomMode, DeviceEvent::UpdateLeds].as_slice()),
+        "the controller that registered again was not put in custom mode before its first frame: {told:?}"
+    );
+    assert_eq!(
+        told.iter().filter(|event| **event == DeviceEvent::SetCustomMode).count(),
+        1,
+        "the mode was set more than once on the new object: {told:?}"
+    );
 }

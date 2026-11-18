@@ -4,7 +4,7 @@ import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { ApiFailure } from "@/lib/errors";
 import { refreshAll } from "@/lib/store";
-import { waitForStackGuard } from "@/test/historyGuard";
+import { waitForStackGuard, plainEntry } from "@/test/historyGuard";
 import type { StacksResponse } from "@/proto/StacksResponse";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -60,7 +60,10 @@ beforeAll(() => {
     ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON: () => ({}) }) as DOMRect) as typeof Range.prototype.getBoundingClientRect;
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  plainEntry();
+  cleanup();
+});
 
 type PreviewCall = { at: number; epoch: string; seq: number; applied: boolean; stack?: { layers: Array<{ id: string; opacity: number }> } };
 type SaveCall = { at: number; id: string; layers: number };

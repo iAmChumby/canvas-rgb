@@ -94,6 +94,7 @@ fn run_on_both(engine: &Arc<dyn Engine>, effect: Box<dyn canvas_proto::Effect>, 
             brightness: 100,
             effect: Some(effect),
             props: props.clone(),
+            sequence: None,
         }],
         false,
     );

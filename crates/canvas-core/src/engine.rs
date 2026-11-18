@@ -320,6 +320,7 @@ impl CoreEngine {
             id: group.id,
             members: group.members,
             mode: group.mode,
+            sequence: group.sequence,
             brightness: group.brightness.min(100),
             effect,
             needs,
@@ -568,6 +569,7 @@ impl Engine for CoreEngine {
             brightness: 100,
             effect,
             props: props.clone(),
+            sequence: None,
         });
         let superseded = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());

@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { CaretLeft } from "@phosphor-icons/react";
+import { plainEntry } from "@/test/historyGuard";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
@@ -44,6 +45,7 @@ beforeAll(() => {
 });
 
 afterEach(async () => {
+  plainEntry();
   cleanup();
   phone = false;
   vi.restoreAllMocks();

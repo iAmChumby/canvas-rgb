@@ -171,6 +171,7 @@ pub fn migrate(layouts: Option<&LayoutsFile>, devices: &[DeviceInfo]) -> (Lights
                 plays,
                 mode: GroupMode::FlowAcross,
                 brightness: GROUP_BRIGHTNESS_MAX,
+                sequence: None,
             }]
         };
         scenes.push(Scene {

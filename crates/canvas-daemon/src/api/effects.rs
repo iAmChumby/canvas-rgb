@@ -1021,6 +1021,18 @@ pub async fn delete_effect(
     // One import or one delete at a time.
     let _guard = app.effect_writes.lock().await;
 
+    // The delete re-applies the active scene below, and an apply ends any takeover by clearing
+    // its flag (`scenes.rs`, `apply_body`). Hold the draft gate across the whole replace — the
+    // file work, the ending of a draft and the apply — so a takeover that lands while this runs
+    // waits for the delete instead of being forgotten by its apply (#500). This is the order
+    // `api/patterns.rs` uses: its gate (`:98`) is taken before its store write (`:115`) and it
+    // ends a draft with `stop_locked` (`:150`) under the same gate. Every route that takes all
+    // three locks orders them scene lock, then gate, then store (`api/chains.rs:406`,
+    // `api/lights.rs:186`, `api/stacks.rs:157,201`, `api/scenes.rs:638`, `effects.rs:218,235`):
+    // this route takes no scene lock, so it takes the gate before its store write and never
+    // inverts that order.
+    let _gate = app.draft.gate().lock().await;
+
     // The file is looked up without regard to case, the same way the import looks for
     // a clash.
     let path = crate::user_effects::existing_file(&app.effects_dir, &file_name)
@@ -1066,7 +1078,7 @@ pub async fn delete_effect(
         // the draft is in memory only, and deleting what the lights show is what the owner
         // asked for. The restore cannot build the file any more, so that group goes dark and
         // the note says so, in the answer as well as the log.
-        if let Some(ended) = crate::draft::stop(&app, None).await.ended {
+        if let Some(ended) = crate::draft::stop_locked(&app, None).await.ended {
             if let Some(note) = &ended.note {
                 tracing::warn!(%note, "the draft ended when its prior effect was deleted");
             }
