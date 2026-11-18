@@ -40,6 +40,12 @@ const CLOCK_WORDS: &[&str] = &[
     "took",
     "waited",
     "taken",
+    // A longest-gap measurement (#520: `stall < 600` on the longest stretch a ticker went without running).
+    "stall",
+    "stalled",
+    "stall_ms",
+    "longest_stall",
+    "longest_stall_ms",
     "as_millis()",
     "as_secs_f64()",
     "as_secs_f32()",
@@ -384,6 +390,10 @@ fn rule_1_catches_a_bound_on_a_measured_duration() {
         "assert!(t.elapsed().as_millis() < 50);",
         "assert!(waited <= std::time::Duration::from_secs(1));",
         "assert!(start.elapsed().as_secs_f64() < 0.5);",
+        // #520: the verdict of a test that measured the longest stretch a ticker did not run.
+        "assert!(stall < 600, \"the runtime ran no other task for {stall} ms during the rescan ({took:?} in all)\");",
+        "assert!(longest_stall_ms <= 600);",
+        "assert!(stalled < Duration::from_millis(600));",
     ] {
         let src = format!("fn t() {{\n    {bad}\n}}\n");
         assert_eq!(rules("crates/x/tests/a.rs", &src), vec![1], "{bad}");
