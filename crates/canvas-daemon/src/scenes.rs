@@ -1706,6 +1706,9 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
 /// A group a takeover holds is left alone: the takeover's own end applies the active scene, which
 /// builds the saved pattern. A group of a scene that is not active takes the change when that
 /// scene is applied. Nothing here writes the scene: the store already names the pattern.
+///
+/// The frame budget is one answer for the whole scene, so the groups it left dark are tried again
+/// here: a pattern that shrank elsewhere can bring them back without a full build (#518).
 pub async fn pattern_changed(app: &Arc<App>, id: &str) {
     // The scene order, as a save takes it: a scene write and this change never interleave.
     let _lock = app.scene.lock().await;
@@ -1729,15 +1732,27 @@ pub async fn pattern_changed(app: &Arc<App>, id: &str) {
     let mut changed = false;
     // The saved pattern may have more frames than the scene's lights can keep ready (#481).
     let pattern_over = scene_budget_refusals(app, &scene).await;
+    // A group the HTML limit left dark is not ours to build here (#419).
+    let over_html = groups_over_the_html_limit(app, &scene);
     for group in &scene.groups {
         let Plays::Effect { effect, props } = &group.plays else { continue };
         // A group that names the pattern in other case plays it (`Patterns::get` matches that
         // way), so the edit must reach it: compare as the store does.
-        if !effect.eq_ignore_ascii_case(id) {
-            continue;
-        }
+        let saved = effect.eq_ignore_ascii_case(id);
         // A group the takeover holds keeps the draft: its change lands when the takeover ends.
         if held.takeover.contains(&group.id) {
+            continue;
+        }
+        // The budget is one for the whole scene: another pattern may have shrunk, so a group this
+        // save does not name can fit again, and one may have grown past it, so a group this save
+        // does not name must go dark. Try every group the budget or a build left dark, and every
+        // group the budget now refuses, as a scene save does, instead of waiting for the next full
+        // build (#518). A group the HTML limit left dark stays dark: this save freed no runtime
+        // (#419).
+        let refused = pattern_over.contains_key(&group.id);
+        let dark = failures.contains_key(&group.id);
+        let limited = dark && over_html.contains(&group.id);
+        if !saved && !refused && (!dark || limited) {
             continue;
         }
         changed = true;
