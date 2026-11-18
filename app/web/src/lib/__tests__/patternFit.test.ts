@@ -1,20 +1,24 @@
-// The pattern fit in the editor, checked against the Rust rule's own vectors.
+// The pattern fit in the editor, checked against the Rust rules' own vectors.
 //
 // The daemon decides the colours an LED gets (crates/canvas-core/src/pattern_fit.rs, whose kind
-// rule is crates/canvas-proto/src/pattern.rs `fit_kind`). The editor never computes colours: it
-// marks a device with the same kind the daemon will use, so the two must agree. The vectors are
-// the Rust tests' own cases (pattern.rs `fit_kind_follows_the_rule_order` and the fit_colors
-// tests), written down once in patternFit.vectors.json.
+// rule is crates/canvas-proto/src/pattern.rs `fit_kind`) and the fit a group reports (the run of
+// a sequence group, the lights with no LEDs, the 4096-LED cap: `member_fits` in
+// crates/canvas-daemon/src/scenes.rs). The editor never computes colours: it marks a device with
+// the same kind the daemon will use, so the two must agree. The vectors are printed by the Rust
+// example `crates/canvas-daemon/examples/pattern_fit_vectors.rs` from those rules, written down
+// once in patternFit.vectors.json.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { fitKind, groupFit, kindWords, withColors } from "@/lib/patternFit";
+import { MAX_ZONE_LEDS } from "@/lib/arrangement";
+import { fitKind, groupFit, kindWords, lightFits, withColors } from "@/lib/patternFit";
 import type { Arrangement } from "@/proto/Arrangement";
 import type { BuiltOn } from "@/proto/BuiltOn";
 import type { FitKind } from "@/proto/FitKind";
 import type { LightView } from "@/proto/LightView";
 import type { Pattern } from "@/proto/Pattern";
+import type { SequenceShape } from "@/proto/SequenceShape";
 
 interface VectorCase {
   name: string;
@@ -25,10 +29,30 @@ interface VectorCase {
   fit: FitKind;
 }
 
+/** One member of a run case: the light, its zone's LEDs, and whether the device is listed. */
+interface RunMember {
+  light: string;
+  arrangement: Arrangement;
+  zone_leds: number | null;
+  connected: boolean;
+}
+
+/** One group's fit: a pattern, the group's members and its shape, and the daemon's verdicts. */
+interface RunCase {
+  name: string;
+  from: string;
+  built_on: { led_count: number; arrangement: Arrangement; grid?: { width: number; height: number } };
+  sequence: SequenceShape | null;
+  members: RunMember[];
+  fits: { light: string; fit: FitKind }[];
+}
+
 interface Vectors {
   rule: string;
   source: string[];
+  zone_led_cap: number;
   cases: VectorCase[];
+  run_cases: RunCase[];
 }
 
 /**
@@ -129,19 +153,45 @@ describe("the pattern fit", () => {
     expect(groupFit(on(26, "strip"), three, "line")).toEqual({ exact: 3, flagged: 0, total: 3 });
   });
 
-  it("groupFit leaves out a light that is not connected or has no LEDs", () => {
+  it("lightFits matches the daemon's member_fits on the shared run vectors", () => {
+    const file = vectors();
+    // A trimmed or stale file fails here rather than passing quietly.
+    expect(file.run_cases.length).toBe(10);
+    for (const testCase of file.run_cases) {
+      const lights = testCase.members.map((member) => {
+        // A light whose device is not listed reads no LEDs, as `GET /lights` answers it.
+        const view = light(member.light, member.zone_leds ?? 0, member.arrangement);
+        return { ...view, connected: member.connected && member.zone_leds !== null };
+      });
+      expect(
+        lightFits(testCase.built_on, lights, testCase.sequence),
+        `${testCase.name}: ${testCase.from}`,
+      ).toEqual(testCase.fits);
+    }
+  });
+
+  it("the editor caps a light at the daemon's 4096, as the run vectors assume", () => {
+    // The cap is a constant on both sides, so a change to one alone can move no case's verdict:
+    // the file carries the Rust value and the editor must agree with it.
+    expect(MAX_ZONE_LEDS).toBe(vectors().zone_led_cap);
+  });
+
+  it("groupFit leaves out only a light with no LEDs, as the daemon does (#504)", () => {
     const built = on(12, "ring");
-    // The daemon plays nothing on a light whose device is gone or whose zone has no LEDs, so it is
-    // neither a fit nor stretched: it is not counted at all.
-    const unplugged: LightView = { ...light("unplugged", 0, "ring"), connected: false };
+    // The daemon plays nothing on a light whose zone has no LEDs, so it is neither a fit nor
+    // stretched: it is not counted at all.
     const empty = light("empty zone", 0, "ring");
-    expect(groupFit(built, [light("ring 12", 12, "ring"), unplugged, empty])).toEqual({
+    expect(groupFit(built, [light("ring 12", 12, "ring"), empty])).toEqual({
       exact: 1,
       flagged: 0,
       total: 1,
     });
-    // A group of none of those is nothing to count, exactly as an empty group is.
-    expect(groupFit(built, [unplugged, empty])).toEqual({ exact: 0, flagged: 0, total: 0 });
+    expect(groupFit(built, [empty])).toEqual({ exact: 0, flagged: 0, total: 0 });
+    // A device that is listed but not connected still has its LEDs: the daemon's
+    // `light_led_count` asks only for the zone, so the light keeps its place in the run. The
+    // editor used to drop it, which made its run shorter than the daemon's.
+    const unplugged: LightView = { ...light("unplugged", 12, "ring"), connected: false };
+    expect(groupFit(built, [unplugged])).toEqual({ exact: 1, flagged: 0, total: 1 });
   });
 
   it("the document to save is the loaded pattern with its first frame's colours", () => {
