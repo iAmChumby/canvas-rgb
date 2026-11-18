@@ -19,6 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use canvas_proto::device::DeviceInfo;
@@ -27,8 +28,146 @@ use crate::displays::{DisplaysFile, DISPLAYS_FILE, DISPLAYS_SCHEMA};
 use crate::paths;
 use crate::peripherals::{PeripheralsFile, PERIPHERALS_FILE, PERIPHERALS_SCHEMA};
 
+/// A test-only gate in the atomic writer (#241).
+///
+/// Production never creates it: [`write_atomic`] looks the gate up with `OnceLock::get`, which
+/// finds nothing unless a test called [`write_gate`], and a gate that is not held passes at once.
+/// A test holds it to model a slow or stalled disk and watches [`WriteGate::wait_until_entered`]
+/// to know a write is parked there. It is a type on its own, not `#[cfg(test)]`, so a test in
+/// `tests/` can reach it the same way it reaches the daemon's other seams.
+#[derive(Debug, Clone, Default)]
+pub struct WriteGate {
+    inner: Arc<WriteGateInner>,
+}
+
+#[derive(Debug, Default)]
+struct WriteGateInner {
+    state: std::sync::Mutex<WriteGateState>,
+    changed: std::sync::Condvar,
+    entered: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct WriteGateState {
+    held: bool,
+    released: bool,
+    /// The next write that passes the gate fails with an injected I/O error instead of writing.
+    fail_next: bool,
+}
+
+static WRITE_GATE: std::sync::OnceLock<WriteGate> = std::sync::OnceLock::new();
+
+/// Gates that cover one folder, so tests that run side by side in one process each stall only
+/// their own home. Created by [`write_gate_in`].
+static FOLDER_GATES: std::sync::OnceLock<std::sync::Mutex<Vec<(PathBuf, WriteGate)>>> =
+    std::sync::OnceLock::new();
+
+/// The writer gate for writes under `dir`. Calling this creates it, so only a test does; the same
+/// folder gives the same gate. A write outside `dir` never meets it.
+pub fn write_gate_in(dir: &Path) -> WriteGate {
+    let mut gates = FOLDER_GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some((_, gate)) = gates.iter().find(|(folder, _)| folder == dir) {
+        return gate.clone();
+    }
+    let gate = WriteGate::default();
+    gates.push((dir.to_path_buf(), gate.clone()));
+    gate
+}
+
+/// Passes `path` through every gate that covers it.
+fn pass_gates(path: &Path) -> std::io::Result<()> {
+    if let Some(gate) = WRITE_GATE.get() {
+        gate.pass()?;
+    }
+    let Some(gates) = FOLDER_GATES.get() else {
+        return Ok(());
+    };
+    let covering: Vec<WriteGate> = gates
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(folder, _)| path.starts_with(folder))
+        .map(|(_, gate)| gate.clone())
+        .collect();
+    for gate in covering {
+        gate.pass()?;
+    }
+    Ok(())
+}
+
+/// The process-wide writer gate. Calling this creates it, so only a test does; until then
+/// [`write_atomic`] finds no gate and skips it.
+pub fn write_gate() -> &'static WriteGate {
+    WRITE_GATE.get_or_init(WriteGate::default)
+}
+
+impl WriteGate {
+    /// Parks the next write here until [`WriteGate::release`] is called.
+    pub fn hold(&self) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.held = true;
+        state.released = false;
+        self.inner.entered.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Makes the next write fail with an injected I/O error, as a full or read-only disk does. If
+    /// the gate is also held, the write fails once it is released; the file on disk is untouched.
+    pub fn fail_next(&self) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.fail_next = true;
+    }
+
+    /// Lets a parked write finish.
+    pub fn release(&self) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.released = true;
+        self.inner.changed.notify_all();
+    }
+
+    /// How many writes are parked in the gate right now.
+    pub fn parked(&self) -> usize {
+        self.inner.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Waits until a write is parked in the gate. `true` means one got here.
+    pub fn wait_until_entered(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if self.inner.entered.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        self.inner.entered.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
+    /// Called by [`write_atomic`] before it touches the disk. An error stops the write.
+    fn pass(&self) -> std::io::Result<()> {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.held && !state.released {
+            self.inner.entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            while state.held && !state.released {
+                state = self.inner.changed.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+            self.inner.entered.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            state.held = false;
+            state.released = false;
+        }
+        if std::mem::take(&mut state.fail_next) {
+            return Err(std::io::Error::other("injected write failure"));
+        }
+        Ok(())
+    }
+}
+
 /// Writes `bytes` to `path` atomically (temp file in the same dir, then rename).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // The gates exist only once a test has asked for one (`write_gate()`, `write_gate_in()`): a
+    // daemon never creates them, so this is two atomic loads that find nothing.
+    pass_gates(path)?;
     let dir = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} has no parent", path.display()))
     })?;

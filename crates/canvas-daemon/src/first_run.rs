@@ -397,13 +397,15 @@ pub async fn size_headers(
             schema_version: canvas_proto::config::ZONES_SCHEMA,
             sizes: guard.clone(),
         };
-        crate::logging::warn_if_err(
-            "the first run could not save the zone sizes",
-            crate::storage::write_json(&home.join(canvas_proto::config::ZONES_FILE), &file),
-        );
+        // On a blocking thread: the write syncs to disk (#241).
+        let (path, to_write) = (home.join(canvas_proto::config::ZONES_FILE), file.clone());
+        let written = tokio::task::spawn_blocking(move || crate::storage::write_json(&path, &to_write))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+        crate::logging::warn_if_err("the first run could not save the zone sizes", written);
         drop(guard);
         // The store's copy is what a chain commit and an export write back: keep it in step.
-        app.store.write().await.zones.sizes = file.sizes;
+        crate::store_io::store_edit(app, |store| store.zones.sizes = file.sizes).await;
     }
 
     // Read the devices again, so the scene and the engine see the new LED counts (the list
@@ -421,22 +423,31 @@ pub async fn size_headers(
 
     // The lights that come of the sizing join the hardware map, and the first-run scene takes
     // them: they were skipped when the scene was made, because the headers had no LEDs then.
-    {
-        let mut store = app.store.write().await;
-        let added = store.sync_lights_from(&devices);
-        if added > 0 {
-            tracing::info!(added, "the sized headers are lights now");
-        }
-        // A migration that is still held (the layouts place a device that has not arrived)
-        // runs now, with the devices the sizing left.
-        store.finish_scenes(&devices);
-        if store.refresh_first_run_scene() {
-            tracing::info!("the first run's scene holds every light");
-            crate::logging::warn_if_err(
-                "the first run could not save the scenes",
-                store.save_scenes(),
-            );
-        }
+    let for_store = devices.to_vec();
+    let saved = crate::store_io::store_save(
+        app,
+        |_store| Ok(()),
+        move |store| {
+            let added = store.sync_lights_from(&for_store);
+            if added > 0 {
+                tracing::info!(added, "the sized headers are lights now");
+            }
+            // A migration that is still held (the layouts place a device that has not arrived)
+            // runs now, with the devices the sizing left.
+            store.finish_scenes(&for_store);
+            if store.refresh_first_run_scene() {
+                tracing::info!("the first run's scene holds every light");
+                crate::logging::warn_if_err(
+                    "the first run could not save the scenes",
+                    store.save_scenes(),
+                );
+            }
+            Ok(())
+        },
+    )
+    .await;
+    if let Err(e) = saved {
+        tracing::warn!(error = %e.message, "the first run could not write its lights and scenes to the store");
     }
     devices
 }
@@ -528,15 +539,25 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
         tracing::info!(scene = %scene.name, groups = scene.groups.len(), effect = FIRST_RUN_EFFECT, "the first run applied the default scene");
     }
 
-    // The zone panel stays open until the user dismisses it.
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        store.config.first_run_done = true;
-        crate::logging::warn_if_err("the first run could not save first_run_done; it will run again", store.save_config());
-    }
+    // The zone panel stays open until the user dismisses it. The save goes through the store
+    // helper, so the file write is off the runtime worker and the store lock (#241).
+    let saved = crate::store_io::store_save(
+        app,
+        |store| {
+            store.config.first_run_done = true;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| crate::api::ApiFailure::internal(e.to_string()))
+        },
+    )
+    .await;
+    crate::logging::warn_if_err(
+        "the first run could not save first_run_done; it will run again",
+        saved.map_err(|e| e.message),
+    );
     tracing::info!("the first run is done");
 }
 

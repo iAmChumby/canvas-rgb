@@ -147,21 +147,27 @@ async fn resize_the_zone(
             .map_err(|e| ApiFailure::internal(format!("could not resize the zone: {e}")))?;
     }
 
-    // Save it.
+    // Save it off the runtime worker, so a slow disk cannot block a request (#241).
     {
         let home = app.store.read().await.home.clone();
-        let mut zones = app.zones.write().await;
-        zones.entry(id.clone()).or_default().insert(zone, led_count);
-        let file = home.join(canvas_proto::config::ZONES_FILE);
-        let snapshot = canvas_proto::config::ZonesFile {
-            schema_version: canvas_proto::config::ZONES_SCHEMA,
-            sizes: zones.clone(),
+        let sizes = {
+            let mut zones = app.zones.write().await;
+            zones.entry(id.clone()).or_default().insert(zone, led_count);
+            zones.clone()
         };
-        crate::storage::write_json(&file, &snapshot)
-            .map_err(|e| ApiFailure::internal(format!("could not save the zone sizes: {e}")))?;
-        drop(zones);
+        let snapshot = tokio::task::spawn_blocking(move || {
+            let file = home.join(canvas_proto::config::ZONES_FILE);
+            let snapshot = canvas_proto::config::ZonesFile {
+                schema_version: canvas_proto::config::ZONES_SCHEMA,
+                sizes,
+            };
+            crate::storage::write_json(&file, &snapshot).map(|()| snapshot)
+        })
+        .await
+        .map_err(|e| ApiFailure::internal(format!("the zone size write did not finish: {e}")))?
+        .map_err(|e| ApiFailure::internal(format!("could not save the zone sizes: {e}")))?;
         // The store's copy is what a chain commit and an export write back: keep it in step.
-        app.store.write().await.zones.sizes = snapshot.sizes;
+        crate::store_io::store_edit(app, |store| store.zones.sizes = snapshot.sizes).await;
     }
 
     // Re-discover so the device list carries the new LED count, then re-set the layout.
@@ -311,28 +317,39 @@ async fn set_white_balance(
         )));
     }
     let device_id = DeviceId(id);
-    {
-        let mut store = app.store.write().await;
-        // Kept so a failed save leaves memory as it was: never ahead of the disk and the engine.
-        let before = store.config.white_balance.clone();
-        let map = &mut store.config.white_balance;
-        if balance == WhiteBalance::NEUTRAL {
-            map.remove(&device_id);
-        } else {
-            if !map.contains_key(&device_id) && map.len() >= WHITE_BALANCE_MAX_DEVICES {
-                return Err(ApiFailure::validation(format!(
-                    "at most {WHITE_BALANCE_MAX_DEVICES} devices can carry a white balance"
-                )));
+    let key = device_id.clone();
+    let engine = Arc::clone(&app.engine);
+    crate::store_io::store_save_rolled(
+        app,
+        |store| {
+            // Kept so a failed save leaves memory as it was: never ahead of the disk and the engine.
+            let before = store.config.white_balance.clone();
+            let map = &mut store.config.white_balance;
+            if balance == WhiteBalance::NEUTRAL {
+                map.remove(&key);
+            } else {
+                if !map.contains_key(&key) && map.len() >= WHITE_BALANCE_MAX_DEVICES {
+                    return Err(ApiFailure::validation(format!(
+                        "at most {WHITE_BALANCE_MAX_DEVICES} devices can carry a white balance"
+                    )));
+                }
+                map.insert(key.clone(), balance);
             }
-            map.insert(device_id.clone(), balance);
-        }
-        if let Err(e) = store.save_config() {
+            Ok(((), before))
+        },
+        move |store| {
+            store.save_config()?;
+            // Applied with the save, under the writer mutex, so two PUTs reach the engine in the
+            // order they reach the disk.
+            engine.set_white_balance(white_balance_map(&store.config));
+            Ok(())
+        },
+        |before, store, e, _| {
             store.config.white_balance = before;
-            return Err(ApiFailure::internal(format!("could not save the config: {e}")));
-        }
-        // Applied under the store lock: two PUTs reach the engine in the order they reach the disk.
-        app.engine.set_white_balance(white_balance_map(&store.config));
-    }
+            ApiFailure::internal(format!("could not save the config: {e}"))
+        },
+    )
+    .await?;
     tracing::info!(
         device = %device_id, red = balance.red, green = balance.green, blue = balance.blue,
         "white balance set"

@@ -43,16 +43,20 @@ pub async fn put_settings(
         crate::api::output::apply_power(&app, settings.power)?;
     }
 
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        store.config.settings = settings.clone();
-        store
-            .save_config()
-            .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))?;
-    }
+    let persisted = settings.clone();
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            store.config.settings = persisted;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
 
     Ok(Json(settings))
 }
@@ -61,16 +65,19 @@ pub async fn put_settings(
 ///
 /// The "size your ARGB headers" panel goes away and stays away.
 pub async fn dismiss_zone_panel(State(app): State<Arc<App>>) -> ApiResult<Json<serde_json::Value>> {
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        store.config.zone_panel_dismissed = true;
-        store
-            .save_config()
-            .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))?;
-    }
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            store.config.zone_panel_dismissed = true;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -78,13 +85,19 @@ pub async fn dismiss_zone_panel(State(app): State<Arc<App>>) -> ApiResult<Json<s
 ///
 /// The user reached Done in the onboarding. The window stops opening by itself.
 pub async fn complete_onboarding(State(app): State<Arc<App>>) -> ApiResult<Json<serde_json::Value>> {
-    {
-        let mut store = app.store.write().await;
-        store.config.onboarding_complete = true;
-        store
-            .save_config()
-            .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))?;
-    }
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            store.config.onboarding_complete = true;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -282,21 +295,32 @@ pub async fn config_import(
     }
 
     let home = app.store.read().await.home.clone();
-    crate::storage::import_bundle_rated(&home, &bundle, &devices, rated_cpu, rated_gpu)
-        .map_err(|e| match &e {
-            // A file this machine cannot read refuses the import (nothing was written), and a
-            // scene that cannot be made valid is the bundle's fault: both are the caller's to
-            // fix, not an internal failure.
-            crate::storage::ImportError::Blocked(_) => ApiFailure::conflict(e.to_string()),
-            crate::storage::ImportError::Scenes(_) => ApiFailure::validation(e.to_string()),
-            _ => ApiFailure::internal(format!("could not import the config: {e}")),
-        })?;
-    crate::stacks::write_file(&home, &stacks)
-        .map_err(|e| ApiFailure::internal(format!("could not save the stacks: {e}")))?;
-    // A bundle from before patterns has none, and importing it replaces the saved patterns with
-    // none, as it does the stacks.
-    crate::patterns::write_file(&home, &patterns)
-        .map_err(|e| ApiFailure::internal(format!("could not save the patterns: {e}")))?;
+    // The three writes run on a blocking thread, in the order they always had: each syncs to disk,
+    // so on a stalled disk they must not hold a runtime worker (#241).
+    let written = {
+        let (home, bundle, devices) = (home.clone(), bundle.clone(), devices.clone());
+        let (stacks, patterns) = (stacks.clone(), patterns.clone());
+        tokio::task::spawn_blocking(move || -> Result<(), ApiFailure> {
+            crate::storage::import_bundle_rated(&home, &bundle, &devices, rated_cpu, rated_gpu)
+                .map_err(|e| match &e {
+                    // A file this machine cannot read refuses the import (nothing was written),
+                    // and a scene that cannot be made valid is the bundle's fault: both are the
+                    // caller's to fix, not an internal failure.
+                    crate::storage::ImportError::Blocked(_) => ApiFailure::conflict(e.to_string()),
+                    crate::storage::ImportError::Scenes(_) => ApiFailure::validation(e.to_string()),
+                    _ => ApiFailure::internal(format!("could not import the config: {e}")),
+                })?;
+            crate::stacks::write_file(&home, &stacks)
+                .map_err(|e| ApiFailure::internal(format!("could not save the stacks: {e}")))?;
+            // A bundle from before patterns has none, and importing it replaces the saved
+            // patterns with none, as it does the stacks.
+            crate::patterns::write_file(&home, &patterns)
+                .map_err(|e| ApiFailure::internal(format!("could not save the patterns: {e}")))?;
+            Ok(())
+        })
+        .await
+    };
+    written.map_err(|e| ApiFailure::internal(format!("the config import did not finish: {e}")))??;
 
     // A draft on the lights holds the layout's effect from before the import as its prior,
     // and the import brings a layout of its own. The draft ends here, before the store is
@@ -329,14 +353,11 @@ pub async fn config_import(
         }
 
         // Reload the store from disk and apply it.
-        let store = crate::storage::Store::load_from(&home);
-        {
-            let mut guard = app
-                .store
-                .write()
-                .await;
-            *guard = store;
-        }
+        let reload_from = home.clone();
+        let loaded = tokio::task::spawn_blocking(move || crate::storage::Store::load_from(&reload_from))
+            .await
+            .map_err(|e| ApiFailure::internal(format!("the imported config could not be read back: {e}")))?;
+        crate::store_io::store_edit(&app, |guard| *guard = loaded).await;
         // The stacks are read again from the file the import wrote, so the library shows them at
         // once and the next frame resolves them against the new layout.
         app.stacks.reload_with(&known);

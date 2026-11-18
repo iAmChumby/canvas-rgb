@@ -975,6 +975,10 @@ fn the_load_budget_covers_all_scripts_together() {
     // them fits inside the budget on its own, as measured above. The count is computed in
     // floating point and capped before it becomes a `usize`.
     let scripts = (budget_seconds / one_script).ceil().min(62.0) as usize + 2;
+    // The measurements, printed so a repeated run (#72) can read their spread off `--nocapture`.
+    eprintln!(
+        "load-budget per_iter={per_iter:.6e} s one_script={one_script:.4} s iterations={iterations} scripts={scripts} budget={budget_seconds:.3} s"
+    );
     let result = HtmlEffect::from_source("t", &page(iterations, scripts), &Props::new());
     assert!(
         matches!(result, Err(canvas_html::HtmlError::Timeout(_))),

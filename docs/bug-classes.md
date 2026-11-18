@@ -648,18 +648,21 @@ line. Three mechanisms, and one bug the timing only exposed.
     fixed cost of a load, then adds scripts until the total passes the budget, so it drives the real
     shared-budget path (`remaining_budget` is also unit-checked); the cost of one script is the best of
     three loads. The tile test sizes its frames from the best of three samples after a warm-up and bounds
-    the hold to the budget plus one calibrated frame (about 0.5 s, a constant once measured).
+    the hold to the budget plus ONE frame, measured from the built effect itself (best of three samples after a warm-up), so the slack follows the machine instead of a constant half second.
   - #59: `app/web/vitest.setup.ts` raises `asyncUtilTimeout` to 10 s and `vitest.config.mts` raises
     `testTimeout` to 20 s, from `vitest.limits.ts`; `src/test/setup.test.tsx` pins both and finds an
     element that appears after 1.5 s. A `findBy*` returns when its element appears, so a pass costs nothing.
   - #36: the main thread's panic line is written straight into the day's log file, in one write bounded
     to 250 ms (`logging::write_line_direct_within`), to the file the appender names for today's UTC date
-    (made if the appender has not made it yet; a reparse point is refused). The tracing copy is only the
+    (made if the appender has not made it yet; a reparse point is refused on BOTH paths now: the direct
+    writer and the rolling appender's own `create_writer`, which pre-opens today's file the same way). The
+    tracing copy is only the
     fallback when that write failed or had not begun at the limit; a write that has begun and lands late
     owns the line, so the line is in the file at most once. A stalled disk can still lose it, and a
     panic on any thread but the main one still goes through the queue. The hook's logic is tested with a
-    stuck queue and an injected writer (`exit_log::the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck`);
-    the production writer it is installed with at startup has no test that fails on the old hook (open).
+    stuck queue and an injected writer (`exit_log::the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck`),
+    and now through the REAL hook too (`the_real_hook_writes_the_panic_line_to_todays_file_while_the_queue_is_stuck`),
+    which installs `install_panic_hook` and fails on the old queue-only hook.
   - #72: `a_panicking_helper_lets_the_caller_write_the_fallback` (`crates/canvas-daemon/src/logging.rs`)
     rode a 50 ms window: the helper's panic had to finish inside it, or the caller read "the helper owns
     the line" and skipped the fallback, and the line was lost. Measured: with `RUST_BACKTRACE=1` the
@@ -744,10 +747,20 @@ line. Three mechanisms, and one bug the timing only exposed.
   and its test, not by the scan); hand-made log subscribers (no rule); a missing log line (#45/#55: the
   cause is now known and it is not the clock, it is tracing's callsite interest cache; the helper holds
   the line, the scan cannot see a subscriber).
+  - #72, the fix pass on PR #521: `openrgb_supervisor.rs`
+    `an_unsettled_detection_says_openrgb_is_still_detecting_and_which_list_answers` read `Unsettled` off a
+    real 500 ms cap, so a 700 ms stall before the packet-140 ACK gave "did not acknowledge the rescan". It
+    now uses a 30 s cap, waits on the fake's packet-140 count and the adapter's ACK count, and pauses the
+    clock only after that I/O is done (a clock paused from the start runs to the cap while the runtime
+    waits on the socket); the fake can hold the ACK back (`delay_the_rescan_ack`) so the 700 ms stall is
+    in the test. `cli.rs` `serve_once` stopped accepting at a 2 s wall deadline; it now accepts until a
+    stop flag the test sets after the request returns, and the silent daemon reads until the client drops
+    instead of sleeping 2 s.
 - **Sibling search:** the allow-list entries marked "open" are the siblings: `timer.rs` upper bounds
   (3 tests), `effects_import.rs` and `quit.rs` ceilings, the `canvas-core/src/tests.rs` "sleep 300 ms
-  then expect parked" tests and `wave1.rs`, and the `api.rs` onboarding timers (60-350 ms sleeps against
-  100 ms timers on a compressed time scale, `transient.rs`), the riskiest. Also open: a log capture that
+  then expect parked" tests and `wave1.rs`. The `api.rs` onboarding timers (60-350 ms sleeps against
+  100 ms timers on a compressed time scale, `transient.rs`) now run on tokio's paused clock, so the
+  sleeps advance virtual time and no real-time window decides their verdict (#72). Also open: a log capture that
   is still not on a shared helper that carries the keeper. Delete an entry when its test is fixed.
   - **The siblings of #170 and #178 (same shape, not yet fixed):** the other tests in
     `crates/canvas-svc/src/openrgb_tests.rs` that pair a `tokio::time::interval` with
@@ -1393,3 +1406,84 @@ whose meaning is how high it reaches).
   does not cover: an effect in another crate that the daemon wraps without saying so, and the
   blend of a stack whose layers answer differently (the stack answers the cell, and the top
   layer's cell is what a strip shows).
+
+### `cause:blocking-io`: a synchronous file write inside an async handler, under the store lock
+
+The daemon's config, scenes, lights, effects, zones, displays and peripherals are written by
+synchronous methods on `Store` (temp file, flush, `sync_all`, rename). A handler that took
+`app.store.write().await`, changed the store and called one of those methods while holding the
+guard parked a Tokio worker on the disk and made every reader wait for the write through the same
+lock. The API port kept listening, so the editor showed "Daemon connecting" rather than an
+error: a slow or stalled disk looked exactly like a dead daemon (#241).
+
+- [#241](https://github.com/iAmChumby/canvas-rgb/issues/241): the part-1 report
+  (`.build/reports/t3-241.md`, main checkout) found the same fault shape at the settings, audio,
+  scenes, effects, chains and device-sync routes but could not reproduce a permanent hang on the
+  fakes: without a slow disk the writes finish in milliseconds. The re-find on the same base
+  listed the sites below; the writes are bounded by the disk, not permanent, so a test needs an
+  injected slow writer to expose them.
+- **Class fix:** done (#241). The helpers in `crates/canvas-daemon/src/store_io.rs` are the only
+  path that writes the store from async code: `store_save` and `store_save_rolled` change memory
+  under the store write lock, drop it, and write a snapshot on `spawn_blocking`; `store_publish`
+  changes a copy and publishes it only after the write succeeded; `store_edit` covers mutations
+  with no save. A reader never waits for the disk. Three rules hold for every helper, and the
+  first review of this fix (`.build/reports/r-517.md`, main checkout) found the rewrite had
+  broken all three:
+  1. **Read-modify-write is atomic.** The per-App writer mutex is taken before the closure that
+     decides what to change, and held to the commit. A route finds its target (a light by id, a
+     preset by name, the `expected` props) inside that closure, never before it: reading under
+     a read lock and writing later lost presets, patched the wrong light after a delete, and let
+     two replaces with the same `expected` both win. A recovery path puts back only what the
+     route took (`restore_favorite`, `restore_effects`), never a whole `effects` clone from before.
+  2. **A save outlives its caller.** After the mutation the write, the commit and the rollback run
+     in a spawned task that owns the writer guard, and the handler only awaits its handle. A client
+     that drops mid-save (the editor aborts a fetch during the very stall this fixes) cannot leave
+     memory changed and disk not, and the next save cannot start while the write is still on its
+     blocking thread, so no two writes to one target share the temp name. Nothing awaits between
+     the mutation and the spawn. One helper call is cancel-safe on its own; a route that makes
+     two of them in a row has a cancel point between them. `DELETE /patterns/{id}` and
+     `DELETE /stacks/{id}` (a favourite or presets in `effects.json`, then the pattern or stack
+     file) therefore run the whole delete as one detached task the handler awaits through its
+     join handle, as `commit_setup` does for a chain commit: a client that leaves gets both
+     halves or neither. A new route that makes two saves does the same.
+  3. **Memory is never ahead of a failed save, where that matters.** `store_save` and
+     `store_save_rolled` change memory first: a `GET` that lands while the write is in flight sees
+     the new state, and if the write fails the rollback takes it back (the *read window*; main made
+     readers wait on the lock instead). That is accepted for state that only the editor shows.
+     State the daemon acts on (a peripheral's access, a display's config, a light's arrangement)
+     uses `store_publish`: the live store is touched only after the file is written, so a failed
+     save changes nothing, no reader sees the change, and a peripheral access that failed to save
+     never takes effect (fail closed).
+  Each route's own rollback text and its 5xx or 503 are unchanged. `GET /api/v1/settings` and the
+  other readers take only the store lock. The same class holds for every other write an async
+  handler makes, and each runs on `spawn_blocking`, never under a store guard: the snapshots and
+  the chain records (`chain_records::*_async`, used by every `api/chains.rs` call), the pattern
+  and stack `put`s and deletes, the config import's three writes and its read-back, the first
+  run's zone sizes, the peripheral hub's kept values (`save_kept`, serialised by the hub's `kept_writer`: it takes
+  the mutex first, builds the snapshot of the values after that, and writes in a spawned task that
+  owns the guard, so a dropped caller cannot free the mutex mid-write, two writes never overlap and
+  the last writer holds the newest values), the effect import and delete, and the
+  editor's source read. `Patterns`/`Stacks` hold their `RwLock` only for the read and the swap,
+  with a writer mutex across the disk write. A save that must undo a half-written pair does it on
+  the blocking thread inside its `save` closure (the light delete puts `lights.json` back there),
+  not in `failed`, which runs on a worker under the store lock. The `%ProgramData%` fail-closed
+  checks stay inside the store's save methods and are untouched. The test gate in
+  `storage::write_atomic` is created only by a test (`write_gate()`, `write_gate_in()`): a daemon
+  finds no gate and skips it. Not converted, and why: the start-up writes in `main.rs` and the
+  token file run before the API listens, so no reader waits on them; the CLI (`agent_run.rs`,
+  `bin/cli.rs`, `bundle.rs`) is not async code; `openrgb_supervisor::start_server` makes one
+  `create_dir_all` on its own task, holds no lock and syncs nothing; the config import's
+  `stacks.reload_with` and `patterns.reload` read their files under the import's draft gate.
+- **Regression tests:** `crates/canvas-daemon/tests/blocking_saves.rs` parks a `PUT
+  /api/v1/settings` in the gate and asserts a concurrent `GET` answers while it is parked.
+  `crates/canvas-daemon/tests/store_guarantees.rs` covers the three rules: two preset creates
+  queued behind a stalled write both land, a patch racing a delete of another light patches the
+  right light, of two replaces with the same `expected` one is refused, a failed displays save and
+  a failed peripheral-access save change nothing, and a dropped preset create whose write fails
+  leaves memory equal to disk. The same file parks the first write of a pattern delete and of a
+  stack delete, aborts the request, releases the write, and asserts the favourite (or the presets)
+  and the pattern (or the stack) are both there or both gone. The chain commit needs no such
+  test: `commit_setup` already runs on its own task (#457), and `tests/chain_detach.rs` covers it.
+- **How to check a new store write:** it goes through `store_save` (or `store_edit` when it does
+  not write). A `Store` save called directly while an `app.store.write()` guard is held is this
+  bug again.

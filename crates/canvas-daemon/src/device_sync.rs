@@ -31,21 +31,33 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
     *app.openrgb.write().await = LinkState::Connected;
     // After the first run, a zone that appears (a late device, a header that got its LEDs) is a
     // light of its own; no group holds it until the owner adds it.
-    let scenes_deadline;
-    {
-        let mut store = app.store.write().await;
-        // Scenes: every zone with LEDs is a light. A new one joins no group; one whose device
-        // went away stays, so it keeps its place when the device returns (the id is built from
-        // the device id, never the adapter index).
-        let store = &mut *store;
-        // The first device list settles a held scenes migration (spec "Storage and migration"):
-        // arrangements and zero-LED zones come from the real devices, not from a guess at load.
-        if store.finish_scenes(&devices) {
-            tracing::info!("scenes.json and lights.json were written from the first device list");
-        }
-        scenes_deadline = store.scenes_deadline_to_arm(crate::storage::clock());
-        store.sync_lights_from(&devices);
+    // Scenes: every zone with LEDs is a light. A new one joins no group; one whose device
+    // went away stays, so it keeps its place when the device returns (the id is built from
+    // the device id, never the adapter index). The first list settles a held migration:
+    // arrangements and zero-LED zones come from the real devices, not from a guess at load.
+    // Both writes go through the shared snapshot path so a slow disk cannot hold the store
+    // lock while the API answers (#241).
+    let for_store = devices.clone();
+    let deadline: Arc<std::sync::Mutex<Option<std::time::Duration>>> = Arc::new(std::sync::Mutex::new(None));
+    let slot = Arc::clone(&deadline);
+    let written = crate::store_io::store_save(
+        app,
+        |_store| Ok(()),
+        move |store| {
+            if store.finish_scenes(&for_store) {
+                tracing::info!("scenes.json and lights.json were written from the first device list");
+            }
+            let when = store.scenes_deadline_to_arm(crate::storage::clock());
+            store.sync_lights_from(&for_store);
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = when;
+            Ok(())
+        },
+    )
+    .await;
+    if let Err(e) = written {
+        tracing::error!(error = %e.message, "the first device list could not be written to the store");
     }
+    let scenes_deadline = *deadline.lock().unwrap_or_else(|e| e.into_inner());
     // Once, on the first non-empty list: a crash mid-setup left a restore record and a raised
     // header (#338). The replay puts the length back and reads the list again, so the rest of
     // this path works from the restored lengths.
@@ -93,16 +105,37 @@ const SCENES_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 async fn settle_scenes_wait(app: Arc<App>, wait: std::time::Duration) {
     tokio::time::sleep(wait + std::time::Duration::from_millis(50)).await;
     loop {
-        {
-            let mut store = app.store.write().await;
+        let devices = {
+            let store = app.store.read().await;
             if store.scenes_pending.is_none() || store.lights_blocked || store.scenes_blocked {
                 return;
             }
-            let devices = app.devices.read().await.clone();
-            if store.finish_scenes(&devices) {
-                tracing::info!("scenes.json and lights.json were written when the wait for the devices ended");
-                return;
-            }
+            // Read under the store lock, so a list that just arrived is never missed.
+            app.devices.read().await.clone()
+        };
+        let keep: Arc<std::sync::Mutex<bool>> = Arc::new(std::sync::Mutex::new(true));
+        let slot = Arc::clone(&keep);
+        let written = crate::store_io::store_save(
+            &app,
+            |_store| Ok(()),
+            move |store| {
+                let mut continue_waiting = true;
+                if store.scenes_pending.is_none() || store.lights_blocked || store.scenes_blocked {
+                    continue_waiting = false;
+                } else if store.finish_scenes(&devices) {
+                    tracing::info!("scenes.json and lights.json were written when the wait for the devices ended");
+                    continue_waiting = false;
+                }
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = continue_waiting;
+                Ok(())
+            },
+        )
+        .await;
+        if let Err(e) = written {
+            tracing::error!(error = %e.message, "the scenes migration write did not finish; retrying");
+        }
+        if !*keep.lock().unwrap_or_else(|e| e.into_inner()) {
+            return;
         }
         tokio::time::sleep(SCENES_RETRY).await;
     }
