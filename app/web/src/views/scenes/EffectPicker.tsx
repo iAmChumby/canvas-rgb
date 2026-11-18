@@ -390,7 +390,7 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                 // A pattern says what it was built on and how it lands on this group; a canvas
                 // effect says neither.
                 const builtOn = effect.kind === "pattern" ? effect.built_on : undefined;
-                const fit = builtOn ? groupFit(builtOn, groupLights) : null;
+                const fit = builtOn ? groupFit(builtOn, groupLights, group?.sequence) : null;
                 return (
                   <button
                     key={effect.id}
