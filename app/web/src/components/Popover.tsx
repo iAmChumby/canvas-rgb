@@ -49,6 +49,10 @@ export type PanelPlacement = { left: number; top: number; maxHeight: number; up:
  * its near edge always stops a gap short of the anchor. Its height never exceeds the content, so
  * a short menu keeps its old size. Only below MIN_H on both sides can no useful panel fit; then
  * the smallest panel stays inside the window.
+ *
+ * Sideways, `align: "end"` (the default) hangs the panel off the anchor's right edge. An anchor
+ * near the window's left edge gets `align: "start"`, which puts the panel's left edge on the
+ * anchor's instead, so it grows into the page rather than back over a left sidebar (#481).
  */
 export function placePanel(
   a: AnchorRect,
@@ -57,12 +61,12 @@ export function placePanel(
   contentHeight: number,
   width: number,
   keepClear: boolean,
+  align: "end" | "start" = "end",
 ): PanelPlacement {
-  // Sideways: the panel's right edge sits on the anchor's right edge, pulled inside the window.
-  const left =
-    width >= vw - EDGE * 2
-      ? EDGE
-      : Math.max(EDGE, Math.min(a.right - width, vw - width - EDGE));
+  // Sideways: the panel normally hangs off the anchor's right edge; a "start" panel hangs off its
+  // left edge. Both are pulled inside the window.
+  const wanted = align === "start" ? a.left : a.right - width;
+  const left = width >= vw - EDGE * 2 ? EDGE : Math.max(EDGE, Math.min(wanted, vw - width - EDGE));
 
   const below = a.bottom + GAP;
   const above = a.top - GAP - contentHeight;
@@ -104,6 +108,7 @@ export function Popover({
   className,
   label,
   keepClearOfAnchor = false,
+  align = "end",
 }: {
   /** The control it hangs under. */
   anchor: React.RefObject<HTMLElement | null>;
@@ -114,6 +119,9 @@ export function Popover({
   label?: string;
   /** Keep the panel clear of the anchor's own row, scrolling inside the room beside it. */
   keepClearOfAnchor?: boolean;
+  /** Which anchor edge the panel hangs off: "end" (right, the default) or "start" (left, for an
+   *  anchor near a left sidebar so the panel grows into the page). */
+  align?: "end" | "start";
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const id = useId();
@@ -185,6 +193,7 @@ export function Popover({
         height,
         width,
         keepClearOfAnchor,
+        align,
       );
 
       // The origin (issue #187, rule 1): the panel corner nearest the anchor.
@@ -213,7 +222,7 @@ export function Popover({
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
-  }, [open, anchor, keepClearOfAnchor]);
+  }, [open, anchor, keepClearOfAnchor, align]);
 
   // Escape closes it, and so does a click anywhere else.
   useEffect(() => {

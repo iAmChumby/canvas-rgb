@@ -20,17 +20,20 @@ export function NumberField({
   decimals = 0,
   label,
   unit,
+  placeholder,
   disabled,
   busy,
   onCommit,
 }: {
-  value: number;
+  /** Null when there is no single number to show: the field is empty and reads `placeholder`. */
+  value: number | null;
   min: number;
   max: number;
   step?: number;
   decimals?: number;
   label: string;
   unit?: string;
+  placeholder?: string;
   disabled?: boolean;
   /**
    * A request sent from this entry is in flight. The entry stays focusable and keeps its look
@@ -46,8 +49,8 @@ export function NumberField({
   const [focused, setFocused] = useState(false);
   // Out of focus the text counts to a new value; in focus it is exactly what the user typed or
   // the value as it is, never a tween under the cursor.
-  const counted = useCounter(value, decimals).shown;
-  const shown = draft ?? (focused ? value.toFixed(decimals) : counted.toFixed(decimals));
+  const counted = useCounter(value ?? min, decimals).shown;
+  const shown = draft ?? (value === null ? "" : focused ? value.toFixed(decimals) : counted.toFixed(decimals));
   const parsed = draft === null ? null : Number(draft);
   const invalid = parsed !== null && (Number.isNaN(parsed) || parsed < min || parsed > max);
 
@@ -80,7 +83,7 @@ export function NumberField({
       e.preventDefault();
       if (busy) return;
       const dir = e.key === "ArrowUp" ? 1 : -1;
-      const next = clamp(Number((value + dir * step).toFixed(decimals)), min, max);
+      const next = clamp(Number(((value ?? min) + dir * step).toFixed(decimals)), min, max);
       setDraft(null);
       onCommit(next);
     }
@@ -95,6 +98,7 @@ export function NumberField({
         aria-invalid={invalid}
         className={invalid ? "num num-invalid" : "num"}
         value={shown}
+        placeholder={placeholder}
         disabled={disabled}
         readOnly={busy || undefined}
         aria-busy={busy || undefined}

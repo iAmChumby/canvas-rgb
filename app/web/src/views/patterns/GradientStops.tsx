@@ -93,8 +93,12 @@ export function GradientStops({
     const step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
     if (step === 0 || leds === 0) return;
     event.preventDefault();
+    // Each key press is its own stroke: open and close the drag window around it so every nudge
+    // pushes one undo entry, not just the first of a run (#481).
+    onBegin();
     const led = ledNear(at, leds, state.wrap) + step;
     onMove(index, ledPosition(state.wrap ? (led + leds) % leds : Math.min(leds - 1, Math.max(0, led)), leds, state.wrap));
+    onEnd();
   };
 
   // The seam: a hairline at the top of the ring, where the last stop meets the first.

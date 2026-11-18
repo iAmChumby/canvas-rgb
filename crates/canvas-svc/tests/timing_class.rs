@@ -68,7 +68,6 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-core/src/timer.rs", "start.elapsed() < Duration::from_millis(60)", "open: 60 ms ceiling after a reset; about 43 ms of slack over one 16.7 ms frame"),
     ("canvas-core/src/arrangement.rs", "elapsed < std::time::Duration::from_secs(5)", "hang guard: the map walk takes well under a millisecond; the old walk of 10^10 cells takes over a minute"),
     ("canvas-daemon/src/cli.rs", "elapsed.as_millis() < 5_000", "hang guard: 5 s against a check that must stop at its first frame"),
-    ("canvas-daemon/src/logging.rs", "took < std::time::Duration::from_millis(1000)", "open: a 1 s ceiling on run_bounded giving up after its 250 ms limit; a runner stalled for 750 ms past the limit fails it"),
     ("canvas-daemon/src/user_effects.rs", "took < std::time::Duration::from_secs(5)", "hang guard: a 400 ms render budget against a 30 s frame budget; 5 s means the frame was not held to the budget"),
     ("canvas-daemon/src/user_effects.rs", "took < budget + std::time::Duration::from_secs_f64(frame_est)", "open, calibrated: the render is held to its budget plus one frame, where the frame is the best of three samples scaled to the effect (about 0.5 s). The slack is a constant once measured: a stall longer than it fails the test (#51)"),
     ("canvas-daemon/tests/scenes.rs", "start.elapsed() < Duration::from_secs(20)", "hang guard: a 20 s deadline on a poll loop for a brightness change that lands within one frame"),

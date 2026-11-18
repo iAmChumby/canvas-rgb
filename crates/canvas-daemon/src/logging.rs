@@ -64,6 +64,23 @@ pub fn run_bounded(limit: std::time::Duration, work: impl FnOnce() + Send + 'sta
     start_helper(work).recv_timeout(limit).is_ok()
 }
 
+/// How long a test waits for a helper thread to end before it calls it a hang. It is a hang guard,
+/// not a verdict: the helper's end is the event the test waits for, and a machine that is slow to
+/// start a thread must not decide the result (class `cause:timing-test`, #72). The work these
+/// tests wait for is instant (a file write, a channel), so 30 s only fires on a real hang.
+#[cfg(test)]
+pub(crate) const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Waits for the helper thread to end, at most `limit`. `true` when the helper finished its body;
+/// `false` when it panicked or was still running when the limit passed.
+#[cfg(test)]
+pub(crate) fn helper_finished(
+    finished: &std::sync::mpsc::Receiver<()>,
+    limit: std::time::Duration,
+) -> bool {
+    finished.recv_timeout(limit).is_ok()
+}
+
 /// [`close`], but it gives up after [`FLUSH_LIMIT`]. Returns whether the log drained in time.
 pub fn close_within_limit() -> bool {
     run_bounded(FLUSH_LIMIT, close)
@@ -178,7 +195,7 @@ pub fn write_once_within(
 /// says whether the helper finished its body: production waits at most its limit for it, and a
 /// test waits for the helper's thread to end, so that the machine's speed never decides the
 /// verdict (class `cause:timing-test`, #72).
-fn write_once_waiting(
+pub(crate) fn write_once_waiting(
     wait: impl FnOnce(std::sync::mpsc::Receiver<()>) -> bool,
     write: impl FnOnce() -> std::io::Result<()> + Send + 'static,
 ) -> bool {
@@ -395,6 +412,10 @@ mod tests {
 
     /// #36: a line queued behind a backlog that does not drain is not in the file when the process
     /// ends; a direct line is written into the file and is.
+    ///
+    /// The verdict is the write's own end, not a window: the direct write must not have to finish
+    /// inside a fixed number of milliseconds for this test to pass, or a busy machine decides it
+    /// (class `cause:timing-test`, #72).
     #[test]
     fn a_direct_line_reaches_the_file_while_a_backlog_is_stuck() {
         let dir = temp_dir("direct");
@@ -414,14 +435,17 @@ mod tests {
         assert!(!drained, "the backlog does not drain inside the limit");
 
         let (d, n) = (dir.clone(), "canvas-rgbd".to_string());
-        let written = write_once_within(std::time::Duration::from_millis(250), move || {
-            write_line_direct(&d, &n, "ERROR the daemon panicked message=\"direct\"")
-        });
+        // The write is waited for by the helper's end: an event, not a window. The file below is
+        // what the user reads, and it is read after the write landed.
+        let written = write_once_waiting(
+            |finished| helper_finished(&finished, HANG_GUARD),
+            move || write_line_direct(&d, &n, "ERROR the daemon panicked message=\"direct\""),
+        );
         release.store(true, std::sync::atomic::Ordering::SeqCst);
 
         let text = all_text(&dir);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(written, "the direct write finished inside its limit");
+        assert!(written, "the direct write finished: {text}");
         assert_eq!(text.matches("the daemon panicked").count(), 1, "{text}");
         assert!(!text.contains("queued behind the backlog"), "the stuck backlog never reached the file: {text}");
     }
@@ -494,41 +518,59 @@ mod tests {
     /// #36, at most once: a write that completes after the limit is not written a second time by
     /// the caller's fallback. Whichever way the race between the helper's start and the limit goes,
     /// the file holds the line once; on a normal run the helper has begun and lands late.
+    ///
+    /// The wait is injected, so the race is decided by the test and not by the machine's speed
+    /// (class `cause:timing-test`, #72): the helper says it has the line, the caller gives up the
+    /// way it does when the limit passes, and the helper lands afterwards.
     #[test]
     fn a_write_that_lands_after_the_limit_is_not_written_twice() {
         let dir = temp_dir("late");
         let path = dir.join("late.log");
         let late_path = path.clone();
-        let landed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = landed.clone();
-        let begun = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let began = begun.clone();
-        let reported = write_once_within(std::time::Duration::from_millis(300), move || {
-            began.store(true, std::sync::atomic::Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(900));
-            let r = append_line(&late_path, "the panic line");
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            r
-        });
+        let (has_line, wait_has_line) = std::sync::mpsc::channel::<()>();
+        let (land, wait_land) = std::sync::mpsc::channel::<()>();
+        let (landed, wait_landed) = std::sync::mpsc::channel::<()>();
+        let reported = write_once_waiting(
+            |_finished| {
+                // The helper holds the line and has not landed: the limit has passed.
+                let _ = wait_has_line.recv_timeout(HANG_GUARD);
+                false
+            },
+            move || {
+                // The helper takes the line, says so, and waits for the test to let it land.
+                let _ = has_line.send(());
+                let _ = wait_land.recv();
+                let written = append_line(&late_path, "the panic line");
+                let _ = landed.send(());
+                written
+            },
+        );
         // The caller's fallback, as the hook has it: write the line only when told to.
         let fallback_wrote = !reported;
         if fallback_wrote {
             append_line(&path, "the panic line").unwrap();
         }
-        // The helper lands late when it owns the line; when the caller took the write back it never runs.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while (reported || begun.load(std::sync::atomic::Ordering::SeqCst)) && !landed.load(std::sync::atomic::Ordering::SeqCst) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        assert!(reported, "the helper owns the line: the caller must not write it again");
+        // The helper lands now, and says so when the line is in the file.
+        let _ = land.send(());
+        wait_landed
+            .recv_timeout(HANG_GUARD)
+            .expect("the helper landed the line it owns");
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(text.matches("the panic line").count(), 1, "reported={reported}: {text}");
     }
 
+    /// A write that fails is reported as "not written", so the caller writes the line itself; a
+    /// write that succeeds is reported as written.
+    ///
+    /// The helper thread must not have to start and finish inside a fixed number of milliseconds
+    /// for this test to pass, or a busy machine decides it (class `cause:timing-test`, #72). The
+    /// bound here is a hang guard, generous on purpose: the write itself is instant.
     #[test]
     fn a_failed_write_is_reported_so_the_caller_can_fall_back() {
-        assert!(!write_once_within(std::time::Duration::from_millis(250), || Err(std::io::Error::other("disk full"))));
-        assert!(write_once_within(std::time::Duration::from_millis(250), || Ok(())));
+        assert!(!write_once_within(HANG_GUARD, || Err(std::io::Error::other("disk full"))));
+        assert!(write_once_within(HANG_GUARD, || Ok(())));
     }
 
     /// #36 follow-up (#72): a helper that panics must not leave the state STARTED. If it does,
@@ -562,15 +604,17 @@ mod tests {
         );
     }
 
+    /// A bounded run gives up on a step that does not finish, and waits for a quick one.
+    ///
+    /// The give-up is the claim and the return value carries it: a slow machine only makes the
+    /// give-up more certain, so no clock is read here (class `cause:timing-test`, #72). The quick
+    /// step's bound is a hang guard (the work is empty), not a latency budget.
     #[test]
     fn a_bounded_run_gives_up_on_a_stuck_step_and_waits_for_a_quick_one() {
         let limit = std::time::Duration::from_millis(250);
-        let started = std::time::Instant::now();
         let finished = run_bounded(limit, || std::thread::sleep(std::time::Duration::from_secs(5)));
-        let took = started.elapsed();
         assert!(!finished, "a 5 s step does not finish inside {limit:?}");
-        assert!(took < std::time::Duration::from_millis(1000), "gave up after {took:?}, not 5 s");
-        assert!(run_bounded(limit, || {}), "a quick step finishes");
+        assert!(run_bounded(HANG_GUARD, || {}), "a quick step finishes");
     }
 
     #[test]
