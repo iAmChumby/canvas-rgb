@@ -896,6 +896,9 @@ async fn a_failed_raise_leaves_the_header_and_no_record() {
 
     let (status, body) = start(&rig, 0).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    // Restore as soon as the intended failure is observed: the supervisor may reconnect on its
+    // own, and a handshake under the 2 s deadline would break the link again (#519).
+    rig.reply_timeout.set(TEST_REPLY_TIMEOUT);
     let message = body["message"].as_str().unwrap_or_default();
     assert!(message.contains("raise"), "the answer names what failed: {body}");
     assert!(
@@ -1365,6 +1368,12 @@ async fn a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry() {
     // first, so a loaded runner cannot turn a slow-but-live reply into "not connected" (#519).
     rig.reply_timeout.set(TEST_REPLY_TIMEOUT);
     rig.server.fail_resizes(false);
+    // The refused resize broke the link: wait for the supervisor's reconnect before the retry.
+    // The retry has to land on the fresh connection, not race the one being made (#519).
+    assert!(
+        wait_for(Duration::from_secs(60), || async { rig.app.adapter.lock().await.is_connected() }).await,
+        "the supervisor never reconnected after the refused resize"
+    );
     let answer = committed(&rig, 0, &setup.session, &seven_parts()).await;
     assert_eq!(answer.final_leds, FINAL);
     assert_eq!(rig.server.zone_leds(0, 0), Some(FINAL));
