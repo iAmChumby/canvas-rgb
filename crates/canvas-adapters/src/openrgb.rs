@@ -233,6 +233,19 @@ pub struct OpenRgbAdapter {
     rescan_timing: RescanTiming,
 }
 
+/// A handle to an adapter's reply deadline ([`OpenRgbAdapter::reply_timeout`]). Cloning it shares
+/// the deadline with the adapter and all its clones.
+#[derive(Clone)]
+pub struct ReplyTimeout(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl ReplyTimeout {
+    /// Sets the deadline. A test raises this to a hang guard while the fake is live and lowers it
+    /// just before it makes the fake go silent (#519).
+    pub fn set(&self, deadline: Duration) {
+        self.0.store(deadline.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 struct Link {
     session: Mutex<Session>,
     writer: tokio::sync::Mutex<Option<OwnedWriteHalf>>,
@@ -246,6 +259,10 @@ struct Link {
     /// Bumped by the reader of the current session on every `DEVICE_LIST_UPDATED` (100). A rescan
     /// watches it for the list changes that detection announces (#290).
     list_changed: tokio::sync::watch::Sender<u64>,
+    /// How long a request waits for a reply before it breaks the link (#519). Milliseconds, so a
+    /// test can raise it to a hang guard while the fake is live and lower it again when it means
+    /// the fake to go silent. Production never changes it from [`REPLY_TIMEOUT`].
+    reply_timeout_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 struct Session {
@@ -633,13 +650,20 @@ impl OpenRgbAdapter {
             request_gate: tokio::sync::Mutex::new(()),
             broken: AtomicBool::new(false),
             list_changed: tokio::sync::watch::channel(0_u64).0,
+            reply_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(REPLY_TIMEOUT.as_millis() as u64)),
         });
         {
             let mut links = guard(&LINKS);
             links.retain(|link| link.strong_count() > 0);
             links.push(Arc::downgrade(&link));
         }
-        Self { host: host.to_string(), port, link, clocks: Clocks::system(), rescan_timing: RescanTiming::default() }
+        Self {
+            host: host.to_string(),
+            port,
+            link,
+            clocks: Clocks::system(),
+            rescan_timing: RescanTiming::default(),
+        }
     }
 
     /// Like [`new`](Self::new) with another way to wait for a rescan's detection to settle
@@ -647,6 +671,29 @@ impl OpenRgbAdapter {
     pub fn with_rescan_timing(mut self, timing: RescanTiming) -> Self {
         self.rescan_timing = timing;
         self
+    }
+
+    /// Like [`new`](Self::new) with another deadline for a controller's reply. The production
+    /// default is [`REPLY_TIMEOUT`] (5 s); tests against the fake raise it so the verdict never
+    /// depends on how fast the machine schedules the fake's reply (#519). This is a hang guard,
+    /// not the thing a test waits for: a test waits on the fake's own event instead.
+    pub fn with_reply_timeout(self, reply_timeout: Duration) -> Self {
+        self.set_reply_timeout(reply_timeout);
+        self
+    }
+
+    /// Changes the reply deadline on this adapter and every clone of it. A test raises it while
+    /// the fake is live, and lowers it again just before it means the fake to go silent (#519).
+    pub fn set_reply_timeout(&self, reply_timeout: Duration) {
+        self.link
+            .reply_timeout_ms
+            .store(reply_timeout.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A small handle to the reply deadline, for a test whose adapter is held behind a trait
+    /// object: it can still lower the deadline at the moment it means the fake to go silent.
+    pub fn reply_timeout(&self) -> ReplyTimeout {
+        ReplyTimeout(Arc::clone(&self.link.reply_timeout_ms))
     }
 
     /// Whether the list this connection reads is OpenRGB's final one rather than a part of a detection's
@@ -1161,7 +1208,10 @@ impl OpenRgbAdapter {
             self.send(device, packet_id, payload).await?;
         }
         in_flight.sent = true;
-        match tokio::time::timeout(REPLY_TIMEOUT, received).await {
+        let reply_timeout = Duration::from_millis(
+            self.link.reply_timeout_ms.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        match tokio::time::timeout(reply_timeout, received).await {
             Ok(Ok(Reply::Data(reply))) => Ok(reply),
             // Acknowledged and not answered: nothing is owed, the link is whole.
             Ok(Ok(Reply::Refused)) => Err(AdapterError::Protocol(CONTROLLER_ID_GONE_MESSAGE.into())),
@@ -1171,7 +1221,7 @@ impl OpenRgbAdapter {
                 self.link.break_link();
                 Err(AdapterError::Protocol(format!(
                     "no reply to packet {packet_id} for device {device} within {}s",
-                    REPLY_TIMEOUT.as_secs())))
+                    reply_timeout.as_secs())))
             }
         }
     }

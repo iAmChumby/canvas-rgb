@@ -24,6 +24,10 @@ use tower::ServiceExt;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+/// A test's reply deadline is a hang guard, not the verdict: a loaded runner must never turn a
+/// slow-but-live reply from the fake into a broken link (#519).
+const TEST_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+
 fn stick(serial: &str) -> DeviceInfo {
     DeviceInfo {
         id: DeviceId(format!("openrgb:{serial}")),
@@ -88,7 +92,11 @@ async fn rig_timed(name: &str, port: u16, budget: Duration, timing: RescanTiming
     let mut app = App::new(
         store,
         engine.clone(),
-        Box::new(OpenRgbAdapter::new("127.0.0.1", port).with_rescan_timing(timing)),
+        Box::new(
+            OpenRgbAdapter::new("127.0.0.1", port)
+                .with_rescan_timing(timing)
+                .with_reply_timeout(TEST_REPLY_TIMEOUT),
+        ),
         TOKEN.into(),
         "0.0.0-test".into(),
         tx,
@@ -371,9 +379,8 @@ fn delay_replies(server: &Arc<FakeOpenRgbServer>, by: Duration) -> tokio::task::
     let server = Arc::clone(server);
     tokio::spawn(async move {
         loop {
-            while server.held_replies() == 0 {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
+            // Wait on the fake's own change, not a poll interval (#519).
+            server.wait_until("a reply is held", || server.held_replies() > 0).await;
             tokio::time::sleep(by).await;
             server.release_replies();
         }

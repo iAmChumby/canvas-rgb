@@ -25,6 +25,9 @@ const RAISED: u32 = 300;
 const OTHER_SAVED: u32 = 60;
 /// What a test raises the second header to.
 const OTHER_RAISED: u32 = 200;
+/// A test's reply deadline is a hang guard, not the verdict: a loaded runner must never turn a
+/// slow-but-live reply from the fake into "no reply to packet ... within 5s" (#519).
+const TEST_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn jargb(index: u32, name: &str) -> ZoneInfo {
     ZoneInfo {
@@ -54,15 +57,14 @@ fn board() -> Vec<DeviceInfo> {
     }]
 }
 
-async fn wait_for(server: &FakeOpenRgbServer, zone: u32, leds: u32, within: Duration) -> bool {
-    let end = tokio::time::Instant::now() + within;
-    while tokio::time::Instant::now() < end {
-        if server.zone_leds(0, zone) == Some(leds) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
+async fn wait_for(server: &FakeOpenRgbServer, zone: u32, leds: u32, _within: Duration) -> bool {
+    // The verdict is the size the fake holds, and the wait is woken by the fake's own change
+    // (#519). The old wall-clock deadline made a loaded runner answer "false" while the resize
+    // was simply still on its way.
+    server
+        .wait_until("the zone size", || server.zone_leds(0, zone) == Some(leds))
+        .await;
+    server.zone_leds(0, zone) == Some(leds)
 }
 
 /// The real supervisor over the fake server, with the saved 120 and the holds the test chooses.
@@ -85,8 +87,9 @@ impl Harness {
     async fn start(holds: ZoneHolds) -> Self {
         let server = FakeOpenRgbServer::start(board()).await.expect("fake server");
         // The test's raise goes through the supervisor's own adapter: the header is one device.
-        let adapter: Box<dyn DeviceAdapter> =
-            Box::new(OpenRgbAdapter::new("127.0.0.1", server.port()));
+        let adapter: Box<dyn DeviceAdapter> = Box::new(
+            OpenRgbAdapter::new("127.0.0.1", server.port()).with_reply_timeout(TEST_REPLY_TIMEOUT),
+        );
         let adapter = Arc::new(tokio::sync::Mutex::new(adapter));
         let sizes = BTreeMap::from([("openrgb:mb".to_string(), BTreeMap::from([(0u32, SAVED), (1u32, OTHER_SAVED)]))]);
         let zone_sizes = Arc::new(tokio::sync::RwLock::new(sizes));

@@ -40,6 +40,26 @@ pub struct FakeOpenRgbServer {
     /// Bumped when the server starts a detection by itself, so every connection looks at its
     /// rescan runs again.
     kick: tokio::sync::watch::Sender<u64>,
+    /// Bumped on every change a test can wait for: a write, a resize, a held or released reply,
+    /// a rescan, a list change, a restart (#519). A test waits on this instead of reading its
+    /// verdict off a clock; the wait's cap only ends a test that would hang.
+    changes: tokio::sync::watch::Sender<u64>,
+}
+
+/// How long [`FakeOpenRgbServer::wait_until`] waits before it gives up. A hang guard, never a
+/// verdict: the wait ends on the change the test asks for, so a change that never lands fails
+/// the caller's assert with what the fake actually holds.
+const STATE_WAIT_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A stall injected before a reply is queued, for proving that a test's verdict does not depend
+/// on how fast the machine schedules the fake (#519). Set `CANVAS_RGB_FAKE_REPLY_STALL_MS` to a
+/// number of milliseconds; unset (the default) means no stall. Production never sets it.
+fn reply_stall() -> std::time::Duration {
+    std::env::var("CANVAS_RGB_FAKE_REPLY_STALL_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or_default()
 }
 
 /// The protocol version OpenRGB release_1.1 speaks (`NetworkProtocol.h:28`).
@@ -409,12 +429,14 @@ impl FakeOpenRgbServer {
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let (release, _) = tokio::sync::watch::channel(0_u64);
         let (writes, _) = tokio::sync::watch::channel(0_u64);
+        let (changes, _) = tokio::sync::watch::channel(0_u64);
         let acceptor = {
             let state = Arc::clone(&state);
             let connections = Arc::clone(&connections);
             let release = release.clone();
             let writes = writes.clone();
             let kick = kick.clone();
+            let changes = changes.clone();
             tokio::spawn(async move {
                 let mut next_connection = 0_u64;
                 while let Ok((stream, _)) = listener.accept().await {
@@ -426,6 +448,7 @@ impl FakeOpenRgbServer {
                         release.subscribe(),
                         writes.clone(),
                         kick.subscribe(),
+                        changes.clone(),
                     ));
                     let mut open = guard(&connections);
                     open.retain(|conn| !conn.is_finished());
@@ -433,7 +456,7 @@ impl FakeOpenRgbServer {
                 }
             })
         };
-        Ok(Self { port, state, connections, acceptor, release, writes, kick })
+        Ok(Self { port, state, connections, acceptor, release, writes, kick, changes })
     }
 
     pub fn port(&self) -> u16 {
@@ -450,6 +473,8 @@ impl FakeOpenRgbServer {
         state.devices.push(device);
         state.led_writes.push(0);
         state.resize_writes.push(0);
+        drop(state);
+        self.changes.send_modify(|n| *n += 1);
     }
 
     /// How many rescan packets (140) the client has sent.
@@ -476,6 +501,7 @@ impl FakeOpenRgbServer {
             begin_detection(&mut state);
         }
         self.kick.send_modify(|n| *n += 1);
+        self.changes.send_modify(|n| *n += 1);
     }
 
     /// Whether a detection is running and its clear was announced to every client: each has it in its
@@ -509,6 +535,7 @@ impl FakeOpenRgbServer {
         if std::mem::take(&mut state.list_change_parked) {
             state.broadcast(|_| device_list_updated());
         }
+        self.changes.send_modify(|n| *n += 1);
     }
 
     /// Registrations send no 102 (progress) from now on, only the 100 each one causes (see
@@ -523,6 +550,7 @@ impl FakeOpenRgbServer {
     pub fn list_changed(&self) {
         guard(&self.state).broadcast(|_| device_list_updated());
         self.kick.send_modify(|n| *n += 1);
+        self.changes.send_modify(|n| *n += 1);
     }
 
     /// Every frame that reached a controller, in order, with the device that received it.
@@ -738,6 +766,29 @@ impl FakeOpenRgbServer {
         .unwrap_or_else(|_| self.events_since_registered(index))
     }
 
+    /// A receiver that changes whenever the fake makes a change a test can observe. Subscribe to
+    /// it before checking the state so no change lands in the gap between the check and the wait.
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    /// Waits until `ready` is true, woken by the fake's own changes instead of a clock. The cap
+    /// ([`STATE_WAIT_CAP`]) only ends a wait that cannot be met; the caller then reads the same
+    /// state `ready` reads, so its assert says why. A test that used to poll a counter under a
+    /// wall-clock deadline waits here instead (#519).
+    pub async fn wait_until(&self, what: &str, ready: impl Fn() -> bool) {
+        let mut changed = self.changes();
+        tokio::time::timeout(STATE_WAIT_CAP, async {
+            while !ready() {
+                if changed.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("never happened: {what}"));
+    }
+
     /// How many `RESIZE_ZONE` packets the controller received. Every request counts, including
     /// one the server refuses (see [`fail_resizes`](Self::fail_resizes)) and one still waiting
     /// out its delay (see [`delay_resizes`](Self::delay_resizes)).
@@ -787,6 +838,7 @@ impl FakeOpenRgbServer {
         }
         // The colours were reset: a test waiting on them sees the new (black) values.
         self.writes.send_modify(|n| *n += 1);
+        self.changes.send_modify(|n| *n += 1);
         for connection in guard(&self.connections).drain(..) {
             connection.abort();
         }
@@ -824,6 +876,7 @@ async fn serve(
     mut release: tokio::sync::watch::Receiver<u64>,
     writes: tokio::sync::watch::Sender<u64>,
     mut kick: tokio::sync::watch::Receiver<u64>,
+    changes: tokio::sync::watch::Sender<u64>,
 ) -> std::io::Result<()> {
     guard(&state).open.insert(connection);
     let _open = Open { state: Arc::clone(&state), connection };
@@ -854,6 +907,7 @@ async fn serve(
             read = stream.read(&mut chunk) => read?,
             _ = tokio::time::sleep_until(rescan_due.unwrap_or_else(tokio::time::Instant::now)), if rescan_due.is_some() => {
                 step_rescan(&mut guard(&state));
+                changes.send_modify(|n| *n += 1);
                 continue;
             }
             // Something was queued for this client, or the server started a detection of its own.
@@ -869,6 +923,8 @@ async fn serve(
                 for (_, bytes) in mine {
                     state.queue(connection, bytes);
                 }
+                drop(state);
+                changes.send_modify(|n| *n += 1);
                 continue;
             }
             _ = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)), if due.is_some() => {
@@ -891,6 +947,7 @@ async fn serve(
                         apply_resize(&mut state, resize.device as usize, resize.zone, resize.leds);
                     }
                 }
+                changes.send_modify(|n| *n += 1);
                 continue;
             }
         };
@@ -928,6 +985,8 @@ async fn serve(
                 if state.stall_after_rescan {
                     state.stalled = true;
                 }
+                drop(state);
+                changes.send_modify(|n| *n += 1);
                 continue;
             }
             // A request leaves the client waiting for a reply; a frame does not. The count says
@@ -954,17 +1013,28 @@ async fn serve(
                 writes.send_modify(|n| *n += 1);
             }
             if reply.is_empty() {
+                // A frame or a dropped packet still changed the state a test may wait on.
+                changes.send_modify(|n| *n += 1);
                 continue;
+            }
+            let stall = reply_stall();
+            if !stall.is_zero() {
+                tokio::time::sleep(stall).await;
             }
             let mut state = guard(&state);
             if is_request(packet_id) {
                 if state.holding {
                     state.held.push((connection, reply));
+                    drop(state);
+                    changes.send_modify(|n| *n += 1);
                     continue;
                 }
                 state.outstanding = state.outstanding.saturating_sub(1);
             }
             state.queue(connection, reply);
+            drop(state);
+            // The change is in the state now: wake a test waiting on it (#519).
+            changes.send_modify(|n| *n += 1);
         }
     }
 }

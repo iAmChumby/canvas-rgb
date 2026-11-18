@@ -15,7 +15,7 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use canvas_adapters::fake::FakeOpenRgbServer;
-use canvas_adapters::openrgb::OpenRgbAdapter;
+use canvas_adapters::openrgb::{OpenRgbAdapter, ReplyTimeout};
 use canvas_daemon::api;
 use canvas_daemon::chain_plan::plan_commit;
 use canvas_daemon::chain_records::{
@@ -46,6 +46,10 @@ use tower::ServiceExt;
 
 /// The token the tests use.
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// A test's reply deadline is a hang guard, not the verdict: a loaded runner must never turn a
+/// slow-but-live reply from the fake into "not connected" mid-resize (#519).
+const TEST_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 /// The board whose two JARGB headers are the chains under test.
 const BOARD: &str = "openrgb:mb";
 /// A device that is not a chain: its zone cannot be resized.
@@ -195,6 +199,9 @@ struct Rig {
     app: Arc<App>,
     engine: Arc<FakeEngine>,
     server: FakeOpenRgbServer,
+    /// The adapter is behind a trait object in `app`; this handle lets a test lower the reply
+    /// deadline at the exact moment it makes the fake go silent (#519).
+    reply_timeout: ReplyTimeout,
     home: PathBuf,
     stop: tokio::sync::watch::Sender<bool>,
     supervisor: tokio::task::JoinHandle<()>,
@@ -279,10 +286,12 @@ async fn build_rig(home: PathBuf, store: Store, server: FakeOpenRgbServer) -> Ri
     let sizes = store.zones.sizes.clone();
     let engine = Arc::new(FakeEngine::default());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let adapter = OpenRgbAdapter::new("127.0.0.1", server.port()).with_reply_timeout(TEST_REPLY_TIMEOUT);
+    let reply_timeout = adapter.reply_timeout();
     let app = App::new(
         store,
         engine.clone(),
-        Box::new(OpenRgbAdapter::new("127.0.0.1", server.port())),
+        Box::new(adapter),
         TOKEN.into(),
         "0.0.0-test".into(),
         tx,
@@ -292,7 +301,7 @@ async fn build_rig(home: PathBuf, store: Store, server: FakeOpenRgbServer) -> Ri
     let (stop, stop_rx) = tokio::sync::watch::channel(false);
     let supervisor =
         tokio::spawn(canvas_daemon::device_sync::supervise_app(app.clone(), stop_rx));
-    Rig { router: api::router(app.clone()), app, engine, server, home, stop, supervisor }
+    Rig { router: api::router(app.clone()), app, engine, server, reply_timeout, home, stop, supervisor }
 }
 
 /// Waits for `check` to become true, or the deadline passes. Returns whether it became true.
@@ -1308,6 +1317,9 @@ async fn a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry() {
     let zones_before = std::fs::read(rig.home.join(ZONES_FILE)).expect("zones.json");
     let setup = started(&rig, 0).await;
     assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    // The refusal is meant to be silence: lower the reply deadline here only, so the test does
+    // not wait out the 60 s hang guard on the one request that is supposed to fail (#519).
+    rig.reply_timeout.set(Duration::from_secs(2));
     rig.server.fail_resizes(true);
     // #429: a refused resize is five seconds of silence, most of the setup's six-second idle
     // limit between light requests. A loaded runner pushed the rest past it, and the session
@@ -1346,7 +1358,9 @@ async fn a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry() {
     // The daemon's own limit again: the checks above are not requests, and the retry is one
     // request that ends the setup.
     rig.app.identify.set_setup_timeout(canvas_daemon::identify::SETUP_TIMEOUT);
-    // The retry the open session allows: the same commit lands.
+    // The retry the open session allows: the same commit lands. Restore the hang-guard deadline
+    // first, so a loaded runner cannot turn a slow-but-live reply into "not connected" (#519).
+    rig.reply_timeout.set(TEST_REPLY_TIMEOUT);
     rig.server.fail_resizes(false);
     let answer = committed(&rig, 0, &setup.session, &seven_parts()).await;
     assert_eq!(answer.final_leds, FINAL);
