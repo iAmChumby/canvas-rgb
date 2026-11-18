@@ -259,6 +259,10 @@ mod tests {
     /// #36, through the real hook: the log queue is stuck (nothing queued reaches the file), the
     /// main thread panics, and the panic line is in the file exactly once. With the hook on the
     /// queue path (the old hook) the line is behind the backlog and the file holds nothing.
+    ///
+    /// The write is waited for by the helper's end, so the file is read after the line landed: a
+    /// machine that is slow to start the helper thread must not decide the verdict (class
+    /// `cause:timing-test`, #72).
     #[test]
     fn the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck() {
         let dir = std::env::temp_dir().join(format!("canvas-rgb-hook-{}", std::process::id()));
@@ -275,7 +279,10 @@ mod tests {
         let caught = tracing::subscriber::with_default(subscriber, || {
             install_hook(std::sync::Arc::new(move |line| {
                 let (d, n) = (d.clone(), n.clone());
-                crate::logging::write_once_within(PANIC_WRITE_LIMIT, move || crate::logging::write_line_direct(&d, &n, &line))
+                crate::logging::write_once_waiting(
+                    |finished| crate::logging::helper_finished(&finished, crate::logging::HANG_GUARD),
+                    move || crate::logging::write_line_direct(&d, &n, &line),
+                )
             }));
             for i in 0..100 {
                 tracing::error!("queued behind the backlog {i}");
