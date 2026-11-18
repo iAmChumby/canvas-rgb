@@ -287,6 +287,7 @@ fn build() -> Rig {
                 plays: Plays::Off,
                 mode: GroupMode::EachItsOwn,
                 brightness: 100,
+                sequence: None,
             }],
         }],
     };

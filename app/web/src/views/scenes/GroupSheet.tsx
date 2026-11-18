@@ -14,13 +14,13 @@
 // Revert.
 
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CopySimple, DotsThree, Moon, PencilSimple, Plus, Sparkle, Trash, X } from "@phosphor-icons/react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CircleDashed, CirclesThree, CopySimple, DotsThree, LineSegment, Moon, PencilSimple, Plus, Sparkle, Trash, X } from "@phosphor-icons/react";
 import { Button, ButtonLink, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { NameField } from "@/components/NameField";
 import { Popover } from "@/components/Popover";
-import { Segmented } from "@/components/Segmented";
+import { Segmented, type SegOption } from "@/components/Segmented";
 import { Slider } from "@/components/Slider";
 import { useFocusTrap } from "@/components/useFocusTrap";
 import { api } from "@/lib/endpoints";
@@ -40,6 +40,7 @@ import type { GroupMode } from "@/proto/GroupMode";
 import type { LightView } from "@/proto/LightView";
 import type { Preset } from "@/proto/Preset";
 import type { PropertyDef } from "@/proto/PropertyDef";
+import type { SequenceShape } from "@/proto/SequenceShape";
 import type { Props } from "@/proto/props";
 import type { UseScene } from "@/views/scenes/useScene";
 import s from "@/views/scenes/scenes.module.css";
@@ -48,6 +49,19 @@ import s from "@/views/scenes/scenes.module.css";
 const MODES: { value: GroupMode; label: string }[] = [
   { value: "flow_across", label: "flow across" },
   { value: "each_its_own", label: "each its own" },
+];
+
+/**
+ * How a pattern runs through a group's lights (#468), in the owner's words. "Each light" is a
+ * group with no sequence: every light plays the whole pattern on its own, as before. The other
+ * two are one run through the members in their order.
+ */
+type Shape = "each" | SequenceShape;
+
+const SHAPES: SegOption<Shape>[] = [
+  { value: "each", label: "Each light", icon: <CirclesThree size={16} /> },
+  { value: "ring", label: "One ring", icon: <CircleDashed size={16} /> },
+  { value: "line", label: "One line", icon: <LineSegment size={16} /> },
 ];
 
 export interface GroupSheetProps {
@@ -380,6 +394,23 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
               saved={saved}
               paused={paused}
               away={away}
+              shape={
+                pattern ? (
+                  <Segmented<Shape>
+                    label="How this pattern runs through the group's lights"
+                    value={group.sequence ?? "each"}
+                    options={SHAPES}
+                    onChange={(shape) =>
+                      edit((draft) => {
+                        const g = draft.groups.find((x) => x.id === groupId);
+                        if (!g) return;
+                        if (shape === "each") delete g.sequence;
+                        else g.sequence = shape;
+                      }, "Change how the pattern runs through the lights")
+                    }
+                  />
+                ) : undefined
+              }
             >
               <Button
                 className={s.sheetEffect}

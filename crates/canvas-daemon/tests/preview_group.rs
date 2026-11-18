@@ -51,6 +51,7 @@ fn group(id: &str) -> Group {
         plays: Plays::Off,
         mode: GroupMode::FlowAcross,
         brightness: 100,
+        sequence: None,
     }
 }
 

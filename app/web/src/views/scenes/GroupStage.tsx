@@ -61,6 +61,12 @@ export interface GroupStageProps {
   away: number;
   /** The effect button and the mode control, beside the picture. */
   children?: ReactNode;
+  /**
+   * A pattern group's shape control (#468): how the pattern runs through the group's lights. It
+   * sits in the row a pattern group keeps for the mode control, so the band is the same height
+   * with or without it.
+   */
+  shape?: ReactNode;
 }
 
 /**
@@ -79,6 +85,7 @@ export function GroupStage({
   paused,
   away,
   children,
+  shape,
 }: GroupStageProps) {
   const off = group.plays.type === "off";
   // A pattern has no picture, so it opens no socket at all. A group set to Off does open one:
@@ -171,9 +178,17 @@ export function GroupStage({
           {children}
           {/* A pattern group has no mode control: its row is kept, so the band is the same
               height for an effect group and a pattern group and nothing moves under the
-              pointer when the sheet is opened on another group. */}
+              pointer when the sheet is opened on another group. The row holds the group's
+              shape control when the sheet gives one (#468), and is empty and out of the way
+              otherwise. */}
           {pattern && (
-            <div className={s.stageModeRow} data-testid="stage-mode-row" aria-hidden="true" />
+            <div
+              className={s.stageModeRow}
+              data-testid="stage-mode-row"
+              aria-hidden={shape ? undefined : "true"}
+            >
+              {shape}
+            </div>
           )}
         </div>
         {/* The note keeps its room whether there is a device away or not, so the stage's box

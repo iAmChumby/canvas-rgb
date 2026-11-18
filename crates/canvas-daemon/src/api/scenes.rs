@@ -264,6 +264,7 @@ fn asked_groups(scenes: &[Scene], asked: &[NewGroup]) -> Vec<Group> {
             plays: group.plays.clone(),
             mode: group.mode,
             brightness: group.brightness,
+            sequence: None,
         });
     }
     groups
