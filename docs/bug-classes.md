@@ -250,7 +250,10 @@ or acts as if a step worked without checking that it did.
   (`crates/canvas-adapters/src/openrgb.rs`, `rescan_shared`). Fixed: `rescan_shared` takes a hold
   (`Session::rescan_requests`, the `RescanHold` guard) before it writes packet 140, a 100 hands the
   hold to `unsettled`, and `write_packet` re-checks it under the socket lock for every positional
-  packet (`send_frame`, `send_positional`, `request_positional`). Protocol 6 names a controller by an
+  packet (`send_frame`, `send_positional`, `request_positional`). While the hold is on, `try_settle`
+  refuses to call the list settled, and the hold ends early once `first` passes with no 100 (OpenRGB
+  sends its 100 inside the packet-140 handler, so none means no detection started); without that
+  guard a rescan from an already-changing list spun a runtime worker until the cap. Protocol 6 names a controller by an
   id that is never reused and is unchanged. Regression tests on the fakes, with the fake's
   `park_list_change` holding packet 100 back
   (`crates/canvas-adapters/tests/openrgb_rescan.rs`): a frame, a resize and a `read_back` sent in the

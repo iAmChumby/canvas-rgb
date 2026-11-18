@@ -754,12 +754,17 @@ impl OpenRgbAdapter {
     /// never through `request`, which would wait five seconds for a reply that never comes and
     /// break the link. It may also be dropped without a word, when a detection is already running
     /// (`DetectionManager.cpp:1753-1756`); the wait does not care which, because it watches
-    /// OpenRGB's list and not the packet. Three ends:
+    /// OpenRGB's list and not the packet. Four ends:
     ///
     /// - the list is settled and some list change came after packet 140 (or the list was already
     ///   changing and has settled): `Ok`. The adapter holds the settled list;
     /// - the list was not changing and no change came within `first`: [`RESCAN_NOT_REDETECTED_MESSAGE`],
     ///   and the list was never touched;
+    /// - the list was already changing when packet 140 went out and no 100 came within `first`: the
+    ///   hold ends there (OpenRGB sends its 100 inside its packet-140 handler, so none means it
+    ///   started no detection), the settle read reads the list again, and the answer is
+    ///   [`RESCAN_NOT_REDETECTED_MESSAGE`]; `try_settle` refuses to settle while the hold is on, so
+    ///   the wait never spins (#509, second review);
     /// - the list is still changing, or empty, when `cap` runs out: [`RESCAN_DETECT_TIMEOUT_MESSAGE`].
     ///   Detection is still running. The adapter goes on holding the list it has, and answers a read
     ///   with it, until a read finds the new one settled: no wait here decides that, so a detection
