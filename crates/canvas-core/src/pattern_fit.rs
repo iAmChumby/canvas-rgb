@@ -21,8 +21,36 @@
 //! The index maths is in `u64` so a zone of [`PATTERN_LEDS_MAX`] LEDs cannot overflow it.
 
 use canvas_proto::color::Rgb8;
-use canvas_proto::pattern::{fit_kind, BuiltOn, FitKind};
+use canvas_proto::pattern::{fit_kind, BuiltOn, FitKind, Pattern};
+use crate::pattern_play::Timeline;
 use canvas_proto::scene::Arrangement;
+
+/// The most fitted LED-frames the patterns of one scene keep ready at once (#481). A pattern that
+/// plays through its frames keeps every frame fitted to every distinct light shape, 27 bytes an
+/// LED (the colour and its OKLab values): measured on the fakes in a release build, a million
+/// LED-frames is 28 MB and about 124 ms of fitting on the render thread, so this is about 108 MB
+/// and half a second. A scene of thirty different 300-LED lights and 256 frames is 2.3 million,
+/// well under it; four 4096-LED lights of 256 frames are over.
+pub const SCENE_PATTERN_LED_FRAMES_MAX: u64 = 4_000_000;
+
+/// The LED-frames a pattern keeps fitted on one group's lights, which is what
+/// [`SCENE_PATTERN_LED_FRAMES_MAX`] counts. `shapes` is each light's LED count and arrangement.
+/// Lights of one shape share one fitted set, so they count once; a sequence is one run of every
+/// light's LEDs end to end (`run`). A pattern that stands still keeps no frames at all.
+pub fn fitted_led_frames(pattern: &Pattern, shapes: &[(u32, Arrangement)], run: bool) -> u64 {
+    if Timeline::of(pattern).is_still() {
+        return 0;
+    }
+    let mut counted: Vec<(u32, Arrangement)> = Vec::new();
+    let mut leds: u64 = 0;
+    for shape in shapes {
+        if run || !counted.contains(shape) {
+            counted.push(*shape);
+            leds += u64::from(shape.0);
+        }
+    }
+    pattern.frames.len() as u64 * leds
+}
 
 /// The colours for one light, in position order (the order the owner sees the device in; the
 /// engine applies the light's own `reversed` afterwards). `source` is the pattern's frame.

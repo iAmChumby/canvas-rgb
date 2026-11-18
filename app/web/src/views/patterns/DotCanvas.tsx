@@ -50,6 +50,7 @@ export function DotCanvas({
   colours,
   spin,
   play,
+  playClock,
   overlay,
   ledOrder,
   label,
@@ -72,6 +73,13 @@ export function DotCanvas({
    * reduced motion and while a press is down, as the spin does.
    */
   play?: Pick<Pattern, "frames" | "playback"> | null;
+  /**
+   * When the lights' clock started, in the page's `performance.now()` time (#481). The played
+   * document runs from there, so the dots and the lights are in phase: the daemon starts a new
+   * document's clock when its PUT lands. `null` is a PUT not yet answered: the dots wait on the first
+   * moment. Left out, the played document runs from the first frame the dots draw, as before.
+   */
+  playClock?: number | null;
   /** Drawn over the surface, in its box (the Gradient tool's handles). */
   overlay?: ReactNode;
   /**
@@ -199,14 +207,16 @@ export function DotCanvas({
       started.current ??= now;
       const ms = now - started.current;
       if (held.current) draw(colours);
-      else if (played && play) draw(evalPattern(play, ms, spin ?? null, played.timeline, played.labs));
-      else if (spin) draw(spinColours(colours, spin, ms / 1000, labs ?? undefined));
+      else if (played && play) {
+        const origin = playClock === undefined ? started.current : playClock;
+        draw(evalPattern(play, origin === null ? 0 : Math.max(0, now - origin), spin ?? null, played.timeline, played.labs));
+      } else if (spin) draw(spinColours(colours, spin, ms / 1000, labs ?? undefined));
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // `dots` carries the box; `theme` re-reads the tokens when it changes.
-  }, [dots, colours, theme, spin, labs, played, play]);
+  }, [dots, colours, theme, spin, labs, played, play, playClock]);
 
   /** The pointer's place in the surface, and the dots of the box it is in. */
   const place = (event: ReactPointerEvent<HTMLCanvasElement>): { x: number; y: number; dots: Dot[] } => {

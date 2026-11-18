@@ -118,7 +118,7 @@ import type { Pattern } from "@/proto/Pattern";
 import type { PatternsResponse } from "@/proto/PatternsResponse";
 import type { DeletePatternResponse } from "@/proto/DeletePatternResponse";
 import type { LightFit } from "@/proto/LightFit";
-import { fitKind, kindWords, runFit } from "@/lib/patternFit";
+import { kindWords, lightFits } from "@/lib/patternFit";
 import type { StackPreviewRequest } from "@/proto/StackPreviewRequest";
 import type { StackPreviewResponse } from "@/proto/StackPreviewResponse";
 import type { StackSummary } from "@/proto/StackSummary";
@@ -1555,25 +1555,18 @@ function patternFits(s: DemoState, group: Group): LightFit[] {
   const id = group.plays.type === "effect" ? group.plays.effect : undefined;
   const pattern = id ? s.patterns[id] : undefined;
   if (!pattern) return [];
-  // The members the pattern lands on, in the group's order: the daemon leaves a light with no
-  // LEDs out of the fits, because it plays nothing there.
-  const placed = group.members.flatMap((member) => {
+  // The members the pattern lands on, in the group's order: `lightFits` leaves a light with no
+  // LEDs out, because the daemon's `member_fits` leaves it out. A light whose device is unplugged
+  // keeps its place and its LEDs in the run, as the daemon keeps them (#504).
+  const members = group.members.flatMap((member) => {
     const light = s.lights.find((l) => l.light.id === member);
-    return light && light.connected && light.led_count > 0 ? [light] : [];
+    return light ? [light] : [];
   });
   // A group with a sequence (#468) fits the pattern once to every member's LEDs joined end to
-  // end, so every light reports the fit of that whole run, as the daemon does (`group_fits` in
+  // end, so every light reports the fit of that whole run, as the daemon does (`member_fits` in
   // crates/canvas-daemon/src/scenes.rs). Before #504 this was per light, and "One ring" on two
   // 40-LED fans said "Fits" where the daemon said "Stretched".
-  const run = runFit(
-    pattern.built_on,
-    group.sequence,
-    placed.map((light) => light.led_count),
-  );
-  return placed.map((light) => ({
-    light: light.light.id,
-    fit: run ?? fitKind(pattern.built_on, light.led_count, light.light.arrangement),
-  }));
+  return lightFits(pattern.built_on, members, group.sequence);
 }
 
 function currentProps(e: DemoEffect): Props {
