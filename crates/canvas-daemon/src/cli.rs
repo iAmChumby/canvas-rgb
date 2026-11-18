@@ -290,7 +290,8 @@ pub enum ScenesCommand {
 pub struct CreateArgs {
     /// The new scene's name.
     pub name: String,
-    /// A JSON file holding the groups: an array of `NewGroup`.
+    /// A JSON file holding the groups: an array of `NewGroup`, each with a `sequence` of
+    /// `"ring"`, `"line"` or `"each"` when the group runs its effect as one.
     #[arg(long, value_name = "FILE")]
     pub from: Option<String>,
     /// The run this create belongs to: its record is `agent-runs/<run>.json`.
@@ -306,7 +307,8 @@ pub struct CreateArgs {
 pub struct EditArgs {
     /// The scene, by id or name.
     pub scene: String,
-    /// A JSON file holding the groups: an array of `NewGroup`.
+    /// A JSON file holding the groups: an array of `NewGroup`, each with a `sequence` of
+    /// `"ring"`, `"line"` or `"each"` when the group runs its effect as one.
     #[arg(long, value_name = "FILE")]
     pub from: String,
     /// The run that made the scene: its record is `agent-runs/<run>.json`.
@@ -1651,7 +1653,7 @@ pub fn scenes_create(api: &dyn Api, args: &CreateArgs, json: bool) -> Result<Out
     let body = serde_json::to_string(&canvas_proto::api::SceneCreate {
         name,
         copy_of: None,
-        groups,
+        groups: groups.map(|held| held.into_iter().map(|file| file.group).collect()),
         dry_run: args.dry_run,
     })
     .map_err(|e| CliError::Other(e.to_string()))?;
@@ -1920,9 +1922,21 @@ fn scenes_of(list: &serde_json::Value) -> Vec<serde_json::Value> {
 /// The most a `--from` file may hold: 1 MiB.
 const GROUPS_FILE_MAX: u64 = 1024 * 1024;
 
+/// One group of a `--from <groups.json>` file: the [`canvas_proto::api::NewGroup`] the file holds,
+/// and whether the file named its shape.
+///
+/// The shape is [`canvas_proto::api::NewGroup::sequence`] (`"ring"` or `"line"`), and `"each"` is
+/// the file's word for no run at all (#504). Whether the file said anything matters: a group with
+/// no shape in it keeps the scene's group of the same name's shape, where a group that says
+/// `"each"` goes back to each light.
+struct FileGroup {
+    group: canvas_proto::api::NewGroup,
+    shape_named: bool,
+}
+
 /// The groups a `--from <groups.json>` file holds: an array of [`canvas_proto::api::NewGroup`].
 /// A file over [`GROUPS_FILE_MAX`] is refused without being read whole.
-fn read_groups(file: &str) -> Result<Vec<canvas_proto::api::NewGroup>, CliError> {
+fn read_groups(file: &str) -> Result<Vec<FileGroup>, CliError> {
     use std::io::Read as _;
     let unreadable = |e: std::io::Error| CliError::Other(format!("could not read {file}: {e}"));
     let mut text = String::new();
@@ -1934,8 +1948,26 @@ fn read_groups(file: &str) -> Result<Vec<canvas_proto::api::NewGroup>, CliError>
     if text.len() as u64 > GROUPS_FILE_MAX {
         return Err(CliError::Other(format!("{file} is over 1 MiB, more than a groups file may hold")));
     }
-    serde_json::from_str(&text)
-        .map_err(|e| CliError::Other(format!("{file} is not a list of groups: {e}")))
+    let values: Vec<serde_json::Value> = serde_json::from_str(&text)
+        .map_err(|e| CliError::Other(format!("{file} is not a list of groups: {e}")))?;
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(n, mut value)| {
+            // "each" is no run, which `NewGroup` says by leaving the field out.
+            let says_each = value.get("sequence").and_then(|v| v.as_str()) == Some("each");
+            let shape_named = says_each || value.get("sequence").is_some();
+            if says_each {
+                if let Some(fields) = value.as_object_mut() {
+                    fields.remove("sequence");
+                }
+            }
+            let group = serde_json::from_value(value).map_err(|e| {
+                CliError::Other(format!("{file}: group {} is not a group: {e}", n + 1))
+            })?;
+            Ok(FileGroup { group, shape_named })
+        })
+        .collect()
 }
 
 /// The groups a scene holds after an edit: each [`canvas_proto::api::NewGroup`] with an id.
@@ -1944,27 +1976,32 @@ fn read_groups(file: &str) -> Result<Vec<canvas_proto::api::NewGroup>, CliError>
 /// its props or its brightness keeps the id the editor knows it by; a new name gets
 /// [`slug`](crate::scenes::slug) and, when that is taken, a number.
 ///
-/// It also keeps that group's `sequence` (#504): a groups file cannot name a shape, so a group
-/// of the same name keeps the one the owner set. Without this, every CLI edit quietly turned
-/// "One ring" and "One line" back into "Each light". A new name starts at each light.
+/// The shape is the file's when it names one (`"ring"`, `"line"` or `"each"`), even on a group
+/// whose name changed (#504); without one, a group of the same name keeps the shape the owner
+/// set (#510), so a plain edit never quietly turned "One ring" and "One line" back into "Each
+/// light". A new name starts at each light.
 fn groups_with_ids(
-    groups: &[canvas_proto::api::NewGroup],
+    groups: &[FileGroup],
     current: &[canvas_proto::scene::Group],
 ) -> Vec<canvas_proto::scene::Group> {
     let mut used: Vec<String> = Vec::new();
     let mut out = Vec::with_capacity(groups.len());
-    for group in groups {
+    for file in groups {
+        let group = &file.group;
         let kept = current
             .iter()
             .find(|old| old.name == group.name && !used.contains(&old.id));
         let (id, sequence) = match kept {
-            Some(old) => (old.id.clone(), old.sequence),
+            Some(old) => (
+                old.id.clone(),
+                if file.shape_named { group.sequence } else { old.sequence },
+            ),
             None => (
                 crate::scenes::fresh_id(
                     &crate::scenes::slug(&group.name),
                     used.iter().map(String::as_str),
                 ),
-                None,
+                group.sequence,
             ),
         };
         used.push(id.clone());
@@ -4728,10 +4765,9 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_keeps_a_group_shape_a_groups_file_cannot_name() {
-        // #504: `Group.sequence` (One ring / One line) has no place in a `NewGroup`, so an edit
-        // takes it from the scene's group of the same name. Without that, every CLI edit turned a
-        // ring or line group back into each light, and nothing said so.
+    fn an_edit_keeps_a_group_shape_the_file_does_not_name() {
+        // #510: a groups file that names no shape leaves each group's shape as the owner set it.
+        // Without that, every CLI edit turned a ring or line group back into each light, silently.
         let home = TempHome::new("edit-sequence");
         home.write(
             "agent-runs/agent-1.json",
@@ -4770,6 +4806,74 @@ mod tests {
             "Wall keeps its One line: {body}"
         );
         assert_eq!(sent.groups[2].sequence, None, "a new group starts at each light: {body}");
+    }
+
+    #[test]
+    fn a_groups_file_names_a_shape_and_a_renamed_group_keeps_it() {
+        // #504 item 3: the file's `sequence` is the shape the edit asks for, so a renamed group
+        // keeps the one the file names, and `"each"` takes a group back to each light.
+        let home = TempHome::new("edit-named-sequence");
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming"),
+        );
+        let mut list = run_scenes();
+        list["scenes"][1]["groups"] = serde_json::json!([
+            { "id": "lamp", "name": "Lamp", "members": ["fake:b#z0"], "plays": { "type": "off" },
+              "sequence": "ring" },
+            { "id": "shelf", "name": "Shelf", "members": ["fake:c#z0"], "plays": { "type": "off" },
+              "sequence": "ring" },
+        ]);
+        let api = RunApi::answering(list, a_saved_scene());
+        let groups = home.write(
+            "groups.json",
+            r#"[{"name":"Lamp Desk","members":["fake:b#z0"],"plays":{"type":"off"},"sequence":"line"},{"name":"Shelf","members":["fake:c#z0"],"plays":{"type":"off"},"sequence":"each"},{"name":"Desk","members":["fake:d#z0"],"plays":{"type":"off"},"sequence":"ring"}]"#,
+        );
+        let args = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        scenes_edit(&api, &args, false).unwrap();
+
+        let (_, _, body) = api.write();
+        let body: serde_json::Value = serde_json::from_str(body.as_deref().expect("a body")).unwrap();
+        let sent: canvas_proto::scene::Scene =
+            serde_json::from_value(body["scene"].clone()).expect("the body is a scene");
+        assert_eq!(sent.groups[0].id, "lamp-desk", "the rename makes a new group: {body}");
+        assert_eq!(
+            sent.groups[0].sequence,
+            Some(canvas_proto::scene::SequenceShape::Line),
+            "the renamed group keeps the shape the file names: {body}"
+        );
+        assert_eq!(sent.groups[1].id, "shelf", "a group of the same name keeps its id: {body}");
+        assert_eq!(sent.groups[1].sequence, None, "\"each\" takes it back to each light: {body}");
+        assert_eq!(
+            sent.groups[2].sequence,
+            Some(canvas_proto::scene::SequenceShape::Ring),
+            "a new group takes the file's shape: {body}"
+        );
+    }
+
+    #[test]
+    fn a_groups_file_names_the_shape_a_create_asks_for() {
+        // #504 item 3: a scene is made as a ring or a line in one request, and `"each"` is simply
+        // no shape on the wire, as `NewGroup` reads an absent `sequence`.
+        let home = TempHome::new("create-sequence");
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let groups = home.write(
+            "groups.json",
+            r#"[{"name":"Ring","members":["fake:a#z0"],"plays":{"type":"off"},"sequence":"ring"},{"name":"Each","members":["fake:b#z0"],"plays":{"type":"off"},"sequence":"each"},{"name":"Plain","members":["fake:c#z0"],"plays":{"type":"off"}}]"#,
+        );
+        let args = CreateArgs {
+            name: "Night".into(),
+            from: Some(groups),
+            run: Some("agent-1".into()),
+            dry_run: false,
+        };
+        scenes_create(&api, &args, false).unwrap();
+
+        let (_, _, body) = api.write();
+        let body: serde_json::Value = serde_json::from_str(body.as_deref().expect("a body")).unwrap();
+        assert_eq!(body["groups"][0]["sequence"], "ring", "{body}");
+        assert!(body["groups"][1].get("sequence").is_none(), "\"each\" sends no shape: {body}");
+        assert!(body["groups"][2].get("sequence").is_none(), "no shape sends none: {body}");
     }
 
     #[test]

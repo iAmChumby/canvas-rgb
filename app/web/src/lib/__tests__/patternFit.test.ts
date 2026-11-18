@@ -29,11 +29,15 @@ interface VectorCase {
   fit: FitKind;
 }
 
-/** One member of a run case: the light, its zone's LEDs, and whether the device is listed. */
+/** One member of a run case: the light, its slice, its zone's LEDs and whether the device is listed. */
 interface RunMember {
   light: string;
   arrangement: Arrangement;
   zone_leds: number | null;
+  /** The run of the zone the light owns (`Light::leds`), or null for the whole zone. */
+  leds: { start: number; count: number } | null;
+  /** The LED count `GET /lights` answers: the count the editor's fit reads. */
+  led_count: number;
   connected: boolean;
 }
 
@@ -156,12 +160,14 @@ describe("the pattern fit", () => {
   it("lightFits matches the daemon's member_fits on the shared run vectors", () => {
     const file = vectors();
     // A trimmed or stale file fails here rather than passing quietly.
-    expect(file.run_cases.length).toBe(10);
+    expect(file.run_cases.length).toBe(13);
     for (const testCase of file.run_cases) {
       const lights = testCase.members.map((member) => {
-        // A light whose device is not listed reads no LEDs, as `GET /lights` answers it.
-        const view = light(member.light, member.zone_leds ?? 0, member.arrangement);
-        return { ...view, connected: member.connected && member.zone_leds !== null };
+        // The editor reads `LightView.led_count`, the API's answer — the engine's
+        // `light_led_count`, which clamps a slice to its zone and caps a damaged zone. A change
+        // to that rule on the API's side alone changes this number and this test with it.
+        const view = light(member.light, member.led_count, member.arrangement);
+        return { ...view, connected: member.connected };
       });
       expect(
         lightFits(testCase.built_on, lights, testCase.sequence),
