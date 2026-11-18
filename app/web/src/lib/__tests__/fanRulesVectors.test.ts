@@ -10,7 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import * as fanRules from "@/lib/fan-rules";
-import { baseFloor, cpuLimitInIdleRange, hotFloor } from "@/lib/fan-rules";
+import { baseFloor, hotFloor } from "@/lib/fan-rules";
 
 interface ConstantRow {
   name: string;
@@ -19,8 +19,7 @@ interface ConstantRow {
 
 type CaseRow =
   | { name: string; rule: "baseFloor"; header: string; configured: number; expected: number }
-  | { name: string; rule: "hotFloor"; header: string; configured: number; expected: number }
-  | { name: string; rule: "cpuLimitInIdleRange"; kind: string; limit_c: number; expected: boolean };
+  | { name: string; rule: "hotFloor"; header: string; configured: number; expected: number };
 
 interface Vectors {
   note: string;
@@ -59,14 +58,13 @@ const exportName: Record<string, string> = {
   HOT_TEMP_C: "HOT_TEMP_C",
   HOT_FLOOR_PERCENT: "HOT_FLOOR",
   HOT_CPU_FAN_FLOOR_PERCENT: "HOT_CPU_FAN_FLOOR",
-  CPU_IDLE_LIMIT_C: "CPU_IDLE_LIMIT_C",
 };
 
 describe("the Rust fan rules' own output", () => {
   it("fan-rules.ts mirrors every spine constant", () => {
     const doc = vectors();
     // A trimmed or stale file fails here rather than passing quietly.
-    expect(doc.constants.length).toBe(9);
+    expect(doc.constants.length).toBe(8);
     expect(Object.keys(exportName).sort()).toEqual(doc.constants.map((row) => row.name).sort());
     const exports = fanRules as unknown as Record<string, number | string>;
     for (const row of doc.constants) {
@@ -78,14 +76,11 @@ describe("the Rust fan rules' own output", () => {
   it("fan-rules.ts matches the Rust fan rules on every row", () => {
     const doc = vectors();
     // A trimmed or stale file fails here rather than passing quietly.
-    expect(doc.cases.length).toBe(33);
+    expect(doc.cases.length).toBe(286);
     for (const row of doc.cases) {
-      const actual =
-        row.rule === "baseFloor"
-          ? baseFloor(row.header, row.configured)
-          : row.rule === "hotFloor"
-            ? hotFloor(row.header, row.configured)
-            : cpuLimitInIdleRange(row.kind, row.limit_c);
+      const actual = row.rule === "baseFloor"
+        ? baseFloor(row.header, row.configured)
+        : hotFloor(row.header, row.configured);
       expect(actual, `${row.name}: ${row.rule}`).toBe(row.expected);
     }
   });

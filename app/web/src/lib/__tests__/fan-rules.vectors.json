@@ -1,5 +1,5 @@
 {
-  "note": "The Rust fan rule's constants and verdicts for fixed inputs. Printed by crates/canvas-svc/examples/fan_rules_vectors.rs; tools/fan-rules-vectors.ps1 writes this file. The editor's TypeScript mirror (app/web/src/lib/fan-rules.ts) is checked against it. The hotFloor rows use runtime_floor at HOT_TEMP_C: the floor while a header is hot.",
+  "note": "The spine's fan constants and the daemon's fan-rule verdicts for fixed inputs. Printed by crates/canvas-svc/examples/fan_rules_vectors.rs; tools/fan-rules-vectors.ps1 writes this file. The editor's TypeScript mirror (app/web/src/lib/fan-rules.ts) is checked against it. Header ids come from crate::chip's channel tables plus the spine's GPU prefix. baseFloor rows use floor_for (or runtime_floor_at with no reading and the hot line argument); hotFloor rows use the daemon's live runtime_floor_at call at that hot line.",
   "constants": [
     {
       "name": "CPU_FAN_HEADER",
@@ -32,243 +32,2504 @@
     {
       "name": "HOT_CPU_FAN_FLOOR_PERCENT",
       "value": 50
-    },
-    {
-      "name": "CPU_IDLE_LIMIT_C",
-      "value": 60
     }
   ],
   "cases": [
     {
-      "name": "a system header with no configured floor",
+      "name": "cpu_fan base floor at configured 0",
       "rule": "baseFloor",
-      "header": "sys_fan1",
+      "rust": "floor_for",
+      "header": "cpu_fan",
       "configured": 0,
-      "expected": 20
+      "expected": 30
     },
     {
-      "name": "a system header just under the default",
+      "name": "cpu_fan base floor at configured 19",
       "rule": "baseFloor",
-      "header": "sys_fan1",
+      "rust": "floor_for",
+      "header": "cpu_fan",
       "configured": 19,
-      "expected": 20
+      "expected": 30
     },
     {
-      "name": "a system header at the default",
+      "name": "cpu_fan base floor at configured 20",
       "rule": "baseFloor",
-      "header": "sys_fan1",
+      "rust": "floor_for",
+      "header": "cpu_fan",
       "configured": 20,
-      "expected": 20
+      "expected": 30
     },
     {
-      "name": "a system header just over the default",
+      "name": "cpu_fan base floor at configured 21",
       "rule": "baseFloor",
-      "header": "sys_fan1",
+      "rust": "floor_for",
+      "header": "cpu_fan",
       "configured": 21,
-      "expected": 21
-    },
-    {
-      "name": "a system header at the top",
-      "rule": "baseFloor",
-      "header": "sys_fan1",
-      "configured": 100,
-      "expected": 100
-    },
-    {
-      "name": "the CPU header with no configured floor",
-      "rule": "baseFloor",
-      "header": "cpu_fan",
-      "configured": 0,
       "expected": 30
     },
     {
-      "name": "the CPU header with the default floor",
+      "name": "cpu_fan base floor at configured 29",
       "rule": "baseFloor",
-      "header": "cpu_fan",
-      "configured": 20,
-      "expected": 30
-    },
-    {
-      "name": "the CPU header just under its minimum",
-      "rule": "baseFloor",
+      "rust": "floor_for",
       "header": "cpu_fan",
       "configured": 29,
       "expected": 30
     },
     {
-      "name": "the CPU header at its minimum",
+      "name": "cpu_fan base floor at configured 30",
       "rule": "baseFloor",
+      "rust": "floor_for",
       "header": "cpu_fan",
       "configured": 30,
       "expected": 30
     },
     {
-      "name": "the CPU header just over its minimum",
+      "name": "cpu_fan base floor at configured 31",
       "rule": "baseFloor",
+      "rust": "floor_for",
       "header": "cpu_fan",
       "configured": 31,
       "expected": 31
     },
     {
-      "name": "a GPU header with no configured floor",
+      "name": "cpu_fan base floor at configured 35",
       "rule": "baseFloor",
-      "header": "gpu_fan1",
-      "configured": 0,
-      "expected": 30
-    },
-    {
-      "name": "a GPU header with the default floor",
-      "rule": "baseFloor",
-      "header": "gpu_fan1",
-      "configured": 20,
-      "expected": 30
-    },
-    {
-      "name": "a GPU header just under its minimum",
-      "rule": "baseFloor",
-      "header": "gpu_fan1",
-      "configured": 29,
-      "expected": 30
-    },
-    {
-      "name": "a GPU header at its minimum",
-      "rule": "baseFloor",
-      "header": "gpu_fan1",
-      "configured": 30,
-      "expected": 30
-    },
-    {
-      "name": "a GPU header just over its minimum",
-      "rule": "baseFloor",
-      "header": "gpu_fan1",
-      "configured": 31,
-      "expected": 31
-    },
-    {
-      "name": "a second GPU header above its minimum",
-      "rule": "baseFloor",
-      "header": "gpu_fan2",
-      "configured": 45,
-      "expected": 45
-    },
-    {
-      "name": "a system header in the hot state",
-      "rule": "hotFloor",
-      "header": "sys_fan1",
-      "configured": 20,
-      "expected": 35
-    },
-    {
-      "name": "a system header at its hot floor",
-      "rule": "hotFloor",
-      "header": "sys_fan1",
+      "rust": "floor_for",
+      "header": "cpu_fan",
       "configured": 35,
       "expected": 35
     },
     {
-      "name": "a system header just over its hot floor",
-      "rule": "hotFloor",
-      "header": "sys_fan1",
-      "configured": 36,
-      "expected": 36
-    },
-    {
-      "name": "the CPU header in the hot state",
-      "rule": "hotFloor",
+      "name": "cpu_fan base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
       "header": "cpu_fan",
-      "configured": 20,
-      "expected": 50
+      "configured": 45,
+      "expected": 45
     },
     {
-      "name": "the CPU header just under its hot floor",
-      "rule": "hotFloor",
+      "name": "cpu_fan base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
       "header": "cpu_fan",
       "configured": 49,
-      "expected": 50
+      "expected": 49
     },
     {
-      "name": "the CPU header at its hot floor",
-      "rule": "hotFloor",
+      "name": "cpu_fan base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
       "header": "cpu_fan",
       "configured": 50,
       "expected": 50
     },
     {
-      "name": "the CPU header just over its hot floor",
-      "rule": "hotFloor",
+      "name": "cpu_fan base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
       "header": "cpu_fan",
       "configured": 51,
       "expected": 51
     },
     {
-      "name": "a GPU header in the hot state",
+      "name": "cpu_fan base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "cpu_fan",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "cpu_fan hot floor at configured 0",
       "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "cpu_fan",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "cpu_fan hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "cpu_fan",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "cpu_fan hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "cpu_fan",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "cpu_fan hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "cpu_fan",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "cpu_fan hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "cpu_fan",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "cpu_fan hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "cpu_fan",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "cpu_fan hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "cpu_fan",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "cpu_fan hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "cpu_fan",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "cpu_fan base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "cpu_fan",
+      "configured": 20,
+      "expected": 30
+    },
+    {
+      "name": "pump_fan base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 0,
+      "expected": 20
+    },
+    {
+      "name": "pump_fan base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 19,
+      "expected": 20
+    },
+    {
+      "name": "pump_fan base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "pump_fan base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 21,
+      "expected": 21
+    },
+    {
+      "name": "pump_fan base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 29,
+      "expected": 29
+    },
+    {
+      "name": "pump_fan base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "pump_fan base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "pump_fan base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "pump_fan base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "pump_fan base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "pump_fan base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "pump_fan base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "pump_fan base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "pump_fan hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "pump_fan hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "pump_fan hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "pump_fan hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "pump_fan hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "pump_fan hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "pump_fan hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "pump_fan hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "pump_fan base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan1 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 0,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan1 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 19,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan1 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan1 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 21,
+      "expected": 21
+    },
+    {
+      "name": "sys_fan1 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 29,
+      "expected": 29
+    },
+    {
+      "name": "sys_fan1 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "sys_fan1 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "sys_fan1 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan1 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "sys_fan1 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan1 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan1 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan1 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan1",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "sys_fan1 hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan1",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan1 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan1",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan1 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan1",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan1 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan1",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan1 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan1",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "sys_fan1 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan1",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan1 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan1",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan1 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan1",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan1 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan1",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan2 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 0,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan2 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 19,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan2 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan2 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 21,
+      "expected": 21
+    },
+    {
+      "name": "sys_fan2 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 29,
+      "expected": 29
+    },
+    {
+      "name": "sys_fan2 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "sys_fan2 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "sys_fan2 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan2 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "sys_fan2 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan2 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan2 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan2 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan2",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "sys_fan2 hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan2",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan2 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan2",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan2 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan2",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan2 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan2",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan2 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan2",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "sys_fan2 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan2",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan2 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan2",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan2 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan2",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan2 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan2",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan3 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 0,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan3 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 19,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan3 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan3 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 21,
+      "expected": 21
+    },
+    {
+      "name": "sys_fan3 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 29,
+      "expected": 29
+    },
+    {
+      "name": "sys_fan3 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "sys_fan3 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "sys_fan3 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan3 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "sys_fan3 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan3 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan3 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan3 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan3",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "sys_fan3 hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan3",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan3 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan3",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan3 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan3",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan3 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan3",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan3 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan3",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "sys_fan3 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan3",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan3 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan3",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan3 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan3",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan3 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan3",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan4 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 0,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan4 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 19,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan4 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan4 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 21,
+      "expected": 21
+    },
+    {
+      "name": "sys_fan4 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 29,
+      "expected": 29
+    },
+    {
+      "name": "sys_fan4 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "sys_fan4 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "sys_fan4 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan4 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "sys_fan4 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan4 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan4 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan4 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan4",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "sys_fan4 hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan4",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan4 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan4",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan4 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan4",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan4 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan4",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan4 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan4",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "sys_fan4 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan4",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan4 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan4",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan4 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan4",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan4 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan4",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan5 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 0,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan5 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 19,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan5 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan5 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 21,
+      "expected": 21
+    },
+    {
+      "name": "sys_fan5 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 29,
+      "expected": 29
+    },
+    {
+      "name": "sys_fan5 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "sys_fan5 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "sys_fan5 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan5 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "sys_fan5 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan5 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan5 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan5 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan5",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "sys_fan5 hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan5",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan5 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan5",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan5 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan5",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan5 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan5",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan5 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan5",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "sys_fan5 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan5",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan5 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan5",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan5 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan5",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan5 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan5",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan6 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 0,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan6 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 19,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan6 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "sys_fan6 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 21,
+      "expected": 21
+    },
+    {
+      "name": "sys_fan6 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 29,
+      "expected": 29
+    },
+    {
+      "name": "sys_fan6 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "sys_fan6 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "sys_fan6 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan6 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "sys_fan6 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan6 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan6 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan6 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "sys_fan6",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "sys_fan6 hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan6",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan6 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan6",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan6 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan6",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan6 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan6",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "sys_fan6 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan6",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "sys_fan6 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan6",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "sys_fan6 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan6",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "sys_fan6 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan6",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "sys_fan6 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "sys_fan6",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "pump_fan2 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 0,
+      "expected": 20
+    },
+    {
+      "name": "pump_fan2 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 19,
+      "expected": 20
+    },
+    {
+      "name": "pump_fan2 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "pump_fan2 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 21,
+      "expected": 21
+    },
+    {
+      "name": "pump_fan2 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 29,
+      "expected": 29
+    },
+    {
+      "name": "pump_fan2 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "pump_fan2 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "pump_fan2 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "pump_fan2 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "pump_fan2 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "pump_fan2 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "pump_fan2 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "pump_fan2 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "pump_fan2",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "pump_fan2 hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan2",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "pump_fan2 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan2",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "pump_fan2 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan2",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "pump_fan2 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan2",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "pump_fan2 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan2",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "pump_fan2 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan2",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "pump_fan2 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan2",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "pump_fan2 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan2",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "pump_fan2 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "pump_fan2",
+      "configured": 20,
+      "expected": 20
+    },
+    {
+      "name": "gpu_fan1 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan1",
+      "configured": 0,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan1 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan1",
+      "configured": 19,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan1 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
       "header": "gpu_fan1",
       "configured": 20,
-      "expected": 35
+      "expected": 30
     },
     {
-      "name": "a GPU header just under its hot floor",
-      "rule": "hotFloor",
+      "name": "gpu_fan1 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
       "header": "gpu_fan1",
-      "configured": 34,
-      "expected": 35
+      "configured": 21,
+      "expected": 30
     },
     {
-      "name": "a GPU header at its hot floor",
-      "rule": "hotFloor",
+      "name": "gpu_fan1 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan1",
+      "configured": 29,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan1 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan1",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan1 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan1",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "gpu_fan1 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
       "header": "gpu_fan1",
       "configured": 35,
       "expected": 35
     },
     {
-      "name": "a GPU header just over its hot floor",
+      "name": "gpu_fan1 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan1",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "gpu_fan1 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan1",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "gpu_fan1 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan1",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "gpu_fan1 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan1",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "gpu_fan1 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan1",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "gpu_fan1 hot floor at configured 0",
       "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan1",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan1 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan1",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan1 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan1",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan1 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan1",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan1 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
       "header": "gpu_fan1",
       "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
       "expected": 36
     },
     {
-      "name": "a CPU line at the issue's example value",
-      "rule": "cpuLimitInIdleRange",
-      "kind": "cpu",
-      "limit_c": 50,
-      "expected": true
+      "name": "gpu_fan1 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan1",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
     },
     {
-      "name": "a CPU line just under the threshold",
-      "rule": "cpuLimitInIdleRange",
-      "kind": "cpu",
-      "limit_c": 59,
-      "expected": true
+      "name": "gpu_fan1 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan1",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
     },
     {
-      "name": "a CPU line at the threshold",
-      "rule": "cpuLimitInIdleRange",
-      "kind": "cpu",
-      "limit_c": 60,
-      "expected": false
+      "name": "gpu_fan1 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan1",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
     },
     {
-      "name": "a CPU line just over the threshold",
-      "rule": "cpuLimitInIdleRange",
-      "kind": "cpu",
-      "limit_c": 61,
-      "expected": false
+      "name": "gpu_fan1 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan1",
+      "configured": 20,
+      "expected": 30
     },
     {
-      "name": "a GPU line is not the CPU warning",
-      "rule": "cpuLimitInIdleRange",
-      "kind": "gpu",
-      "limit_c": 50,
-      "expected": false
+      "name": "gpu_fan2 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 0,
+      "expected": 30
     },
     {
-      "name": "a board line is not the CPU warning",
-      "rule": "cpuLimitInIdleRange",
-      "kind": "board",
-      "limit_c": 50,
-      "expected": false
+      "name": "gpu_fan2 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 19,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 20,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 21,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 29,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "gpu_fan2 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan2",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "gpu_fan2 hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan2",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan2 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan2",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan2 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan2",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan2 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan2",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan2 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan2",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "gpu_fan2 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan2",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "gpu_fan2 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan2",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "gpu_fan2 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan2",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "gpu_fan2 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan2",
+      "configured": 20,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 0,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 19,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 20,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 21,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 29,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "gpu_fan3 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan3",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "gpu_fan3 hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan3",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan3 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan3",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan3 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan3",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan3 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan3",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan3 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan3",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "gpu_fan3 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan3",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "gpu_fan3 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan3",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "gpu_fan3 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan3",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "gpu_fan3 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan3",
+      "configured": 20,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 0",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 0,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 19",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 19,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 20",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 20,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 21",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 21,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 29",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 29,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 30",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 30,
+      "expected": 30
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 31",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 31,
+      "expected": 31
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 35",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 35,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 45",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 45,
+      "expected": 45
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 49",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 49,
+      "expected": 49
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 50",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 50,
+      "expected": 50
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 51",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 51,
+      "expected": 51
+    },
+    {
+      "name": "gpu_fan4 base floor at configured 100",
+      "rule": "baseFloor",
+      "rust": "floor_for",
+      "header": "gpu_fan4",
+      "configured": 100,
+      "expected": 100
+    },
+    {
+      "name": "gpu_fan4 hot floor at configured 0",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan4",
+      "configured": 0,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan4 hot floor at configured 20",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan4",
+      "configured": 20,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan4 hot floor at configured 34",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan4",
+      "configured": 34,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan4 hot floor at configured 35",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan4",
+      "configured": 35,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 35
+    },
+    {
+      "name": "gpu_fan4 hot floor at configured 36",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan4",
+      "configured": 36,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 36
+    },
+    {
+      "name": "gpu_fan4 hot floor at configured 49",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan4",
+      "configured": 49,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 49
+    },
+    {
+      "name": "gpu_fan4 hot floor at configured 50",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan4",
+      "configured": 50,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 50
+    },
+    {
+      "name": "gpu_fan4 hot floor at configured 51",
+      "rule": "hotFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan4",
+      "configured": 51,
+      "temp_c": 50,
+      "hot_c": 50,
+      "expected": 51
+    },
+    {
+      "name": "gpu_fan4 base floor from runtime_floor_at with no reading",
+      "rule": "baseFloor",
+      "rust": "runtime_floor_at",
+      "header": "gpu_fan4",
+      "configured": 20,
+      "expected": 30
     }
   ]
 }

@@ -398,3 +398,30 @@ describe("the demo's lights PATCH keeps the first LED as the daemon does (#468)"
     expect((await firstLight(demo)).first_led ?? null).toBeNull();
   });
 });
+
+// #507: the demo backend used to keep its own floor copy, so it accepted a GPU Fixed duty the
+// daemon refuses. It now uses the same fan-rules.ts function as the editor.
+describe("the demo's fan floor", () => {
+  async function freshDemo(): Promise<typeof import("@/lib/demo")> {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/");
+    return import("@/lib/demo");
+  }
+
+  it("refuses a GPU Fixed duty under the daemon's 30% floor, in the daemon's words", async () => {
+    const demo = await freshDemo();
+    let message = "";
+    try {
+      await demo.demoRequest("PATCH", "/api/v1/fans/headers/gpu_fan1", { mode: "fixed", percent: 25 });
+    } catch (e) {
+      message = messageOf(e);
+    }
+    expect(message).toBe("gpu_fan1: 25% is below the floor of 30%");
+  });
+
+  it("accepts a GPU Fixed duty at the daemon's floor", async () => {
+    const demo = await freshDemo();
+    const answer = await demo.demoRequest("PATCH", "/api/v1/fans/headers/gpu_fan1", { mode: "fixed", percent: 30 });
+    expect(answer).toMatchObject({ ok: true, header: "gpu_fan1" });
+  });
+});

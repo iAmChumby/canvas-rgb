@@ -12,20 +12,18 @@
 //! This crate owns the printer and the freshness test rather than `canvas-proto`: the spine cannot
 //! depend on a tool, and `canvas-svc` already has the fan tests that cover these rules
 //! (`src/fans_tests.rs`, `src/gpu_fans_tests.rs`). Every constant and rule read below comes from
-//! `canvas_proto::fans`; nothing in the spine is edited.
+//! `canvas_proto::fans`; nothing in the spine is edited. The header ids are read from this crate's
+//! own channel tables (`src/chip.rs`), so a header the chip gains appears as a new row.
 //!
-//! The JSON is written by hand (no serde here), as in the drive vectors printer: it is a small,
-//! fixed set of rows, and this keeps the printer's dependencies as they are.
+//! The JSON is written by hand (no serde here), as in the drive vectors printer: it is a fixed set
+//! of rows, and this keeps the printer's dependencies as they are.
 
 use canvas_proto::fans::{
-    floor_for, runtime_floor, CPU_FAN_HEADER, CPU_FAN_MIN_PERCENT, DEFAULT_FLOOR_PERCENT,
+    floor_for, runtime_floor_at, CPU_FAN_HEADER, CPU_FAN_MIN_PERCENT, DEFAULT_FLOOR_PERCENT,
     GPU_FAN_HEADER_PREFIX, GPU_FAN_MIN_PERCENT, HOT_CPU_FAN_FLOOR_PERCENT, HOT_FLOOR_PERCENT,
     HOT_TEMP_C,
 };
-
-/// The editor's idle-range warning sits ten degrees over the spine's hot line (issue #297). Only
-/// the base comes from the spine; the extra ten is the editor's own fixed rule.
-const CPU_IDLE_EXTRA_C: f32 = 10.0;
+use canvas_svc::chip::{DEFAULT_MAP, MSI_ALT1_MAP};
 
 /// A constant the editor mirrors, with its value as a JSON literal (a quoted string or a number).
 struct Constant {
@@ -35,14 +33,15 @@ struct Constant {
 
 /// The fixed inputs to one rule, and what the case is meant to show.
 struct Case {
-    name: &'static str,
+    name: String,
     rule: Rule,
 }
 
 enum Rule {
-    BaseFloor { header: &'static str, configured: u8 },
-    HotFloor { header: &'static str, configured: u8 },
-    CpuLimitInIdleRange { kind: &'static str, limit_c: f32 },
+    /// `rust` is `floor_for`, or the daemon's `runtime_floor_at` with no reading when `live`.
+    BaseFloor { header: String, configured: u8, live: bool },
+    /// The daemon's live hot-floor call: `runtime_floor_at` at the hot line (`fans.rs:1192`).
+    HotFloor { header: String, configured: u8 },
 }
 
 /// A JSON string. Names and header ids carry quotes and backslashes, so escapes are written out.
@@ -72,8 +71,8 @@ fn json_float(value: f32) -> String {
     }
 }
 
-/// Every constant `fan-rules.ts` mirrors from the spine, plus the CPU warning threshold the
-/// editor derives from the spine's hot line.
+/// Every constant `fan-rules.ts` mirrors from the spine. The editor-only warning threshold is not
+/// here: it is checked by the editor's own unit test, not by a Rust copy of an editor rule.
 fn constants() -> Vec<Constant> {
     vec![
         Constant { name: "CPU_FAN_HEADER", value: json_string(CPU_FAN_HEADER) },
@@ -84,64 +83,54 @@ fn constants() -> Vec<Constant> {
         Constant { name: "HOT_TEMP_C", value: json_float(HOT_TEMP_C) },
         Constant { name: "HOT_FLOOR_PERCENT", value: HOT_FLOOR_PERCENT.to_string() },
         Constant { name: "HOT_CPU_FAN_FLOOR_PERCENT", value: HOT_CPU_FAN_FLOOR_PERCENT.to_string() },
-        Constant { name: "CPU_IDLE_LIMIT_C", value: json_float(HOT_TEMP_C + CPU_IDLE_EXTRA_C) },
     ]
 }
 
-fn base(name: &'static str, header: &'static str, configured: u8) -> Case {
-    Case { name, rule: Rule::BaseFloor { header, configured } }
+/// Every header the service can see: the ids in both channel tables (`src/chip.rs`), with no hand
+/// list, plus the NVML GPU headers the spine names by prefix (the tables document `gpu_fan1..4`).
+/// A new channel id, or a new GPU index, makes a new row and a stale vector file.
+fn headers() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for map in [DEFAULT_MAP, MSI_ALT1_MAP] {
+        for channel in map.channels {
+            if !out.iter().any(|id| id == channel.id) {
+                out.push(channel.id.to_string());
+            }
+        }
+    }
+    for index in 1..=4 {
+        out.push(format!("{GPU_FAN_HEADER_PREFIX}{index}"));
+    }
+    out
 }
 
-fn hot(name: &'static str, header: &'static str, configured: u8) -> Case {
-    Case { name, rule: Rule::HotFloor { header, configured } }
-}
+/// Configured floors at each bound the rules have, with a value just under, at and just over it.
+const BASE_CONFIGURED: [u8; 13] = [0, 19, 20, 21, 29, 30, 31, 35, 45, 49, 50, 51, 100];
+const HOT_CONFIGURED: [u8; 8] = [0, 20, 34, 35, 36, 49, 50, 51];
 
-fn idle(name: &'static str, kind: &'static str, limit_c: f32) -> Case {
-    Case { name, rule: Rule::CpuLimitInIdleRange { kind, limit_c } }
-}
-
-/// The fixed rows: every bound the rules have, with one value just under, at and just over it,
-/// plus the ordinary case each rule is for. `hotFloor` is the floor while a header is hot, so its
-/// Rust verdict is `runtime_floor` at the hot line itself.
+/// The fixed rows. `baseFloor` covers `floor_for` and the daemon's second call with no reading;
+/// `hotFloor` covers the daemon's first call at the hot line. Every header is included.
 fn cases() -> Vec<Case> {
-    vec![
-        // floor_for / baseFloor: the configured floor's default bound, then each header minimum.
-        base("a system header with no configured floor", "sys_fan1", 0),
-        base("a system header just under the default", "sys_fan1", 19),
-        base("a system header at the default", "sys_fan1", 20),
-        base("a system header just over the default", "sys_fan1", 21),
-        base("a system header at the top", "sys_fan1", 100),
-        base("the CPU header with no configured floor", CPU_FAN_HEADER, 0),
-        base("the CPU header with the default floor", CPU_FAN_HEADER, 20),
-        base("the CPU header just under its minimum", CPU_FAN_HEADER, 29),
-        base("the CPU header at its minimum", CPU_FAN_HEADER, 30),
-        base("the CPU header just over its minimum", CPU_FAN_HEADER, 31),
-        base("a GPU header with no configured floor", "gpu_fan1", 0),
-        base("a GPU header with the default floor", "gpu_fan1", 20),
-        base("a GPU header just under its minimum", "gpu_fan1", 29),
-        base("a GPU header at its minimum", "gpu_fan1", 30),
-        base("a GPU header just over its minimum", "gpu_fan1", 31),
-        base("a second GPU header above its minimum", "gpu_fan2", 45),
-        // runtime_floor at HOT_TEMP_C / hotFloor: the ordinary floor, then the two hot floors.
-        hot("a system header in the hot state", "sys_fan1", 20),
-        hot("a system header at its hot floor", "sys_fan1", 35),
-        hot("a system header just over its hot floor", "sys_fan1", 36),
-        hot("the CPU header in the hot state", CPU_FAN_HEADER, 20),
-        hot("the CPU header just under its hot floor", CPU_FAN_HEADER, 49),
-        hot("the CPU header at its hot floor", CPU_FAN_HEADER, 50),
-        hot("the CPU header just over its hot floor", CPU_FAN_HEADER, 51),
-        hot("a GPU header in the hot state", "gpu_fan1", 20),
-        hot("a GPU header just under its hot floor", "gpu_fan1", 34),
-        hot("a GPU header at its hot floor", "gpu_fan1", 35),
-        hot("a GPU header just over its hot floor", "gpu_fan1", 36),
-        // The editor's warning threshold, derived from the spine's hot line.
-        idle("a CPU line at the issue's example value", "cpu", 50.0),
-        idle("a CPU line just under the threshold", "cpu", 59.0),
-        idle("a CPU line at the threshold", "cpu", 60.0),
-        idle("a CPU line just over the threshold", "cpu", 61.0),
-        idle("a GPU line is not the CPU warning", "gpu", 50.0),
-        idle("a board line is not the CPU warning", "board", 50.0),
-    ]
+    let mut out = Vec::new();
+    for header in headers() {
+        for configured in BASE_CONFIGURED {
+            out.push(Case {
+                name: format!("{header} base floor at configured {configured}"),
+                rule: Rule::BaseFloor { header: header.clone(), configured, live: false },
+            });
+        }
+        for configured in HOT_CONFIGURED {
+            out.push(Case {
+                name: format!("{header} hot floor at configured {configured}"),
+                rule: Rule::HotFloor { header: header.clone(), configured },
+            });
+        }
+        out.push(Case {
+            name: format!("{header} base floor from runtime_floor_at with no reading"),
+            rule: Rule::BaseFloor { header: header.clone(), configured: 20, live: true },
+        });
+    }
+    out
 }
 
 /// The whole file: every mirrored constant, and every fixed row with the Rust verdict.
@@ -152,7 +141,7 @@ pub fn print_json() -> String {
     let mut out = String::new();
     out.push_str("{\n");
     out.push_str(
-        "  \"note\": \"The Rust fan rule's constants and verdicts for fixed inputs. Printed by crates/canvas-svc/examples/fan_rules_vectors.rs; tools/fan-rules-vectors.ps1 writes this file. The editor's TypeScript mirror (app/web/src/lib/fan-rules.ts) is checked against it. The hotFloor rows use runtime_floor at HOT_TEMP_C: the floor while a header is hot.\",\n",
+        "  \"note\": \"The spine's fan constants and the daemon's fan-rule verdicts for fixed inputs. Printed by crates/canvas-svc/examples/fan_rules_vectors.rs; tools/fan-rules-vectors.ps1 writes this file. The editor's TypeScript mirror (app/web/src/lib/fan-rules.ts) is checked against it. Header ids come from crate::chip's channel tables plus the spine's GPU prefix. baseFloor rows use floor_for (or runtime_floor_at with no reading and the hot line argument); hotFloor rows use the daemon's live runtime_floor_at call at that hot line.\",\n",
     );
 
     out.push_str("  \"constants\": [\n");
@@ -169,27 +158,31 @@ pub fn print_json() -> String {
     let cases = cases();
     for (index, case) in cases.iter().enumerate() {
         out.push_str("    {\n");
-        out.push_str(&format!("      \"name\": {},\n", json_string(case.name)));
+        out.push_str(&format!("      \"name\": {},\n", json_string(&case.name)));
         match &case.rule {
-            Rule::BaseFloor { header, configured } => {
-                let expected = floor_for(header, *configured);
+            Rule::BaseFloor { header, configured, live } => {
+                let expected = if *live {
+                    runtime_floor_at(header, *configured, None, HOT_TEMP_C)
+                } else {
+                    floor_for(header, *configured)
+                };
                 out.push_str("      \"rule\": \"baseFloor\",\n");
+                out.push_str(&format!(
+                    "      \"rust\": {},\n",
+                    json_string(if *live { "runtime_floor_at" } else { "floor_for" })
+                ));
                 out.push_str(&format!("      \"header\": {},\n", json_string(header)));
                 out.push_str(&format!("      \"configured\": {configured},\n"));
                 out.push_str(&format!("      \"expected\": {expected}\n"));
             }
             Rule::HotFloor { header, configured } => {
-                let expected = runtime_floor(header, *configured, Some(HOT_TEMP_C));
+                let expected = runtime_floor_at(header, *configured, Some(HOT_TEMP_C), HOT_TEMP_C);
                 out.push_str("      \"rule\": \"hotFloor\",\n");
+                out.push_str("      \"rust\": \"runtime_floor_at\",\n");
                 out.push_str(&format!("      \"header\": {},\n", json_string(header)));
                 out.push_str(&format!("      \"configured\": {configured},\n"));
-                out.push_str(&format!("      \"expected\": {expected}\n"));
-            }
-            Rule::CpuLimitInIdleRange { kind, limit_c } => {
-                let expected = *kind == "cpu" && *limit_c < HOT_TEMP_C + CPU_IDLE_EXTRA_C;
-                out.push_str("      \"rule\": \"cpuLimitInIdleRange\",\n");
-                out.push_str(&format!("      \"kind\": {},\n", json_string(kind)));
-                out.push_str(&format!("      \"limit_c\": {},\n", json_float(*limit_c)));
+                out.push_str(&format!("      \"temp_c\": {},\n", json_float(HOT_TEMP_C)));
+                out.push_str(&format!("      \"hot_c\": {},\n", json_float(HOT_TEMP_C)));
                 out.push_str(&format!("      \"expected\": {expected}\n"));
             }
         }
