@@ -106,6 +106,73 @@ pub fn rollback_files(home: &Path, intent: &IntentRecord) -> io::Result<()> {
     restore_files_from_snapshot(home, &intent.snapshot)
 }
 
+// ---- async wrappers (#241) ----
+//
+// Every function above does synchronous file I/O (reads, a temp file and `sync_all`, renames,
+// copies). The chain routes are async, so they call these wrappers, which run the same function on
+// a blocking thread: a stalled disk then holds a blocking thread, never a runtime worker.
+
+/// Runs `work` on a blocking thread. `None` when the thread itself died (a panic).
+async fn on_a_blocking_thread<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => Some(value),
+        Err(e) => {
+            tracing::warn!(error = %e, "a chain record's file work did not finish");
+            None
+        }
+    }
+}
+
+fn did_not_finish() -> io::Error {
+    io::Error::other("the file work did not finish")
+}
+
+/// [`write_restore`] on a blocking thread.
+pub async fn write_restore_async(home: &Path, r: &RestoreRecord) -> io::Result<()> {
+    let (home, r) = (home.to_path_buf(), r.clone());
+    on_a_blocking_thread(move || write_restore(&home, &r)).await.unwrap_or_else(|| Err(did_not_finish()))
+}
+
+/// [`read_restore`] on a blocking thread. `None` also when the thread died.
+pub async fn read_restore_async(home: &Path) -> Option<RestoreRecord> {
+    let home = home.to_path_buf();
+    on_a_blocking_thread(move || read_restore(&home)).await.flatten()
+}
+
+/// [`delete_restore`] on a blocking thread.
+pub async fn delete_restore_async(home: &Path) {
+    let home = home.to_path_buf();
+    on_a_blocking_thread(move || delete_restore(&home)).await;
+}
+
+/// [`write_intent`] on a blocking thread.
+pub async fn write_intent_async(home: &Path, i: &IntentRecord) -> io::Result<()> {
+    let (home, i) = (home.to_path_buf(), i.clone());
+    on_a_blocking_thread(move || write_intent(&home, &i)).await.unwrap_or_else(|| Err(did_not_finish()))
+}
+
+/// [`read_intent`] on a blocking thread. `None` also when the thread died.
+pub async fn read_intent_async(home: &Path) -> Option<IntentRecord> {
+    let home = home.to_path_buf();
+    on_a_blocking_thread(move || read_intent(&home)).await.flatten()
+}
+
+/// [`delete_intent`] on a blocking thread.
+pub async fn delete_intent_async(home: &Path) {
+    let home = home.to_path_buf();
+    on_a_blocking_thread(move || delete_intent(&home)).await;
+}
+
+/// [`rollback_files`] on a blocking thread.
+pub async fn rollback_files_async(home: &Path, intent: &IntentRecord) -> io::Result<()> {
+    let (home, intent) = (home.to_path_buf(), intent.clone());
+    on_a_blocking_thread(move || rollback_files(&home, &intent))
+        .await
+        .unwrap_or_else(|| Err(did_not_finish()))
+}
+
 /// Reads one of the two records. A file that is there but does not parse is left exactly as it
 /// is: it is the only copy of what a crash interrupted, and a rewrite would lose it.
 fn read_record<T: DeserializeOwned>(home: &Path, name: &str) -> Option<T> {

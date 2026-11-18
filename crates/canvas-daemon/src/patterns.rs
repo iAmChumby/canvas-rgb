@@ -43,6 +43,10 @@ pub enum PatternsError {
 pub struct Patterns {
     home: PathBuf,
     file: RwLock<PatternsFile>,
+    /// Held from the read of `file` to the swap, so two writes cannot both start from the same
+    /// file. The `file` lock itself is held only for the read and the swap, never across the
+    /// disk write, so a reader never waits for a slow disk (#241).
+    writer: std::sync::Mutex<()>,
     generation: AtomicU64,
     /// True once a load left a pattern out: the file still holds it, so the first write keeps the
     /// file aside before the write erases it.
@@ -55,6 +59,7 @@ impl Patterns {
         Self {
             home: home.into(),
             file: RwLock::new(PatternsFile::default()),
+            writer: std::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
             dropped_on_load: AtomicBool::new(false),
         }
@@ -216,7 +221,8 @@ impl Patterns {
     /// rather than holding a pattern the next start will not see.
     pub fn put(&self, pattern: Pattern) -> Result<Pattern, PatternsError> {
         let name = pattern.name().to_string();
-        let mut guard = write_recovering(&self.file);
+        let _writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = read_recovering(&self.file).clone();
         let others: Vec<Pattern> = guard
             .patterns
             .iter()
@@ -242,7 +248,7 @@ impl Patterns {
         self.keep_aside_after_a_dropped_load()?;
         crate::storage::write_json(&self.path(), &file)
             .map_err(|e| PatternsError::Io(e.to_string()))?;
-        *guard = file;
+        *write_recovering(&self.file) = file;
         self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(pattern)
     }
@@ -252,7 +258,8 @@ impl Patterns {
     /// The file is written first, so a delete that cannot be written is an error to the caller
     /// and the pattern is still there.
     pub fn delete(&self, id: &str) -> Result<Option<Pattern>, PatternsError> {
-        let mut guard = write_recovering(&self.file);
+        let _writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = read_recovering(&self.file).clone();
         let Some(index) = guard.patterns.iter().position(|pattern| {
             pattern.id.eq_ignore_ascii_case(id) || pattern.name().eq_ignore_ascii_case(id)
         }) else {
@@ -263,7 +270,7 @@ impl Patterns {
         self.keep_aside_after_a_dropped_load()?;
         crate::storage::write_json(&self.path(), &file)
             .map_err(|e| PatternsError::Io(e.to_string()))?;
-        *guard = file;
+        *write_recovering(&self.file) = file;
         self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(Some(removed))
     }

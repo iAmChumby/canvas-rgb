@@ -383,7 +383,9 @@ async fn a_client_that_leaves_mid_commit_keeps_the_link_and_the_commit_lands() {
     assert!(linked(&rig).await, "the OpenRGB link broke when the client left");
 
     // The commit landed: both records are gone and the files hold the new length.
-    until("the intent record is gone", || read_intent(&rig.home).is_none()).await;
+    // The commit deletes the intent record, then the restore record, each on a blocking thread
+    // (#241): wait for both, not only the first.
+    until("both records are gone", || read_intent(&rig.home).is_none() && read_restore(&rig.home).is_none()).await;
     assert!(read_intent(&rig.home).is_none(), "the commit's intent record stayed");
     assert!(read_restore(&rig.home).is_none(), "the setup's restore record stayed");
     assert_eq!(saved_leds(&rig), Some(FINAL), "zones.json does not hold the parts' sum");

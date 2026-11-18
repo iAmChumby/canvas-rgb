@@ -35,7 +35,11 @@ pub async fn effect_source(
         // folder and no `..` reaches the read.
         if crate::user_effects::check_file_name(&file_name).is_ok() {
             if let Some(path) = crate::user_effects::existing_file(&app.effects_dir, &file_name) {
-                let source = read_effect_source(&path)?;
+                // The read is a disk read: on a blocking thread, not a runtime worker.
+                let read_from = path.clone();
+                let source = tokio::task::spawn_blocking(move || read_effect_source(&read_from))
+                    .await
+                    .map_err(|e| ApiFailure::internal(format!("the effect read did not finish: {e}")))??;
                 let file_name = path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())

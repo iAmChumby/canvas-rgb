@@ -1402,3 +1402,84 @@ whose meaning is how high it reaches).
   does not cover: an effect in another crate that the daemon wraps without saying so, and the
   blend of a stack whose layers answer differently (the stack answers the cell, and the top
   layer's cell is what a strip shows).
+
+### `cause:blocking-io`: a synchronous file write inside an async handler, under the store lock
+
+The daemon's config, scenes, lights, effects, zones, displays and peripherals are written by
+synchronous methods on `Store` (temp file, flush, `sync_all`, rename). A handler that took
+`app.store.write().await`, changed the store and called one of those methods while holding the
+guard parked a Tokio worker on the disk and made every reader wait for the write through the same
+lock. The API port kept listening, so the editor showed "Daemon connecting" rather than an
+error: a slow or stalled disk looked exactly like a dead daemon (#241).
+
+- [#241](https://github.com/iAmChumby/canvas-rgb/issues/241): the part-1 report
+  (`.build/reports/t3-241.md`, main checkout) found the same fault shape at the settings, audio,
+  scenes, effects, chains and device-sync routes but could not reproduce a permanent hang on the
+  fakes: without a slow disk the writes finish in milliseconds. The re-find on the same base
+  listed the sites below; the writes are bounded by the disk, not permanent, so a test needs an
+  injected slow writer to expose them.
+- **Class fix:** done (#241). The helpers in `crates/canvas-daemon/src/store_io.rs` are the only
+  path that writes the store from async code: `store_save` and `store_save_rolled` change memory
+  under the store write lock, drop it, and write a snapshot on `spawn_blocking`; `store_publish`
+  changes a copy and publishes it only after the write succeeded; `store_edit` covers mutations
+  with no save. A reader never waits for the disk. Three rules hold for every helper, and the
+  first review of this fix (`.build/reports/r-517.md`, main checkout) found the rewrite had
+  broken all three:
+  1. **Read-modify-write is atomic.** The per-App writer mutex is taken before the closure that
+     decides what to change, and held to the commit. A route finds its target (a light by id, a
+     preset by name, the `expected` props) inside that closure, never before it: reading under
+     a read lock and writing later lost presets, patched the wrong light after a delete, and let
+     two replaces with the same `expected` both win. A recovery path puts back only what the
+     route took (`restore_favorite`, `restore_effects`), never a whole `effects` clone from before.
+  2. **A save outlives its caller.** After the mutation the write, the commit and the rollback run
+     in a spawned task that owns the writer guard, and the handler only awaits its handle. A client
+     that drops mid-save (the editor aborts a fetch during the very stall this fixes) cannot leave
+     memory changed and disk not, and the next save cannot start while the write is still on its
+     blocking thread, so no two writes to one target share the temp name. Nothing awaits between
+     the mutation and the spawn. One helper call is cancel-safe on its own; a route that makes
+     two of them in a row has a cancel point between them. `DELETE /patterns/{id}` and
+     `DELETE /stacks/{id}` (a favourite or presets in `effects.json`, then the pattern or stack
+     file) therefore run the whole delete as one detached task the handler awaits through its
+     join handle, as `commit_setup` does for a chain commit: a client that leaves gets both
+     halves or neither. A new route that makes two saves does the same.
+  3. **Memory is never ahead of a failed save, where that matters.** `store_save` and
+     `store_save_rolled` change memory first: a `GET` that lands while the write is in flight sees
+     the new state, and if the write fails the rollback takes it back (the *read window*; main made
+     readers wait on the lock instead). That is accepted for state that only the editor shows.
+     State the daemon acts on (a peripheral's access, a display's config, a light's arrangement)
+     uses `store_publish`: the live store is touched only after the file is written, so a failed
+     save changes nothing, no reader sees the change, and a peripheral access that failed to save
+     never takes effect (fail closed).
+  Each route's own rollback text and its 5xx or 503 are unchanged. `GET /api/v1/settings` and the
+  other readers take only the store lock. The same class holds for every other write an async
+  handler makes, and each runs on `spawn_blocking`, never under a store guard: the snapshots and
+  the chain records (`chain_records::*_async`, used by every `api/chains.rs` call), the pattern
+  and stack `put`s and deletes, the config import's three writes and its read-back, the first
+  run's zone sizes, the peripheral hub's kept values (`save_kept`, serialised by the hub's `kept_writer`: it takes
+  the mutex first, builds the snapshot of the values after that, and writes in a spawned task that
+  owns the guard, so a dropped caller cannot free the mutex mid-write, two writes never overlap and
+  the last writer holds the newest values), the effect import and delete, and the
+  editor's source read. `Patterns`/`Stacks` hold their `RwLock` only for the read and the swap,
+  with a writer mutex across the disk write. A save that must undo a half-written pair does it on
+  the blocking thread inside its `save` closure (the light delete puts `lights.json` back there),
+  not in `failed`, which runs on a worker under the store lock. The `%ProgramData%` fail-closed
+  checks stay inside the store's save methods and are untouched. The test gate in
+  `storage::write_atomic` is created only by a test (`write_gate()`, `write_gate_in()`): a daemon
+  finds no gate and skips it. Not converted, and why: the start-up writes in `main.rs` and the
+  token file run before the API listens, so no reader waits on them; the CLI (`agent_run.rs`,
+  `bin/cli.rs`, `bundle.rs`) is not async code; `openrgb_supervisor::start_server` makes one
+  `create_dir_all` on its own task, holds no lock and syncs nothing; the config import's
+  `stacks.reload_with` and `patterns.reload` read their files under the import's draft gate.
+- **Regression tests:** `crates/canvas-daemon/tests/blocking_saves.rs` parks a `PUT
+  /api/v1/settings` in the gate and asserts a concurrent `GET` answers while it is parked.
+  `crates/canvas-daemon/tests/store_guarantees.rs` covers the three rules: two preset creates
+  queued behind a stalled write both land, a patch racing a delete of another light patches the
+  right light, of two replaces with the same `expected` one is refused, a failed displays save and
+  a failed peripheral-access save change nothing, and a dropped preset create whose write fails
+  leaves memory equal to disk. The same file parks the first write of a pattern delete and of a
+  stack delete, aborts the request, releases the write, and asserts the favourite (or the presets)
+  and the pattern (or the stack) are both there or both gone. The chain commit needs no such
+  test: `commit_setup` already runs on its own task (#457), and `tests/chain_detach.rs` covers it.
+- **How to check a new store write:** it goes through `store_save` (or `store_edit` when it does
+  not write). A `Store` save called directly while an `app.store.write()` guard is held is this
+  bug again.
