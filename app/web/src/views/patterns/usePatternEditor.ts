@@ -389,17 +389,19 @@ export function usePatternEditor(
 
   // A queued frame is dropped with the editor: its draft is the draft's `DELETE`. Mark the hook gone
   // first, so an async write that lands after this cleanup cannot schedule a new frame (#491).
-  useEffect(
-    () => () => {
+  // The effect body sets the flag back: StrictMode mounts, cleans up and mounts again on the same
+  // instance, and a cleanup-only guard would stay false for the editor's life (#171, #491).
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
       mounted.current = false;
       if (frame.current !== null) {
         if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame.current);
         frame.current = null;
       }
       pending.current = null;
-    },
-    [],
-  );
+    };
+  }, []);
 
   /** The colour in hand: with the Gradient tool, the selected stop's. */
   const setColour = useCallback(
@@ -725,7 +727,8 @@ export function usePatternEditor(
         return;
       }
       void writeShapeLight(step, "from").then((ok) => {
-        if (ok !== "ok") {
+        // A closed editor has no state to move: no history pop, no setter, no draft (#491).
+        if (ok !== "ok" || !mounted.current) {
           done();
           return;
         }
@@ -755,7 +758,7 @@ export function usePatternEditor(
         return;
       }
       void writeShapeLight(step, "to").then((ok) => {
-        if (ok !== "ok") {
+        if (ok !== "ok" || !mounted.current) {
           done();
           return;
         }

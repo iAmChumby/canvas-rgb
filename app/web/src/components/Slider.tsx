@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 
 /**
@@ -74,6 +74,34 @@ export function Slider({
   const owner = useRef<number | null>(null);
   // The value before the drag: a drag that cannot commit puts this back.
   const before = useRef(value);
+  // The gesture (#491): the inputs that are down right now ("pointer", "key:ArrowUp", ...). The
+  // gesture begins when the first input goes down and ends once, when the last one is up, the focus
+  // leaves, or the slider unmounts, so one gesture is one `onBegin` and one `onEnd`, whatever mix of
+  // pointer and keys made it. Another key's release, or a pointer drag's end, cannot close it early.
+  const inputs = useRef(new Set<string>());
+  const endRef = useRef(onEnd);
+  useEffect(() => {
+    endRef.current = onEnd;
+  }, [onEnd]);
+  const press = (input: string) => {
+    if (inputs.current.has(input)) return;
+    const first = inputs.current.size === 0;
+    inputs.current.add(input);
+    if (first) onBegin?.();
+  };
+  const release = (input: string) => {
+    if (!inputs.current.delete(input)) return;
+    if (inputs.current.size === 0) onEnd?.();
+  };
+  // A slider that goes away mid-gesture still ends it: the history must not be left inside one.
+  useEffect(
+    () => () => {
+      if (inputs.current.size === 0) return;
+      inputs.current.clear();
+      endRef.current?.();
+    },
+    [],
+  );
   const span = max - min || 1;
   const decimals = decimalsOf(step);
   const p = dragFrac ?? Math.min(1, Math.max(0, (value - min) / span));
@@ -120,7 +148,7 @@ export function Slider({
     setDragging(true);
     sent.current = value;
     before.current = value;
-    onBegin?.();
+    press("pointer");
     follow(e.clientX);
   };
 
@@ -148,13 +176,13 @@ export function Slider({
     end(e);
     if (committed !== null) onCommit?.(committed);
     else if (sent.current !== before.current) onChange(before.current);
-    onEnd?.();
+    release("pointer");
   };
 
   const onPointerCancel = (e: PointerEvent<HTMLDivElement>) => {
     if (e.pointerId !== owner.current) return;
     end(e);
-    onEnd?.();
+    release("pointer");
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -168,15 +196,23 @@ export function Slider({
     else if (e.key === "End") next = quantise(max);
     if (next === null) return;
     e.preventDefault();
-    // A held key's repeats ride on the first press's history entry; only the first keydown opens
-    // the gate, and the keyup closes it (#491).
-    if (!e.repeat) onBegin?.();
+    // A held key's repeats ride on the first press's gesture: the key stays down until its own keyup.
+    press(`key:${e.key}`);
     onChange(next);
     onCommit?.(next);
   };
 
-  const onKeyUp = () => {
-    onEnd?.();
+  // Only the release of a key this slider acted on closes its part of the gesture (#491).
+  const onKeyUp = (e: KeyboardEvent<HTMLDivElement>) => {
+    release(`key:${e.key}`);
+  };
+
+  // A key held while the focus leaves never sends its keyup here: the focus leaving ends the keys.
+  // A pointer drag keeps its capture through a blur and ends on its own pointer events.
+  const onBlur = () => {
+    const keys = [...inputs.current].filter((input) => input.startsWith("key:"));
+    for (const key of keys) inputs.current.delete(key);
+    if (keys.length > 0 && inputs.current.size === 0) onEnd?.();
   };
 
   return (
@@ -204,6 +240,7 @@ export function Slider({
       onLostPointerCapture={onPointerCancel}
       onKeyDown={onKeyDown}
       onKeyUp={onKeyUp}
+      onBlur={onBlur}
     >
       <div className="slider-track" />
       {floor !== undefined && <div className="slider-floor" />}

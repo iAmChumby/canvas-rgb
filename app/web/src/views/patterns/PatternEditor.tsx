@@ -167,7 +167,8 @@ export function PatternEditor({
       await api.lights.patch(lightId, { arrangement });
       await refreshLights();
     } catch (error) {
-      setShapeProblem(messageOf(error));
+      // The note row is gone with the editor: no state update after the unmount (#491).
+      if (alive.current) setShapeProblem(messageOf(error));
       throw error;
     }
   }, []);
@@ -182,6 +183,7 @@ export function PatternEditor({
   );
   const onShapeSkipped = useCallback(
     (_step: ShapeStep, expected: Arrangement, current: Arrangement) => {
+      if (!alive.current) return;
       setShapeProblem(
         `the light is a ${current} now, not the ${expected} this change needs; it was changed elsewhere, so the pattern kept its shape`,
       );

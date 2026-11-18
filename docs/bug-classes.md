@@ -363,6 +363,23 @@ second on the status poll, so the effect tears down and starts again before it c
   write sends no draft after the DELETE (#491)". Rule: an async continuation of an editor action checks
   that its owner still exists before it sends anything; a request guard checked only on the answer is
   checked on the send too.
+- [#171](https://github.com/iAmChumby/canvas-rgb/issues/171), again in #481 (the fix for the entry above
+  broke it): the `mounted` ref the unmount guard reads started `true` and only its cleanup wrote it,
+  `mounted.current = false`. StrictMode (`reactStrictMode: true` in `next.config.ts`) mounts, runs the
+  cleanup and mounts again on the same instance, so the flag stayed `false` for the editor's whole
+  life and `schedule()` dropped every draft: nothing reached the lights (`usePatternEditor.ts`). Fix:
+  the effect body sets the flag back to `true`, as `EffectEditor.tsx` already did after #171. Class
+  fix: `app/web/src/test/mountGuard.test.ts` reads every source and fails on a file that writes
+  `mounted`/`alive`/`isMounted` `.current = false` and never `= true`; the pattern editor is also
+  tested under `<StrictMode>` (`PatternGesture491.test.tsx` "S1"). Rule: a lifecycle flag is set in
+  the effect body and cleared in its cleanup, never initialised and only cleared.
+- #481, the same pass: the Spin slider's gesture gate was a boolean opened by a keydown and closed by
+  any keyup, a pointer end or nothing (focus loss sends no keyup). A held key then pushed one history
+  entry per repeat, or its Spin/Off click was lost. Fix: the `Slider` owns the gesture as the set of
+  inputs that are down; it begins with the first and ends once with the last, or on blur or unmount
+  (`app/web/src/components/Slider.tsx`, `components/__tests__/SliderGesture.test.tsx`). Rule: a
+  gesture that brackets history is owned by the control that sees every input of it, not by flags the
+  callers flip.
 
 ### `cause:timing-test`: a test whose verdict depends on how long the machine takes
 
