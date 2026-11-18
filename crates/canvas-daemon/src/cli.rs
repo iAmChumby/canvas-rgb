@@ -1176,7 +1176,13 @@ fn is_connect_failure(error: &ureq::Error) -> bool {
 /// A request limit as a message: "120 s", or "300 ms" for a test's short one.
 fn limit_text(limit: Option<Duration>) -> String {
     match limit {
-        Some(limit) if limit.as_secs() > 0 => format!("{} s", limit.as_secs()),
+        // Whole seconds print as "2 s"; a limit with a fraction prints it ("2.5 s"), never
+        // rounded down to a shorter limit than the one that ran out.
+        Some(limit) if limit.as_secs() > 0 && limit.subsec_millis() == 0 => format!("{} s", limit.as_secs()),
+        Some(limit) if limit.as_secs() > 0 => {
+            let text = format!("{:.3}", limit.as_secs_f64());
+            format!("{} s", text.trim_end_matches('0'))
+        }
         Some(limit) => format!("{} ms", limit.as_millis()),
         None => "its limit".to_string(),
     }
@@ -3010,6 +3016,16 @@ fn prop_kind_summary(kind: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A limit with a fraction of a second is printed with it (#72): 2.5 s is not "2 s".
+    #[test]
+    fn a_limit_with_a_fraction_of_a_second_prints_the_fraction() {
+        assert_eq!(limit_text(Some(Duration::from_millis(2500))), "2.5 s");
+        assert_eq!(limit_text(Some(Duration::from_millis(1250))), "1.25 s");
+        assert_eq!(limit_text(Some(Duration::from_secs(2))), "2 s");
+        assert_eq!(limit_text(Some(Duration::from_millis(300))), "300 ms");
+        assert_eq!(limit_text(None), "its limit");
+    }
+
     use super::*;
     use canvas_proto::props::PropKind;
     use std::path::PathBuf;
