@@ -1744,10 +1744,15 @@ pub async fn pattern_changed(app: &Arc<App>, id: &str) {
             continue;
         }
         // The budget is one for the whole scene: another pattern may have shrunk, so a group this
-        // save does not name can fit again. Try every group the budget or a build left dark, as a
-        // scene save does, instead of leaving it dark until the next full build (#518). A group the
-        // HTML limit left dark stays dark: this save freed no runtime (#419).
-        if !saved && !(failures.contains_key(&group.id) && !over_html.contains(&group.id)) {
+        // save does not name can fit again, and one may have grown past it, so a group this save
+        // does not name must go dark. Try every group the budget or a build left dark, and every
+        // group the budget now refuses, as a scene save does, instead of waiting for the next full
+        // build (#518). A group the HTML limit left dark stays dark: this save freed no runtime
+        // (#419).
+        let refused = pattern_over.contains_key(&group.id);
+        let dark = failures.contains_key(&group.id);
+        let limited = dark && over_html.contains(&group.id);
+        if !saved && !refused && (!dark || limited) {
             continue;
         }
         changed = true;

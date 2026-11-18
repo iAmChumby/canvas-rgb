@@ -2406,11 +2406,21 @@ fn named_reel(id: &str, frames: usize, lit: Rgb8) -> Pattern {
     reel
 }
 
-/// Two groups, `a` and `b`, each playing a 128-frame reel on four strips of four different sizes:
-/// either reel alone fits the scene's budget, the two together do not (#518). `a` plays
-/// `pattern:A` (blue) and `b` plays `pattern:B` (green), so saving one changes the budget of the
-/// other without naming it.
+/// The frames each reel of the two-reel rigs has: enough that two together are past the scene's
+/// budget, and one alone fits.
+const REEL_FRAMES: usize = 128;
+
+/// [`two_reel_rig_with`] with a full reel on each group: the pair is past the budget, so the later
+/// group is dark from the start.
 async fn two_reel_rig() -> Rig {
+    two_reel_rig_with(REEL_FRAMES).await
+}
+
+/// Two groups, `a` and `b`, each playing a reel on four strips of four different sizes: either
+/// reel of [`REEL_FRAMES`] alone fits the scene's budget, the two together do not (#518). `a` plays
+/// `pattern:A` (blue) with `a_frames` frames and `b` plays `pattern:B` (green) with
+/// [`REEL_FRAMES`], so saving one changes the budget of the other without naming it.
+async fn two_reel_rig_with(a_frames: usize) -> Rig {
     let ids: Vec<String> = (0..8).map(|i| format!("fake:s{i}")).collect();
     let sizes = [4096u32, 4095, 4094, 4093, 4092, 4091, 4090, 4089];
     // rig_full needs the two ordinary fake devices for its A/B handles; no group uses them.
@@ -2426,8 +2436,8 @@ async fn two_reel_rig() -> Rig {
     let other_refs: Vec<&str> = other.iter().map(String::as_str).collect();
     rig_full(
         vec![
-            named_reel("A", 128, Rgb8::new(0, 0, 200)),
-            named_reel("B", 128, Rgb8::new(0, 200, 0)),
+            named_reel("A", a_frames, Rgb8::new(0, 0, 200)),
+            named_reel("B", REEL_FRAMES, Rgb8::new(0, 200, 0)),
         ],
         ScenesFile {
             schema_version: SCENES_SCHEMA,
@@ -2472,6 +2482,39 @@ async fn a_group_the_budget_left_dark_plays_when_another_pattern_shrinks() {
     for id in ["fake:s4", "fake:s7"] {
         shows_where(&sink(&rig, id), "a strip of the recovered group", |f| {
             f.len() > 4000 && f[0] == Rgb8::new(0, 200, 0)
+        })
+        .await;
+    }
+}
+
+/// A pattern save that grows past the shared budget turns a group it does not name dark, with the
+/// budget's reason, as a scene save does (#518). The budget is one for the whole scene, so the
+/// group that was inside it and no longer is cannot keep playing.
+#[tokio::test]
+async fn a_pattern_save_that_grows_past_the_budget_turns_an_unnamed_group_dark() {
+    // `a` is one frame and `b` is a full reel: together they are 2 096 384 + 16 378, inside the
+    // 4 000 000 a scene keeps, so both play.
+    let rig = two_reel_rig_with(1).await;
+    let states = group_states(&rig).await;
+    assert_eq!(states.get("a"), Some(&None), "the one-frame group plays: {states:?}");
+    assert_eq!(states.get("b"), Some(&None), "the full reel fits beside it: {states:?}");
+
+    // Saving `a` with a full reel puts the pair past the budget: the later group is refused, as a
+    // full build refuses it, though the save names only `a`.
+    let grown = named_reel("A", REEL_FRAMES, Rgb8::new(0, 0, 200));
+    let (status, answer) = put_pattern_body(&rig, "pattern:A", &grown).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    let states = group_states(&rig).await;
+    assert_eq!(states.get("a"), Some(&None), "the first group keeps the budget: {states:?}");
+    let why = states.get("b").cloned().flatten().expect("the group the budget now refuses is dark");
+    assert!(
+        why.contains("B has 128 frames") && why.contains("4000000"),
+        "the sentence names why: {why}"
+    );
+    for id in ["fake:s4", "fake:s7"] {
+        shows_where(&sink(&rig, id), "a strip of the group the grown pattern refuses", |f| {
+            f.len() > 4000 && f.iter().all(|c| *c == Rgb8::BLACK)
         })
         .await;
     }
