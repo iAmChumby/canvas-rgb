@@ -441,6 +441,10 @@ impl FakeOpenRgbServer {
         let (release, _) = tokio::sync::watch::channel(0_u64);
         let (writes, _) = tokio::sync::watch::channel(0_u64);
         let (changes, _) = tokio::sync::watch::channel(0_u64);
+        // Read the proof-only stalls once, at construction: reading the environment on every
+        // reply would add work to every request under load (#519).
+        let reply_stall = reply_stall();
+        let first_reply_stall = first_reply_stall();
         let acceptor = {
             let state = Arc::clone(&state);
             let connections = Arc::clone(&connections);
@@ -456,10 +460,14 @@ impl FakeOpenRgbServer {
                         stream,
                         Arc::clone(&state),
                         next_connection,
-                        release.subscribe(),
-                        writes.clone(),
-                        kick.subscribe(),
-                        changes.clone(),
+                        ServeSignals {
+                            release: release.subscribe(),
+                            writes: writes.clone(),
+                            kick: kick.subscribe(),
+                            changes: changes.clone(),
+                            reply_stall,
+                            first_reply_stall,
+                        },
                     ));
                     let mut open = guard(&connections);
                     open.retain(|conn| !conn.is_finished());
@@ -880,15 +888,24 @@ impl Drop for Open {
     }
 }
 
+/// The channels a connection listens to and the proof-only stalls it applies (#519). Grouped so
+/// `serve` stays under clippy's argument limit.
+struct ServeSignals {
+    release: tokio::sync::watch::Receiver<u64>,
+    writes: tokio::sync::watch::Sender<u64>,
+    kick: tokio::sync::watch::Receiver<u64>,
+    changes: tokio::sync::watch::Sender<u64>,
+    reply_stall: std::time::Duration,
+    first_reply_stall: std::time::Duration,
+}
+
 async fn serve(
     mut stream: TcpStream,
     state: Arc<Mutex<FakeState>>,
     connection: u64,
-    mut release: tokio::sync::watch::Receiver<u64>,
-    writes: tokio::sync::watch::Sender<u64>,
-    mut kick: tokio::sync::watch::Receiver<u64>,
-    changes: tokio::sync::watch::Sender<u64>,
+    signals: ServeSignals,
 ) -> std::io::Result<()> {
+    let ServeSignals { mut release, writes, mut kick, changes, reply_stall, first_reply_stall } = signals;
     guard(&state).open.insert(connection);
     let _open = Open { state: Arc::clone(&state), connection };
     let mut replies = 0_u64;
@@ -1029,7 +1046,7 @@ async fn serve(
                 changes.send_modify(|n| *n += 1);
                 continue;
             }
-            let stall = if replies == 0 { first_reply_stall() } else { reply_stall() };
+            let stall = if replies == 0 { first_reply_stall } else { reply_stall };
             replies += 1;
             if !stall.is_zero() {
                 tokio::time::sleep(stall).await;

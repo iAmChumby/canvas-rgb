@@ -1108,9 +1108,15 @@ fn the_stock_effects_load_move_and_report_no_errors() {
 
 /// Runs `period` seconds of 60 Hz frames twice and compares the picture at the end of the
 /// first period with the end of the second, and one mid-period pair.
+///
+/// The effect's frame budget is the product's 100 ms live deadline; a shared CI runner can make
+/// one frame miss it and report a timeout, which says how busy the runner was and nothing about
+/// whether the loop closes. These tests judge the picture, so they use the tile frame budget
+/// (30 s): no frame is dropped for being slow, while the product's 100 ms budget is unchanged
+/// (#519). All three paint-effect loop tests go through this one helper.
 fn assert_loop_closes(id: &str, source: &str, period: usize) {
     let n = period * 60;
-    let mut effect = stock(id, source);
+    let mut effect = stock(id, source).tile_mode();
     let mut canvas = Canvas::new(320, 200);
     let inputs = Inputs::default();
     let (mut at_half, mut at_t, mut at_t_half, mut at_2t) = (vec![], vec![], vec![], vec![]);
@@ -1152,6 +1158,7 @@ fn wet_smear_loops_every_16_seconds() {
 fn palette_knife_loops_every_24_seconds() {
     assert_loop_closes("palette-knife", PALETTE_KNIFE, 24);
 }
+
 
 /// A small effect with a `<meta thumbnail ...>` tag. The script paints a colour, so a test
 /// can tell a picture from a blank canvas.

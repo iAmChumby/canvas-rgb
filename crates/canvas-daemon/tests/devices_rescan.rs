@@ -113,7 +113,10 @@ async fn rig_timed(name: &str, port: u16, budget: Duration, timing: RescanTiming
 async fn wait_for_link(rig: &Rig, state: LinkState) {
     tokio::time::timeout(Duration::from_secs(60), async {
         while *rig.app.openrgb.read().await != state {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            // yield_now does not advance a paused clock: a 5 ms sleep here would race 60 s of
+            // virtual time ahead of the real connect I/O and fail the tests that start paused
+                        // (#519). The verdict is the state the assert reads; the timeout only ends a hang.
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -129,7 +132,8 @@ async fn wait_for_sink(rig: &Rig, id: &str) -> Arc<dyn canvas_proto::traits::Fra
             if let Some(sink) = rig.engine.sinks.lock().unwrap().get(&wanted).cloned() {
                 return sink;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            // No clock advance in a paused test (#519).
+            tokio::task::yield_now().await;
         }
     })
     .await

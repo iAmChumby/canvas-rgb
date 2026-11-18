@@ -27,6 +27,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+/// A test's reply deadline is a hang guard, not the verdict: a loaded runner must never turn a
+/// slow-but-live reply from the fake into a failed connect and so a dark boot color (#519).
+const TEST_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// One OpenRGB device with `leds` LEDs in its single zone.
 fn device(index: u32, leds: u32) -> DeviceInfo {
     DeviceInfo {
@@ -74,7 +78,9 @@ fn core(fake_port: u16, boot: Rgb8, home: &TempDir) -> (Core, FakeProcesses) {
         home.path().join("openrgb-config"),
         home.path().to_path_buf(),
         Box::new(FakeSpawner(processes.clone())),
-        Box::new(move || Box::new(OpenRgbAdapter::new(SERVER_HOST, fake_port))),
+        Box::new(move || {
+            Box::new(OpenRgbAdapter::new(SERVER_HOST, fake_port).with_reply_timeout(TEST_REPLY_TIMEOUT))
+        }),
     );
     (Core::new(fans, openrgb, daemon), processes)
 }
