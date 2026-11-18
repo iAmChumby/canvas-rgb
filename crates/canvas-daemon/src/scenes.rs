@@ -1793,9 +1793,34 @@ fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]
     let Some(pattern) = app.patterns.get(effect) else {
         return Vec::new();
     };
+    member_fits(&pattern.built_on, &group.members, group.sequence, lights, devices)
+}
+
+/// The fit of each of a group's member lights against a pattern built on `built_on`, in the
+/// group's member order: one entry per member whose light has LEDs.
+///
+/// A light with no LEDs is left out: its device or zone is gone, or its slice is empty, so the
+/// engine plans nothing there. It is neither exact nor flagged, and the picker's count is of
+/// the lights the pattern lands on. A device that is listed but not connected still has its
+/// LEDs: `light_led_count` asks only for the zone, and the engine's own plan counts them, so
+/// the light keeps its place in the run.
+///
+/// A group with a `sequence` (#468) fits the pattern once to all its lights' LEDs joined end to
+/// end, so every light reports the fit of that whole run, not of its own LED count.
+///
+/// This is the daemon's rule, and `group_fits` is its only reader in the API. The shared
+/// vectors in `app/web/src/lib/__tests__/patternFit.vectors.json` are printed from here
+/// (`crates/canvas-daemon/examples/pattern_fit_vectors.rs`), so the editor's copy is checked
+/// against this rule rather than against a copy of it.
+pub fn member_fits(
+    built_on: &canvas_proto::pattern::BuiltOn,
+    members: &[LightId],
+    sequence: Option<canvas_proto::scene::SequenceShape>,
+    lights: &[Light],
+    devices: &[DeviceInfo],
+) -> Vec<LightFit> {
     // The members that have LEDs, in the group's order, with their counts.
-    let placed: Vec<(&LightId, &Light, u32)> = group
-        .members
+    let placed: Vec<(&LightId, &Light, u32)> = members
         .iter()
         .filter_map(|member| {
             // A member the daemon does not hold has no LEDs to play on.
@@ -1806,20 +1831,20 @@ fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]
         .collect();
     // A sequence (#468): the pattern is fitted once to every member's LEDs joined end to end, as
     // one ring or one line, so every member reports the fit of that whole run.
-    let run = group.sequence.map(|shape| {
+    let run = sequence.map(|shape| {
         let total: u32 = placed.iter().map(|(_, _, count)| *count).sum();
         let arrangement = match shape {
             canvas_proto::scene::SequenceShape::Ring => canvas_proto::scene::Arrangement::Ring,
             canvas_proto::scene::SequenceShape::Line => canvas_proto::scene::Arrangement::Strip,
         };
-        canvas_proto::pattern::fit_kind(&pattern.built_on, total, arrangement)
+        canvas_proto::pattern::fit_kind(built_on, total, arrangement)
     });
     placed
         .into_iter()
         .map(|(member, light, led_count)| LightFit {
             light: member.clone(),
             fit: run.unwrap_or_else(|| {
-                canvas_proto::pattern::fit_kind(&pattern.built_on, led_count, light.arrangement)
+                canvas_proto::pattern::fit_kind(built_on, led_count, light.arrangement)
             }),
         })
         .collect()
