@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import { ArrowClockwise, ArrowCounterClockwise, ArrowsClockwise, ProhibitInset } from "@phosphor-icons/react";
+import { useMediaQuery } from "@/components/MediaQuery";
 import { Segmented } from "@/components/Segmented";
 import { Slider } from "@/components/Slider";
 import { SPIN_TURNS_DEFAULT, SPIN_TURNS_MAX, spinMotion, spinOf } from "@/lib/spin";
@@ -28,6 +29,8 @@ export function MotionControl({
   onEnd?: () => void;
 }) {
   const speed = spinOf(motion);
+  // A phone: Off and Spin are their icons, so the speed keeps room for a slider on the same row.
+  const phone = useMediaQuery("(max-width: 520px)");
   // Off remembers the speed the owner had, so Spin comes back to it and not to the default.
   const [last, setLast] = useState(speed !== null && speed !== 0 ? speed : SPIN_TURNS_DEFAULT);
   // The daemon reads a speed of 0 as no motion (`scene_engine.rs` filters `speed != 0`). Show Off
@@ -45,6 +48,7 @@ export function MotionControl({
       <Segmented<Mode>
         label="Motion"
         value={mode}
+        iconOnly={phone}
         options={[
           { value: "off", label: "Off", icon: <ProhibitInset size={14} weight="bold" aria-hidden="true" /> },
           { value: "spin", label: "Spin", icon: <ArrowsClockwise size={14} weight="bold" aria-hidden="true" /> },
@@ -56,7 +60,7 @@ export function MotionControl({
         }}
       />
       <span className={s.motionSpeed} data-off={mode === "off" ? "true" : "false"}>
-        <ArrowCounterClockwise size={14} weight="bold" aria-hidden="true" />
+        <ArrowCounterClockwise className={s.motionArrow} size={14} weight="bold" aria-hidden="true" />
         <span className={s.motionSlider}>
           <Slider
             label="Spin speed, turns per second"
@@ -70,7 +74,7 @@ export function MotionControl({
             onEnd={onEnd}
           />
         </span>
-        <ArrowClockwise size={14} weight="bold" aria-hidden="true" />
+        <ArrowClockwise className={s.motionArrow} size={14} weight="bold" aria-hidden="true" />
         <span className={s.motionFigure}>{shown.toFixed(2)}</span>
         <span className={s.motionUnit}>turns/s</span>
       </span>

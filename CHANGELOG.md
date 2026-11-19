@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Patterns: the editor's controls are tidied. Every word in the frame strip is 14 px or more, the Loop key sits beside Add and Play so it is always on screen, and the frame strip is two rows at every width. "Find LED 1" and "Reverse" are worded keys at the top of the device instead of two bare corner icons, and the notch has room above it. The device's well has the same corner as the strip, the title lines up with the other pages at 1920 px, a connector's panel labels its Cut or Fade row, and on a phone the header is two rows instead of four, the tools take two rows instead of three, the Spin speed one instead of two, and the page no longer scrolls at 390 px. (#468)
+
 ### Fixed
 
 - Patterns: adding, copying, deleting or moving a frame no longer loses the transition you set for the loop (the last frame back to frame 1); the loop connector stays on whichever frame is last, and a frame that stops being last passes to the next as a cut. (#468)

@@ -19,8 +19,9 @@
 
 import { Fragment, useCallback, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowBendUpLeft, Copy, FilmStrip, Hourglass, Play, Plus, Stop, Trash } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, Copy, FilmStrip, Hourglass, Play, Plus, Repeat, Stop, Trash } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
+import { Chip } from "@/components/Chip";
 import { NumberField } from "@/components/NumberField";
 import { Popover } from "@/components/Popover";
 import { useMediaQuery } from "@/components/MediaQuery";
@@ -135,8 +136,8 @@ export function FrameStrip(props: FrameStripProps) {
                     props.onSelect(i);
                   }}
                 >
-                  <Thumb frame={frame} dots={dots} />
                   <span className={s.frameNo}>{i + 1}</span>
+                  <Thumb frame={frame} dots={dots} />
                 </button>
                 <span className={s.frameHold}>{frame.hold}ms</span>
               </div>
@@ -182,6 +183,18 @@ export function FrameStrip(props: FrameStripProps) {
           disabled={cannotPlay !== null && !playing}
           onClick={props.onPlay}
         />
+        {/* Loop is the pattern's one playback switch, so it sits with the keys and is never scrolled
+            away with the frames; the last connector still holds the fade back to frame 1. */}
+        <Chip
+          icon={<Repeat size={14} weight="bold" aria-hidden="true" />}
+          pressed={loop}
+          label="Loop"
+          title="Play on from the last frame back to frame 1"
+          testId="loop-key"
+          onClick={() => props.onLoop(!loop)}
+        >
+          <span className={s.keyWord}>Loop</span>
+        </Chip>
       </div>
 
       <div className={s.frameTiming} role="group" aria-label="Timing">
@@ -346,6 +359,7 @@ function Connector({
             </label>
           )}
           <div className={s.transitionRow} data-off={live ? "false" : "true"}>
+            <span>Change</span>
             <Segmented<"cut" | "fade">
               label={`Frame ${index + 1} transition`}
               value={kind}

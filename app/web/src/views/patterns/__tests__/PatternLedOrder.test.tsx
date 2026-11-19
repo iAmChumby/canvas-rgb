@@ -169,6 +169,20 @@ describe("the LED-order notch in the pattern editor", () => {
     expect(screen.getByTestId("first-led-notch").getAttribute("aria-valuenow")).toBe("4");
   });
 
+  it("names the two keys in words, and the direction key says whether the run is reversed (#468)", async () => {
+    // The keys used to be two bare icons in the stage's corners; a reader of the screen (or of the
+    // page) now finds them by what they do, with the LED number in the first one.
+    show(2, false);
+    await settle();
+    expect(screen.getByRole("button", { name: "Find LED 3" })).toBe(screen.getByTestId("led-order-identify"));
+    const reverse = screen.getByRole("button", { name: "Reverse" });
+    expect(reverse.getAttribute("aria-pressed")).toBe("false");
+    cleanup();
+    show(2, true);
+    await settle();
+    expect(screen.getByRole("button", { name: "Reverse" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("sends the first LED with the direction, so the first LED stays first as it turns", async () => {
     // A reversed light with no first LED starts on its last LED (the old full flip); turning it
     // forward keeps that LED first instead of jumping to LED 0.

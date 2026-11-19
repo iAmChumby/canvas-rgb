@@ -18,8 +18,9 @@
 // the stack builder's own, with the same words.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FloppyDisk, X } from "@phosphor-icons/react";
+import { ArrowsLeftRight, Crosshair, FloppyDisk, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
+import { Chip } from "@/components/Chip";
 import { LedOrderControl } from "@/components/LedOrderControl";
 import { directionPatch, effectiveFirstLed, identifyLed } from "@/lib/ledOrder";
 import { LeavePrompt } from "@/components/LeavePrompt";
@@ -596,8 +597,6 @@ export function PatternEditor({
                 height={Math.max(1, box.height)}
                 dots={dots}
                 onFirstLed={(led) => void setFirstLed(led)}
-                onReversed={(next) => void setReversed(next)}
-                onIdentify={() => identifyFirst(firstLed)}
               />
             </div>
           )}
@@ -614,6 +613,29 @@ export function PatternEditor({
             ) : null
           }
         />
+        {/* The two LED-order keys, worded and in the stage's own top band: the notch says where the
+            run starts, these say which way it goes and light that LED on the device. */}
+        <div className={s.orderKeys} role="group" aria-label="LED order">
+          <Chip
+            icon={<Crosshair size={14} weight="bold" aria-hidden="true" />}
+            label={`Find LED ${firstLed + 1}`}
+            title="Light the first LED on the device"
+            testId="led-order-identify"
+            onClick={() => identifyFirst(firstLed)}
+          >
+            <span className={s.keyWord}>Find LED {firstLed + 1}</span>
+          </Chip>
+          <Chip
+            icon={<ArrowsLeftRight size={14} weight="bold" aria-hidden="true" />}
+            label="Reverse"
+            title="Run the LEDs the other way round"
+            testId="led-order-direction"
+            pressed={reversed}
+            onClick={() => void setReversed(!reversed)}
+          >
+            <span className={s.keyWord}>Reverse</span>
+          </Chip>
+        </div>
       </div>
 
       <MotionControl
