@@ -21,7 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use canvas_adapters::attack_shark_x6::AttackSharkX6;
 use canvas_adapters::chione::ChioneDisplay;
-use canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2;
+use canvas_adapters::eightbitdo_ultimate2::ring::RingLightAdapter;
+use canvas_adapters::eightbitdo_ultimate2::{EightBitDoUltimate2, VendorHandle};
 use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::OpenRgbAdapter;
 use canvas_adapters::resume::{OnResume, ResumeBehavior};
@@ -44,6 +45,7 @@ const GUARDED: &[&str] = &[
     "ChioneDisplay",
     "AttackSharkX6",
     "EightBitDoUltimate2",
+    "RingLightAdapter",
     "CompositeAdapter",
     "NoDisplays",
     "FakeNumericDisplay",
@@ -172,6 +174,11 @@ async fn every_adapter_the_daemon_can_build_says_what_it_does_on_a_resume() {
     assert_eq!(ChioneDisplay::new().on_resume(), OnResume::NothingToRestore, "the CHIONE");
     assert_eq!(AttackSharkX6::new().on_resume(), OnResume::NothingToRestore, "the X6 mouse");
     assert_eq!(EightBitDoUltimate2::new().on_resume(), OnResume::NothingToRestore, "the 8BitDo pad");
+    assert_eq!(
+        RingLightAdapter::without_store(VendorHandle::new()).on_resume(),
+        OnResume::NothingToRestore,
+        "the controller rings hold their colours in the pad's flash"
+    );
     assert_eq!(NoDisplays.on_resume(), OnResume::NothingToRestore, "no display at all");
     assert_eq!(
         FakeNumericDisplay::default().on_resume(),

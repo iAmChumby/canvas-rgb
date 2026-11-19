@@ -8,6 +8,7 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
+use canvas_adapters::eightbitdo_ultimate2::ring::{RingLightAdapter, RING_PREFIX};
 use canvas_adapters::openrgb::OpenRgbAdapter;
 use canvas_adapters::royuan::{RetryPolicy, RoyuanAdapter};
 use canvas_proto::device::AdapterCapabilities;
@@ -28,6 +29,9 @@ pub struct CompositeAdapter {
     royuan_retry: RetryPolicy,
     /// When the keyboard's current connection opened, while it is connected.
     royuan_up_since: Option<Instant>,
+    /// The controller's two stick rings, a light that takes stills (#376). `None` until the
+    /// daemon gives it the pad's shared vendor channel; fakes mode never does.
+    rings: Option<RingLightAdapter>,
 }
 
 impl CompositeAdapter {
@@ -47,7 +51,16 @@ impl CompositeAdapter {
             keyboard_enabled: false,
             royuan_retry: RetryPolicy::new(),
             royuan_up_since: None,
+            rings: None,
         }
+    }
+
+    /// Adds the controller's rings, which route by the `ring:` id prefix. The ring adapter holds
+    /// the pad's shared vendor channel and sends the pad nothing unless the peripheral write gate
+    /// is on, so adding it opens and writes nothing by itself.
+    pub fn with_rings(mut self, rings: RingLightAdapter) -> Self {
+        self.rings = Some(rings);
+        self
     }
 
     /// Like [`new`](Self::new), with a keyboard adapter of the caller's.
@@ -62,6 +75,7 @@ impl CompositeAdapter {
             keyboard_enabled: true,
             royuan_retry: RetryPolicy::new(),
             royuan_up_since: None,
+            rings: None,
         }
     }
 
@@ -69,10 +83,14 @@ impl CompositeAdapter {
         id.0.starts_with(ROYUAN_PREFIX)
     }
 
+    fn is_ring(id: &DeviceId) -> bool {
+        id.0.starts_with(RING_PREFIX)
+    }
+
     /// Whether the composite hands this device's frames to OpenRGB (every device it does not
     /// serve natively).
     pub fn is_openrgb_device(id: &DeviceId) -> bool {
-        !Self::is_royuan(id)
+        !Self::is_royuan(id) && !Self::is_ring(id)
     }
 
     /// Opens the keyboard if it is closed and the retry window has passed.
@@ -156,6 +174,12 @@ impl DeviceAdapter for CompositeAdapter {
             .into_iter()
             .filter(|d| crate::is_driven(&d.id))
             .collect();
+        if let Some(rings) = self.rings.as_mut() {
+            match rings.discover().await {
+                Ok(found) => devices.extend(found),
+                Err(e) => tracing::debug!(error = %e, "the controller rings could not be listed"),
+            }
+        }
         if !self.keyboard_enabled {
             return Ok(devices);
         }
@@ -173,6 +197,12 @@ impl DeviceAdapter for CompositeAdapter {
     }
 
     async fn write_frame(&mut self, device: &DeviceId, colors: &[Rgb8]) -> Result<(), AdapterError> {
+        if Self::is_ring(device) {
+            return match self.rings.as_mut() {
+                Some(rings) => rings.write_frame(device, colors).await,
+                None => Err(AdapterError::NotConnected),
+            };
+        }
         if Self::is_royuan(device) {
             self.ensure_royuan().await?;
             return self.royuan.write_frame(device, colors).await;
@@ -181,6 +211,12 @@ impl DeviceAdapter for CompositeAdapter {
     }
 
     async fn set_zone_size(&mut self, device: &DeviceId, zone: u32, leds: u32) -> Result<(), AdapterError> {
+        if Self::is_ring(device) {
+            return match self.rings.as_mut() {
+                Some(rings) => rings.set_zone_size(device, zone, leds).await,
+                None => Err(AdapterError::NotConnected),
+            };
+        }
         if Self::is_royuan(device) {
             if !self.keyboard_enabled {
                 return Err(AdapterError::NotConnected);
@@ -191,6 +227,12 @@ impl DeviceAdapter for CompositeAdapter {
     }
 
     async fn identify(&mut self, device: &DeviceId, zone: u32, led: u32) -> Result<(), AdapterError> {
+        if Self::is_ring(device) {
+            return match self.rings.as_mut() {
+                Some(rings) => rings.identify(device, zone, led).await,
+                None => Err(AdapterError::NotConnected),
+            };
+        }
         if Self::is_royuan(device) {
             self.ensure_royuan().await?;
             return self.royuan.identify(device, zone, led).await;
@@ -199,6 +241,12 @@ impl DeviceAdapter for CompositeAdapter {
     }
 
     async fn read_back(&mut self, device: &DeviceId) -> Result<Vec<Rgb8>, AdapterError> {
+        if Self::is_ring(device) {
+            return match self.rings.as_mut() {
+                Some(rings) => rings.read_back(device).await,
+                None => Err(AdapterError::NotConnected),
+            };
+        }
         if Self::is_royuan(device) {
             if !self.keyboard_enabled {
                 return Err(AdapterError::NotConnected);

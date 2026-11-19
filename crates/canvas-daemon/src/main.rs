@@ -172,7 +172,16 @@ async fn daemon_main(fakes: bool) -> Exit {
     let adapter = if fakes {
         canvas_daemon::composite::CompositeAdapter::openrgb_only(openrgb_adapter)
     } else {
-        canvas_daemon::composite::CompositeAdapter::new(openrgb_adapter)
+        // The controller's rings take stills through the pad adapter's shared vendor channel. They
+        // send nothing until the pad's access has reads and writes on and the person is away.
+        let ring_store =
+            canvas_adapters::royuan::FileStillStore::new(canvas_daemon::paths::ring_stills_file());
+        canvas_daemon::composite::CompositeAdapter::new(openrgb_adapter).with_rings(
+            canvas_adapters::eightbitdo_ultimate2::ring::RingLightAdapter::new(
+                pad_handle.clone(),
+                Box::new(ring_store),
+            ),
+        )
     };
 
     // The numeric display (the CHIONE pump head). It only enumerates until a display has a saved

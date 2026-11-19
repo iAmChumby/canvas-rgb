@@ -932,7 +932,10 @@ function PeripheralDetail({
 
       {isController && showsSettings && (
         <Panel title="RGB rings">
-          <p className="mute">The rings on the pad are not read yet: this build cannot name them.</p>
+          <p className="mute">
+            Rings hold one still colour set per scene. A scene change writes it to the pad while you are away, when this
+            pad&rsquo;s reads and writes are on. The app cannot see the rings&rsquo; light.
+          </p>
         </Panel>
       )}
     </div>

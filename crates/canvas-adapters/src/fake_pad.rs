@@ -84,6 +84,12 @@ fn is_read_word(data: &[u8]) -> bool {
         && u16::from_le_bytes([data[2], data[3]]) == codec::REQ_READ
 }
 
+/// The request word of a class-04 config report, in the no-length framing, when it is one.
+fn config_word(data: &[u8]) -> Option<u16> {
+    (data.len() >= 6 && data[0] == codec::OUT_ID && data[1] == 0x04)
+        .then(|| u16::from_le_bytes([data[2], data[3]]))
+}
+
 /// The text of the checked-in fixture file.
 const FIXTURE_TEXT: &str = include_str!("../tests/fixtures/ring_profile.txt");
 
@@ -94,7 +100,11 @@ pub fn ring_fixture_capture() -> ProfileCapture {
 
 #[derive(Default)]
 struct State {
-    /// The reply to the read request for each chunk offset.
+    /// The image the pad holds. A write request changes it; a read after it shows the change.
+    image: Vec<u8>,
+    /// The reply to the read request for each chunk offset. Replies of a stored capture are
+    /// replayed byte for byte until a write touches their chunk; then they are rebuilt from the
+    /// image.
     replies: BTreeMap<usize, Vec<u8>>,
     /// Every report the pad was sent, in order.
     sent: Vec<Vec<u8>>,
@@ -106,6 +116,15 @@ struct State {
     silent_after: Option<usize>,
     /// Make `open_vendor` fail with this message.
     open_error: Option<String>,
+    /// The pad never answers a commit.
+    commit_silent: bool,
+    /// On the next commit the pad also changes this byte of the image (a pad that scribbles
+    /// outside the block it was given).
+    scribble_on_commit: Option<usize>,
+    /// On the next commit the pad drops the write: the image goes back to what it was.
+    drop_next_commit: bool,
+    /// The image as it was before the writes since the last commit.
+    before_write: Option<Vec<u8>>,
 }
 
 /// A fake pad: an [`Opener`] whose vendor channel replays a profile.
@@ -123,7 +142,11 @@ impl FakePad {
             replies.insert(n * codec::CHUNK, reply.clone());
         }
         Self {
-            state: Arc::new(Mutex::new(State { replies, ..Default::default() })),
+            state: Arc::new(Mutex::new(State {
+                image: capture.image.clone(),
+                replies,
+                ..Default::default()
+            })),
             personality,
         }
     }
@@ -151,6 +174,45 @@ impl FakePad {
     /// The pad stops answering after `n` read requests.
     pub fn go_silent_after(&self, n: usize) {
         self.lock().silent_after = Some(n);
+    }
+
+    /// The pad never answers a commit (the write chunks are acknowledged).
+    pub fn silence_commits(&self) {
+        self.lock().commit_silent = true;
+    }
+
+    /// At the next commit the pad also changes the byte at `offset` of its image.
+    pub fn scribble_on_next_commit(&self, offset: usize) {
+        self.lock().scribble_on_commit = Some(offset);
+    }
+
+    /// The next commit is acknowledged but the pad drops what was written since the last one.
+    pub fn drop_next_commit(&self) {
+        self.lock().drop_next_commit = true;
+    }
+
+    /// The image the pad holds now.
+    pub fn image(&self) -> Vec<u8> {
+        self.lock().image.clone()
+    }
+
+    /// How many reports of each kind the pad was sent: `(read, write chunk, commit, reportstate)`.
+    pub fn report_counts(&self) -> (usize, usize, usize, usize) {
+        let s = self.lock();
+        let mut counts = (0, 0, 0, 0);
+        for r in &s.sent {
+            if is_read_word(r) {
+                counts.0 += 1;
+            } else if let Some(word) = config_word(r) {
+                match word {
+                    codec::REQ_WRITE => counts.1 += 1,
+                    codec::REQ_COMMIT => counts.2 += 1,
+                    codec::REQ_REPORT_STATE => counts.3 += 1,
+                    _ => {}
+                }
+            }
+        }
+        counts
     }
 
     /// Opening the vendor channel fails with `message`, as it does when another program holds it.
@@ -184,18 +246,73 @@ impl VendorTransport for FakePadVendor {
     fn send_report(&mut self, data: &[u8]) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.sent.push(data.to_vec());
-        if !is_read_word(data) {
+        let Some(word) = config_word(data) else {
             return Ok(());
-        }
-        if s.silent_after.is_some_and(|n| s.answered >= n) {
-            return Ok(());
-        }
-        s.answered += 1;
-        let offset = u32::from_le_bytes([data[14], data[15], data[16], data[17]]) as usize;
-        if let Some(reply) = s.replies.get(&offset).cloned() {
-            s.queue.push_back(reply);
+        };
+        match word {
+            codec::REQ_READ if is_read_word(data) => {
+                if s.silent_after.is_some_and(|n| s.answered >= n) {
+                    return Ok(());
+                }
+                s.answered += 1;
+                let offset = u32::from_le_bytes([data[14], data[15], data[16], data[17]]) as usize;
+                if let Some(reply) = s.replies.get(&offset).cloned() {
+                    s.queue.push_back(reply);
+                }
+            }
+            codec::REQ_WRITE if data.len() >= codec::DATA_AT => {
+                // A write request carries bytes into the image at its offset; the fake is a small
+                // model of the pad, so a re-read shows what was written once it is committed.
+                let word = u32::from_le_bytes([data[6], data[7], data[8], data[9]]);
+                let len = (word & 0xFFFF) as usize;
+                let offset = u32::from_le_bytes([data[14], data[15], data[16], data[17]]) as usize;
+                if codec::DATA_AT + len <= data.len() && offset + len <= s.image.len() {
+                    if s.before_write.is_none() {
+                        s.before_write = Some(s.image.clone());
+                    }
+                    s.image[offset..offset + len]
+                        .copy_from_slice(&data[codec::DATA_AT..codec::DATA_AT + len]);
+                    s.rebuild_replies(offset, len);
+                }
+                s.queue.push_back(codec::ack_frame(codec::REQ_WRITE));
+            }
+            codec::REQ_COMMIT => {
+                if s.drop_next_commit {
+                    s.drop_next_commit = false;
+                    if let Some(before) = s.before_write.take() {
+                        s.image = before;
+                        s.rebuild_replies(0, codec::IMAGE_LEN);
+                    }
+                }
+                if let Some(at) = s.scribble_on_commit.take() {
+                    if at < s.image.len() {
+                        s.image[at] ^= 0xFF;
+                        s.rebuild_replies(at, 1);
+                    }
+                }
+                s.before_write = None;
+                if !s.commit_silent {
+                    s.queue.push_back(codec::ack_frame(codec::REQ_COMMIT));
+                }
+            }
+            _ => {}
         }
         Ok(())
+    }
+}
+
+impl State {
+    /// Rebuilds the stored reply of every chunk that overlaps `len` bytes at `offset`.
+    fn rebuild_replies(&mut self, offset: usize, len: usize) {
+        let mut at = 0;
+        while at < self.image.len() {
+            let chunk = codec::CHUNK.min(self.image.len() - at);
+            if at < offset + len && offset < at + chunk {
+                let reply = codec::reply_frame(chunk, true, at as u32, &self.image[at..at + chunk]);
+                self.replies.insert(at, reply);
+            }
+            at += chunk;
+        }
     }
 }
 

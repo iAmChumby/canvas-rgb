@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- Devices: the 8BitDo Ultimate 2's two stick rings can join the lighting engine as one device of two rings of 12 LEDs that takes one still colour set per scene. A scene change writes that set to the pad's stored profile only while you are away from the keyboard and mouse, only when the pad's reads and writes are on, at most once in 10 seconds, 4 an hour and 24 a day, and the profile is read back and restored if it does not match. The rings' byte and LED order are not yet checked on the pad, so it is checked on a fake pad only. `ring_probe` (a canvas-adapters example) reads the pad's stored profile, writing nothing, to settle that order. (#376)
+
 ## [0.18.0] - 2026-11-18
 
 ### Added

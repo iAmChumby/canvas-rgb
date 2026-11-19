@@ -114,6 +114,7 @@ use canvas_proto::traits::AdapterError;
 
 pub mod codec;
 pub mod probe;
+pub mod ring;
 
 use self::codec::XState;
 
@@ -1051,12 +1052,12 @@ impl VendorHandle {
     }
 
     /// Puts `transport` in the handle. The peripheral adapter does this when it opens the pad.
-    pub(crate) fn open_with(&self, transport: Box<dyn VendorTransport>) {
+    pub fn open_with(&self, transport: Box<dyn VendorTransport>) {
         *self.slot() = Some(transport);
     }
 
     /// Closes the channel.
-    pub(crate) fn close(&self) {
+    pub fn close(&self) {
         *self.slot() = None;
     }
 
@@ -1086,7 +1087,7 @@ impl VendorHandle {
         self.inner.present.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub(crate) fn set_pad_present(&self, present: bool) {
+    pub fn set_pad_present(&self, present: bool) {
         self.inner.present.store(present, std::sync::atomic::Ordering::SeqCst);
     }
 
