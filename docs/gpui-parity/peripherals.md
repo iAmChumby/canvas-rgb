@@ -118,7 +118,7 @@ Controller profiles (generic path for `profiles` and `profile-N` sections, `app/
 - [ ] Profile panel class: no special class (generic `Panel`) — `app/web/src/views/PeripheralsView.tsx:638-652` — checked by pair at 1440x900
 
 Controller RGB rings and kind handling:
-- [ ] RGB rings panel (controller only, always drawn, after the wide panels): title "RGB rings", text "The rings on the pad are not read yet: this build cannot name them." (single `p.mute`) — `app/web/src/views/PeripheralsView.tsx:721-725` — checked by pair at 1440x900
+- [ ] RGB rings panel (controller only, always drawn, after the wide panels): title "RGB rings", text "Rings hold one still colour set per scene. A scene change writes it to the pad while you are away, when this pad's reads and writes are on. The app cannot see the rings' light." (single `p.mute`) — `app/web/src/views/PeripheralsView.tsx:934-939` — checked by pair at 1440x900
 - [ ] Keyboard kind: a keyboard device gets the Keyboard glyph (`:35-39`) and the generic path only (no DPI or controller panel, no RGB rings); no keyboard fixture exists — UNKNOWN until a keyboard device is in the fixtures or the daemon: checked by GPUI test (to write) with a keyboard schema
 
 Page head and strip:

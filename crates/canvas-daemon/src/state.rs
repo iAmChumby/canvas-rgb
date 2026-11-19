@@ -1020,6 +1020,12 @@ impl FrameSink for DeviceSink {
         if self.gate.as_ref().is_some_and(|g| g.is_active()) {
             return;
         }
+        // A paint of every sink does not reach the controller rings (#376).
+        if self.id.0.starts_with(canvas_adapters::eightbitdo_ultimate2::ring::RING_PREFIX)
+            && self.gate.as_ref().is_some_and(|g| g.is_painting_solid())
+        {
+            return;
+        }
         // No reader left: the device's writer is gone, and nobody will take the frame.
         if self.tx.receiver_count() == 0 {
             tracing::warn!(device = %self.id, "device writer is gone; dropping a frame");

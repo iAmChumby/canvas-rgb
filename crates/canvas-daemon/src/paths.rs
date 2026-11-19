@@ -14,6 +14,8 @@ pub const HOME_ENV: &str = "CANVAS_RGB_HOME";
 
 /// The keyboard's still bookkeeping (#312), under [`home`].
 pub const ROYUAN_STILLS_FILE: &str = "royuan-stills.json";
+/// The controller rings' still bookkeeping, next to the keyboard's (#376).
+pub const RING_STILLS_FILE: &str = "ring-stills.json";
 
 /// The daemon's user directory: `%APPDATA%\canvas-rgb`, or `$CANVAS_RGB_HOME`.
 pub fn home() -> PathBuf {
@@ -90,6 +92,12 @@ pub fn backups_dir() -> PathBuf {
 /// (#312). The daemon passes this path to the adapter; it is user data, never `%ProgramData%`.
 pub fn royuan_stills_file() -> PathBuf {
     home().join(ROYUAN_STILLS_FILE)
+}
+
+/// The rings' still bookkeeping: the last day's write attempts and the hash of the colour set the
+/// pad holds (#376). User data, like the keyboard's; never `%ProgramData%`.
+pub fn ring_stills_file() -> PathBuf {
+    home().join(RING_STILLS_FILE)
 }
 
 /// The backups folder inside a given home directory.

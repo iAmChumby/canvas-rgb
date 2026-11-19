@@ -113,6 +113,9 @@ use canvas_proto::props::{PropKind, PropValue, PropertyDef, Props};
 use canvas_proto::traits::AdapterError;
 
 pub mod codec;
+pub mod probe;
+pub mod ring;
+pub mod s3;
 
 use self::codec::XState;
 
@@ -775,7 +778,18 @@ pub const IDLE_WINDOW: Duration = Duration::from_secs(3);
 /// Blocking: call it from `spawn_blocking`. A chunk that is not answered ends the read with the
 /// reason the pad gave.
 fn read_image(vendor: &mut dyn VendorTransport, pace: Pace) -> Result<Vec<u8>, AdapterError> {
+    read_image_raw(vendor, pace).map(|(img, _)| img)
+}
+
+/// The profile read, keeping the raw reply of every chunk (the ring probe prints and saves them).
+///
+/// Returns the image and the accepted replies, one per chunk, in order.
+fn read_image_raw(
+    vendor: &mut dyn VendorTransport,
+    pace: Pace,
+) -> Result<(Vec<u8>, Vec<Vec<u8>>), AdapterError> {
     let mut img = Vec::with_capacity(codec::IMAGE_LEN);
+    let mut replies: Vec<Vec<u8>> = Vec::new();
     while img.len() < codec::IMAGE_LEN {
         let offset = img.len();
         let len = codec::CHUNK.min(codec::IMAGE_LEN - offset);
@@ -797,6 +811,7 @@ fn read_image(vendor: &mut dyn VendorTransport, pace: Pace) -> Result<Vec<u8>, A
                 match codec::parse_read_reply(&buf[..n], len, offset) {
                     Ok(data) => {
                         chunk = Some(data.to_vec());
+                        replies.push(buf[..n].to_vec());
                         break;
                     }
                     Err(why) => last = why,
@@ -818,7 +833,7 @@ fn read_image(vendor: &mut dyn VendorTransport, pace: Pace) -> Result<Vec<u8>, A
             std::thread::sleep(pace.chunk_pause);
         }
     }
-    Ok(img)
+    Ok((img, replies))
 }
 
 // ------------------------------------------------------------------------------ the write session
@@ -978,6 +993,179 @@ fn row_suffix(row: usize) -> &'static str {
     codec::RANGE_ROWS[row].0
 }
 
+// ------------------------------------------------------------------------------ the shared handle
+
+/// Where the daemon says how long the person has been away from the keyboard and mouse.
+pub type IdleSource = Arc<dyn Fn() -> Duration + Send + Sync>;
+
+struct HandleInner {
+    /// The open vendor channel, or `None` while the pad's reads are off or the pad is away.
+    slot: std::sync::Mutex<Option<Box<dyn VendorTransport>>>,
+    /// The peripheral write gate: the daemon turns it with the pad's saved access.
+    writes: std::sync::atomic::AtomicBool,
+    /// True while the pad shows the personality that has a vendor channel (XInput).
+    present: std::sync::atomic::AtomicBool,
+    idle: std::sync::Mutex<Option<IdleSource>>,
+    /// Whether a channel is open, as the last `open_with` or `close` left it. `is_open` reads
+    /// this and never the slot, so an async task can ask while a session holds the lock.
+    open: std::sync::atomic::AtomicBool,
+    /// An open or a close that found the slot locked by a session. The next `with` takes it
+    /// before it runs, and a session that was running when it arrived takes it as it ends.
+    pending: std::sync::Mutex<Option<Pending>>,
+}
+
+/// A change of the channel that waited for the session in flight.
+enum Pending {
+    Open(Box<dyn VendorTransport>),
+    Close,
+}
+
+/// The pad's vendor channel, shared.
+///
+/// The peripheral adapter owns the channel's life (it opens it when the pad's reads are turned on
+/// and closes it when they are turned off, #127) and reads the settings through it. The ring
+/// adapter writes its stills through the same channel and never opens a second one. One mutex
+/// guards the channel, so a settings read, a write session and a still never interleave their
+/// reports; each takes the lock for its whole session.
+///
+/// The handle also carries the two gates a ring write must obey: the peripheral **write gate**
+/// (what `PERIPHERAL_ACCESS` turns on and off) and the **idle** reading, so a ring write waits
+/// for the same quiet a settings read does. Cloning shares everything.
+#[derive(Clone)]
+pub struct VendorHandle {
+    inner: Arc<HandleInner>,
+}
+
+impl Default for VendorHandle {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(HandleInner {
+                slot: std::sync::Mutex::new(None),
+                writes: std::sync::atomic::AtomicBool::new(false),
+                present: std::sync::atomic::AtomicBool::new(false),
+                idle: std::sync::Mutex::new(None),
+                open: std::sync::atomic::AtomicBool::new(false),
+                pending: std::sync::Mutex::new(None),
+            }),
+        }
+    }
+}
+
+impl VendorHandle {
+    /// A closed handle, with the write gate off.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Box<dyn VendorTransport>>> {
+        self.inner.slot.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// True while a vendor channel is open. **Never blocks**: it reads a flag, not the channel,
+    /// so it answers at once while a session holds the lock.
+    pub fn is_open(&self) -> bool {
+        self.inner.open.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Puts `transport` in the handle. The peripheral adapter does this when it opens the pad.
+    /// **Never blocks**: when a session holds the channel, the transport waits in a pending
+    /// slot and the session in flight takes it as it ends.
+    pub fn open_with(&self, transport: Box<dyn VendorTransport>) {
+        self.inner.open.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.change(Pending::Open(transport));
+    }
+
+    /// Closes the channel. **Never blocks**, as `open_with`: a session in flight finishes on the
+    /// channel it has and then lets go of it.
+    pub fn close(&self) {
+        self.inner.open.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.change(Pending::Close);
+    }
+
+    /// Leaves `change` for the slot's next holder, then takes the slot itself if it is free.
+    ///
+    /// The change is set before the slot is tried, and a session looks at the pending slot after
+    /// it lets go: either this call finds the slot free and applies the change, or the holder
+    /// has not let go yet and sees the change when it does.
+    fn change(&self, change: Pending) {
+        *self.pending() = Some(change);
+        self.settle();
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, Option<Pending>> {
+        self.inner.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Applies a pending change if the slot is free; leaves it for the holder when it is not.
+    fn settle(&self) {
+        let slot = match self.inner.slot.try_lock() {
+            Ok(slot) => slot,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        let mut slot = slot;
+        let change = self.pending().take();
+        Self::apply(&mut slot, change);
+    }
+
+    fn apply(slot: &mut Option<Box<dyn VendorTransport>>, change: Option<Pending>) {
+        match change {
+            Some(Pending::Open(transport)) => *slot = Some(transport),
+            Some(Pending::Close) => *slot = None,
+            None => {}
+        }
+    }
+
+    /// Runs `f` with the channel to itself and returns what it returns; `None` when the channel is
+    /// closed. **Blocking**: the lock is held for all of `f`, a whole read or write session, so
+    /// call it from `spawn_blocking`.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut dyn VendorTransport) -> R) -> Option<R> {
+        let mut slot = self.slot();
+        // An open or a close that came while the last session ran lands before this one starts.
+        let pending = self.pending().take();
+        Self::apply(&mut slot, pending);
+        let out = slot.as_mut().map(|transport| f(transport.as_mut()));
+        drop(slot);
+        // One that came during `f` lands now, so the channel does not stay as it was.
+        self.settle();
+        out
+    }
+
+    /// The peripheral write gate. False until the daemon turns it on with the pad's access; the
+    /// ring adapter sends nothing while it is false.
+    pub fn writes_enabled(&self) -> bool {
+        self.inner.writes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Turns the write gate on or off.
+    pub fn set_writes_enabled(&self, on: bool) {
+        self.inner.writes.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// True while the pad shows a personality with a vendor channel. The ring device is listed
+    /// while this holds.
+    pub fn pad_present(&self) -> bool {
+        self.inner.present.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_pad_present(&self, present: bool) {
+        self.inner.present.store(present, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Where the idle time comes from. The daemon sets this to the same clock it reads the pad's
+    /// settings by, so a ring write and a settings read wait for the same quiet.
+    pub fn set_idle_source(&self, source: IdleSource) {
+        *self.inner.idle.lock().unwrap_or_else(|e| e.into_inner()) = Some(source);
+    }
+
+    /// How long the person has been away from the keyboard and mouse, or `None` when no source
+    /// is set (the ring adapter then sends nothing: it cannot tell the person is away).
+    pub fn idle_for(&self) -> Option<Duration> {
+        let source = self.inner.idle.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        source.map(|f| f())
+    }
+}
+
 // -------------------------------------------------------------------------------- the adapter
 
 /// The 8BitDo Ultimate 2 Wireless controller.
@@ -987,7 +1175,7 @@ pub struct EightBitDoUltimate2 {
     personality: Option<Personality>,
     /// The personality the open handles were opened for.
     bound: Option<Personality>,
-    vendor: Option<Box<dyn VendorTransport>>,
+    vendor: VendorHandle,
     gamepad: Option<Box<dyn InputTransport>>,
     /// False until a caller turns config writes on. Nothing is written to the hardware while it
     /// is false.
@@ -1013,7 +1201,7 @@ impl EightBitDoUltimate2 {
             xinput: Arc::new(SystemXInput),
             personality: None,
             bound: None,
-            vendor: None,
+            vendor: VendorHandle::new(),
             gamepad: None,
             writes_enabled: false,
             pace: Pace::default(),
@@ -1022,9 +1210,22 @@ impl EightBitDoUltimate2 {
         }
     }
 
-    /// Turns config writes on or off. They are off until a caller says otherwise.
+    /// The adapter over a vendor handle of the caller's, so the ring adapter can share the
+    /// channel this adapter opens.
+    pub fn with_handle(handle: VendorHandle) -> Self {
+        Self { vendor: handle, ..Self::new() }
+    }
+
+    /// The shared vendor channel. Hand a clone to the ring adapter.
+    pub fn vendor_handle(&self) -> VendorHandle {
+        self.vendor.clone()
+    }
+
+    /// Turns config writes on or off. They are off until a caller says otherwise. The gate is
+    /// shared with the ring adapter through the vendor handle.
     pub fn set_writes_enabled(&mut self, on: bool) {
         self.writes_enabled = on;
+        self.vendor.set_writes_enabled(on);
     }
 
     /// The stable id of this pad.
@@ -1076,7 +1277,7 @@ impl EightBitDoUltimate2 {
             adapter: ADAPTER_NAME.into(),
             serial: String::new(),
             location: format!("hid:{VENDOR_ID:04x}:{:04x}", personality.product_id()),
-            connected: self.vendor.is_some() || self.gamepad.is_some(),
+            connected: self.vendor.is_open() || self.gamepad.is_some(),
         }
     }
 
@@ -1177,24 +1378,24 @@ impl EightBitDoUltimate2 {
     async fn read_props(&mut self, device: &DeviceId) -> Result<Props, AdapterError> {
         self.check_id(device)?;
         self.rebind_if_personality_changed().await?;
-        let Some(mut vendor) = self.vendor.take() else {
+        if !self.vendor.is_open() {
+            return Err(self.not_connected());
+        }
+        let pace = self.pace;
+        let handle = self.vendor.clone();
+        let result = tokio::task::spawn_blocking(move || handle.with(|v| read_image(v, pace)))
+            .await
+            .map_err(join_error)?;
+        let Some(result) = result else {
             return Err(self.not_connected());
         };
-        let pace = self.pace;
-        let (vendor, result) = tokio::task::spawn_blocking(move || {
-            let result = read_image(&mut *vendor, pace);
-            (vendor, result)
-        })
-        .await
-        .map_err(join_error)?;
-        self.vendor = Some(vendor);
         let image = match result {
             Ok(image) => image,
             Err(e) => {
                 // An I/O failure means the handle is dead (unplugged pad): close it, so the next
                 // read opens a fresh one. Silence from an asleep pad keeps the handle.
                 if matches!(e, AdapterError::Io(_)) {
-                    self.vendor = None;
+                    self.vendor.close();
                     self.gamepad = None;
                     self.image = None;
                     self.bound = None;
@@ -1211,7 +1412,7 @@ impl EightBitDoUltimate2 {
     /// since changed personality (the receiver was idle at boot and the pad linked later),
     /// that handle hears nothing: close it and open the current one.
     async fn rebind_if_personality_changed(&mut self) -> Result<(), AdapterError> {
-        if self.vendor.is_none() && self.gamepad.is_none() {
+        if !self.vendor.is_open() && self.gamepad.is_none() {
             return Ok(());
         }
         let opener = self.opener.clone();
@@ -1219,7 +1420,7 @@ impl EightBitDoUltimate2 {
             .await
             .map_err(join_error)?;
         if present.is_some() && present != self.bound {
-            self.vendor = None;
+            self.vendor.close();
             self.gamepad = None;
             self.image = None;
             self.bound = None;
@@ -1272,17 +1473,19 @@ impl EightBitDoUltimate2 {
         }
         self.check_writable_profile(props)?;
         let packets = self.plan(props)?;
-        let Some(mut vendor) = self.vendor.take() else {
+        if !self.vendor.is_open() {
             return Err(self.not_connected());
-        };
+        }
         let pace = self.pace;
-        let (vendor, result) = tokio::task::spawn_blocking(move || {
-            let result = write_session(&mut *vendor, pace, &packets);
-            (vendor, result)
+        let handle = self.vendor.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            handle.with(|v| write_session(v, pace, &packets))
         })
         .await
         .map_err(join_error)?;
-        self.vendor = Some(vendor);
+        let Some(result) = result else {
+            return Err(self.not_connected());
+        };
         // A session that went wrong may have sent chunks: it is an I/O failure for the caller,
         // which then treats the pad as changed by an unknown amount.
         result.map_err(|e| AdapterError::Io(std::io::Error::other(e.to_string())))
@@ -1497,7 +1700,7 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
     }
 
     async fn connect(&mut self) -> Result<(), AdapterError> {
-        if self.vendor.is_some() || self.gamepad.is_some() {
+        if self.vendor.is_open() || self.gamepad.is_some() {
             return Ok(());
         }
         let opener = self.opener.clone();
@@ -1505,9 +1708,11 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
             .await
             .map_err(join_error)?;
         let Some(personality) = personalities.first().copied() else {
+            self.vendor.set_pad_present(false);
             return Err(AdapterError::NotConnected);
         };
         self.personality = Some(personality);
+        self.vendor.set_pad_present(personality == Personality::XInput);
         let opener = self.opener.clone();
         let (vendor, gamepad) = tokio::task::spawn_blocking(move || {
             let vendor = opener.open_vendor(personality).map_err(AdapterError::Protocol)?;
@@ -1516,17 +1721,20 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
         })
         .await
         .map_err(join_error)??;
-        self.vendor = vendor;
+        match vendor {
+            Some(transport) => self.vendor.open_with(transport),
+            None => self.vendor.close(),
+        }
         self.gamepad = gamepad;
         self.bound = Some(personality);
-        if self.vendor.is_none() && self.gamepad.is_none() {
+        if !self.vendor.is_open() && self.gamepad.is_none() {
             return Err(self.not_connected());
         }
         Ok(())
     }
 
     async fn disconnect(&mut self) -> Result<(), AdapterError> {
-        self.vendor = None;
+        self.vendor.close();
         self.gamepad = None;
         self.bound = None;
         self.image = None;
@@ -1535,7 +1743,7 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
     }
 
     fn is_connected(&self) -> bool {
-        self.vendor.is_some() || self.gamepad.is_some()
+        self.vendor.is_open() || self.gamepad.is_some()
     }
 
     async fn discover(&mut self) -> Result<Vec<PeripheralInfo>, AdapterError> {
@@ -1544,9 +1752,11 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
             .await
             .map_err(join_error)?;
         let Some(personality) = personalities.first().copied() else {
+            self.vendor.set_pad_present(false);
             return Ok(Vec::new());
         };
         self.personality = Some(personality);
+        self.vendor.set_pad_present(personality == Personality::XInput);
         Ok(vec![self.info()])
     }
 
@@ -2178,6 +2388,50 @@ mod tests {
         let at = u32::from_le_bytes(sent[1][14..18].try_into().unwrap()) as usize;
         assert_eq!(at, field.record_at);
         assert_eq!(sent[1][codec::DATA_AT + field.byte_in_record], codec::percent_to_byte(20.0));
+    }
+
+    #[tokio::test]
+    async fn the_ring_adapter_sees_the_channel_the_pad_adapter_opens_and_nothing_else() {
+        let (mut a, s) = rig();
+        let handle = a.vendor_handle();
+        assert!(!handle.is_open(), "closed until the pad adapter opens it");
+        a.connect().await.unwrap();
+        assert!(handle.is_open(), "the clone sees the channel the adapter opened");
+        assert_eq!(s.lock().unwrap().opens, 1, "one open, shared, never a second");
+        // A report sent through the shared handle lands on the same pad channel.
+        let sent = handle
+            .with(|v| v.send_report(&codec::read_request(0).unwrap()))
+            .expect("the channel is open")
+            .is_ok();
+        assert!(sent);
+        assert_eq!(s.lock().unwrap().sent.last(), Some(&codec::read_request(0).unwrap()));
+        a.disconnect().await.unwrap();
+        assert!(!handle.is_open(), "closing the adapter closes the shared channel");
+        assert!(handle.with(|_| ()).is_none());
+    }
+
+    #[tokio::test]
+    async fn the_write_gate_and_the_present_flag_are_shared_through_the_handle() {
+        let (mut a, _s) = rig();
+        let handle = a.vendor_handle();
+        assert!(!handle.writes_enabled());
+        a.set_writes_enabled(true);
+        assert!(handle.writes_enabled(), "the daemon turns one gate and both adapters obey it");
+        a.set_writes_enabled(false);
+        assert!(!handle.writes_enabled());
+        assert!(!handle.pad_present());
+        a.discover().await.unwrap();
+        assert!(handle.pad_present(), "an XInput pad is present once discovered");
+    }
+
+    #[tokio::test]
+    async fn a_settings_read_through_a_shared_handle_still_reads_the_whole_image() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        let props = a.read_settings(&a.device_id()).await.unwrap();
+        assert!(!props.is_empty());
+        assert_eq!(s.lock().unwrap().sent.len(), 36, "36 read reports, as before the refactor");
+        assert_eq!(a.image().map(<[u8]>::len), Some(codec::IMAGE_LEN));
     }
 
     #[tokio::test]

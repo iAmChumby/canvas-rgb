@@ -6,6 +6,7 @@ pub mod chione;
 pub mod drive;
 pub mod eightbitdo_ultimate2;
 pub mod fake;
+pub mod fake_pad;
 pub mod frame_lane;
 pub mod openrgb;
 mod protocol;

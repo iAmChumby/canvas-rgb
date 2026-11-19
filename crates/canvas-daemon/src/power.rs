@@ -113,7 +113,7 @@ pub async fn handle(app: &Arc<App>, watcher: &mut PowerWatcher, event: PowerEven
             watcher.previous = app.store.read().await.config.settings.power;
             watcher.suspended = true;
             app.identify.stop();
-            app.engine.write_solid(canvas_proto::Rgb8::BLACK);
+            app.identify.paint_solid(app.engine.as_ref(), canvas_proto::Rgb8::BLACK);
             app.engine.set_power(Power::Paused);
             tracing::info!(reason = "suspend", "wrote black and parked");
             PowerAction::BlackAndPark
@@ -121,7 +121,7 @@ pub async fn handle(app: &Arc<App>, watcher: &mut PowerWatcher, event: PowerEven
         PowerEvent::Shutdown => {
             watcher.suspended = true;
             app.identify.stop();
-            app.engine.write_solid(canvas_proto::Rgb8::BLACK);
+            app.identify.paint_solid(app.engine.as_ref(), canvas_proto::Rgb8::BLACK);
             app.engine.set_power(Power::Paused);
             tracing::info!(reason = "shutdown", "wrote black and parked");
             PowerAction::BlackAndPark
@@ -140,7 +140,7 @@ pub async fn handle(app: &Arc<App>, watcher: &mut PowerWatcher, event: PowerEven
         PowerEvent::Lock | PowerEvent::MonitorsOff => {
             if black_on_lock {
                 app.identify.stop();
-                app.engine.write_solid(canvas_proto::Rgb8::BLACK);
+                app.identify.paint_solid(app.engine.as_ref(), canvas_proto::Rgb8::BLACK);
                 tracing::info!(reason = ?event, "wrote black because the setting is on");
                 PowerAction::Black
             } else {
