@@ -115,6 +115,7 @@ use canvas_proto::traits::AdapterError;
 pub mod codec;
 pub mod probe;
 pub mod ring;
+pub mod s3;
 
 use self::codec::XState;
 

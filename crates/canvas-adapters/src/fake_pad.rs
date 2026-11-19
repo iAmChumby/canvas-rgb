@@ -93,6 +93,16 @@ fn config_word(data: &[u8]) -> Option<u16> {
 /// The text of the checked-in fixture file.
 const FIXTURE_TEXT: &str = include_str!("../tests/fixtures/ring_profile.txt");
 
+/// The profile image the S2 probe read from the real pad (2026-11-18): profile 1 active, its
+/// light-tracing, fire-ring and custom ring records marked in use, all 24 custom words
+/// `ff 00 8b 00`. The S3 tool's tests run on it, so the layout they check is the pad's own.
+const REAL_TEXT: &str = include_str!("../tests/fixtures/pad_profile_real.txt");
+
+/// The real pad's profile, read the way a saved probe file is read.
+pub fn real_profile_capture() -> ProfileCapture {
+    ProfileCapture::from_text(REAL_TEXT).expect("the checked-in real profile is valid")
+}
+
 /// The checked-in fixture, read the way a saved probe file is read.
 pub fn ring_fixture_capture() -> ProfileCapture {
     ProfileCapture::from_text(FIXTURE_TEXT).expect("the checked-in ring fixture is valid")
@@ -116,8 +126,12 @@ struct State {
     silent_after: Option<usize>,
     /// Make `open_vendor` fail with this message.
     open_error: Option<String>,
-    /// The pad never answers a commit.
-    commit_silent: bool,
+    /// The pad does not answer this many more commits.
+    silent_commits: usize,
+    /// The pad applies but does not acknowledge this many more write chunks.
+    silent_write_acks: usize,
+    /// The pad acknowledges write chunks and does not apply them.
+    ignore_writes: bool,
     /// On the next commit the pad also changes this byte of the image (a pad that scribbles
     /// outside the block it was given).
     scribble_on_commit: Option<usize>,
@@ -178,7 +192,35 @@ impl FakePad {
 
     /// The pad never answers a commit (the write chunks are acknowledged).
     pub fn silence_commits(&self) {
-        self.lock().commit_silent = true;
+        self.lock().silent_commits = usize::MAX;
+    }
+
+    /// The pad does not answer the next `n` commits (the bytes are applied, as a pad that did the
+    /// work and lost the reply would).
+    pub fn silence_next_commits(&self, n: usize) {
+        self.lock().silent_commits = n;
+    }
+
+    /// The pad applies the next `n` write chunks and does not acknowledge them.
+    pub fn silence_next_write_acks(&self, n: usize) {
+        self.lock().silent_write_acks = n;
+    }
+
+    /// The pad acknowledges every write chunk and every commit and keeps none of the bytes.
+    pub fn ignore_writes(&self) {
+        self.lock().ignore_writes = true;
+    }
+
+    /// The pad takes writes again.
+    pub fn take_writes(&self) {
+        self.lock().ignore_writes = false;
+    }
+
+    /// Overwrites the pad's image directly (a test setting a state, not a report).
+    pub fn set_image(&self, image: Vec<u8>) {
+        let mut s = self.lock();
+        s.image = image;
+        s.rebuild_replies(0, codec::IMAGE_LEN);
     }
 
     /// At the next commit the pad also changes the byte at `offset` of its image.
@@ -266,7 +308,10 @@ impl VendorTransport for FakePadVendor {
                 let word = u32::from_le_bytes([data[6], data[7], data[8], data[9]]);
                 let len = (word & 0xFFFF) as usize;
                 let offset = u32::from_le_bytes([data[14], data[15], data[16], data[17]]) as usize;
-                if codec::DATA_AT + len <= data.len() && offset + len <= s.image.len() {
+                if !s.ignore_writes
+                    && codec::DATA_AT + len <= data.len()
+                    && offset + len <= s.image.len()
+                {
                     if s.before_write.is_none() {
                         s.before_write = Some(s.image.clone());
                     }
@@ -274,7 +319,11 @@ impl VendorTransport for FakePadVendor {
                         .copy_from_slice(&data[codec::DATA_AT..codec::DATA_AT + len]);
                     s.rebuild_replies(offset, len);
                 }
-                s.queue.push_back(codec::ack_frame(codec::REQ_WRITE));
+                if s.silent_write_acks > 0 {
+                    s.silent_write_acks -= 1;
+                } else {
+                    s.queue.push_back(codec::ack_frame(codec::REQ_WRITE));
+                }
             }
             codec::REQ_COMMIT => {
                 if s.drop_next_commit {
@@ -291,7 +340,9 @@ impl VendorTransport for FakePadVendor {
                     }
                 }
                 s.before_write = None;
-                if !s.commit_silent {
+                if s.silent_commits > 0 {
+                    s.silent_commits = s.silent_commits.saturating_sub(1);
+                } else {
                     s.queue.push_back(codec::ack_frame(codec::REQ_COMMIT));
                 }
             }

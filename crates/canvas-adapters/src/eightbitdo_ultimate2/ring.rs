@@ -108,9 +108,30 @@ pub fn ring_device_id() -> DeviceId {
 /// The main agent fills this in from the `ring_probe` output; no other function may know either
 /// order.
 pub fn pack_ring_colours(frame: &[Rgb8; RING_LEDS]) -> [[u8; 4]; CUSTOM_COLOURS] {
+    pack_ring_colours_as(frame, DEFAULT_ORDER)
+}
+
+/// The byte order of a colour word in the custom theme record: the one open question S3 settles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByteOrder {
+    /// File order blue, green, red, pad: the research's `u32 0x00RRGGBB`, little-endian.
+    Bgr,
+    /// File order red, green, blue, pad.
+    Rgb,
+}
+
+/// The order the adapter writes with, until S3 settles it. **TODO(S2/S3).**
+pub const DEFAULT_ORDER: ByteOrder = ByteOrder::Bgr;
+
+/// [`pack_ring_colours`] with a byte order of the caller's: how the S3 tool tries a candidate. The
+/// LED order is still the one in [`pack_ring_colours`]'s doc.
+pub fn pack_ring_colours_as(frame: &[Rgb8; RING_LEDS], order: ByteOrder) -> [[u8; 4]; CUSTOM_COLOURS] {
     let mut words = [[0u8; 4]; CUSTOM_COLOURS];
     for (word, c) in words.iter_mut().zip(frame.iter()) {
-        *word = [c.b, c.g, c.r, 0];
+        *word = match order {
+            ByteOrder::Bgr => [c.b, c.g, c.r, 0],
+            ByteOrder::Rgb => [c.r, c.g, c.b, 0],
+        };
     }
     words
 }
@@ -509,20 +530,54 @@ impl crate::resume::ResumeBehavior for RingLightAdapter {
 // ------------------------------------------------------------------------------------ the write
 
 /// Bytes of one custom theme record: the flag word and 24 colour words.
-const SINGLE_LEN: usize = 0x64;
+pub(super) const SINGLE_LEN: usize = 0x64;
 
-/// Writes the colour set into the active profile's custom ring record, checking before and after.
-/// Blocking, with the channel to itself.
-fn write_still(
-    vendor: &mut dyn VendorTransport,
-    pace: Pace,
+/// What a write needs to know before the first chunk goes out.
+pub(super) struct Prepared {
+    /// The image as the pad held it: the save to restore from.
+    pub saved: Vec<u8>,
+    /// The active profile (0-based).
+    pub active: usize,
+    /// Where the active profile's custom ring record starts in the image.
+    pub at: usize,
+    /// The record as it will be written: the flag and the new colour words.
+    pub record: Vec<u8>,
+}
+
+impl Prepared {
+    /// True when the pad already holds this record.
+    pub(super) fn is_noop(&self) -> bool {
+        self.record == self.saved[self.at..self.at + SINGLE_LEN]
+    }
+
+    /// The image the pad should read back as once the record is written.
+    pub(super) fn expected(&self) -> Vec<u8> {
+        let mut expected = self.saved.clone();
+        expected[self.at..self.at + SINGLE_LEN].copy_from_slice(&self.record);
+        expected
+    }
+}
+
+/// Checks a saved image and builds the record to write. Refuses, with nothing sent, unless the
+/// image names an active profile whose custom ring record is marked in use, and (when
+/// `expect_profile` is given) unless that profile is the expected one.
+pub(super) fn prepare_from(
+    saved: Vec<u8>,
     words: &[[u8; 4]; CUSTOM_COLOURS],
-) -> Result<(), AdapterError> {
-    // The image as it is now: the save to restore from, and where the active record sits.
-    let saved = read_image(vendor, pace)?;
+    expect_profile: Option<usize>,
+) -> Result<Prepared, AdapterError> {
     let Some(active) = codec::active_profile(&saved) else {
         return Err(refuse("the pad's image names no active profile; nothing was written"));
     };
+    if let Some(expected) = expect_profile {
+        if expected != active {
+            return Err(refuse(format!(
+                "the pad's active profile is {}, not {}; nothing was written",
+                active + 1,
+                expected + 1
+            )));
+        }
+    }
     let at = codec::SINGLE + SINGLE_LEN * active;
     let flag = u32::from_le_bytes([saved[at], saved[at + 1], saved[at + 2], saved[at + 3]]);
     if flag != codec::ENABLED {
@@ -535,34 +590,56 @@ fn write_still(
     for (i, word) in words.iter().enumerate() {
         record[4 + 4 * i..8 + 4 * i].copy_from_slice(word);
     }
-    if record == saved[at..at + SINGLE_LEN] {
+    Ok(Prepared { saved, active, at, record })
+}
+
+/// Writes the colour set into the active profile's custom ring record, checking before and after.
+/// Blocking, with the channel to itself.
+fn write_still(
+    vendor: &mut dyn VendorTransport,
+    pace: Pace,
+    words: &[[u8; 4]; CUSTOM_COLOURS],
+) -> Result<(), AdapterError> {
+    let prepared = prepare_from(read_image(vendor, pace)?, words, None)?;
+    if prepared.is_noop() {
         // The pad already holds this set: nothing to send beyond the reads.
         return Ok(());
     }
-    if let Err(first) = put_record(vendor, pace, at, &record) {
-        let restored = restore(vendor, pace, at, &saved, Restore::Record);
+    put_and_verify(vendor, pace, &prepared)
+}
+
+/// Writes the prepared record in one session, reads the image back and compares it with what it
+/// should be. On any failure the saved bytes are written back (see [`restore_exact`]) and the
+/// error says what happened to them.
+pub(super) fn put_and_verify(
+    vendor: &mut dyn VendorTransport,
+    pace: Pace,
+    prepared: &Prepared,
+) -> Result<(), AdapterError> {
+    if let Err(first) = put_bytes(vendor, pace, prepared.at, &prepared.record) {
+        let restored = restore(vendor, pace, &prepared.saved);
         return Err(refuse(format!("{first}; {restored}")));
     }
-    let mut expected = saved.clone();
-    expected[at..at + SINGLE_LEN].copy_from_slice(&record);
+    let expected = prepared.expected();
     let after = match read_image(vendor, pace) {
         Ok(img) => img,
         Err(e) => {
-            let restored = restore(vendor, pace, at, &saved, Restore::Whole);
+            let restored = restore(vendor, pace, &prepared.saved);
             return Err(refuse(format!("the image could not be read back ({e}); {restored}")));
         }
     };
     if after != expected {
-        let restored = restore(vendor, pace, at, &saved, Restore::Whole);
+        let diff = diff_summary(&expected, &after);
+        let restored = restore(vendor, pace, &prepared.saved);
         return Err(refuse(format!(
-            "the pad's image did not read back as written; {restored}"
+            "the pad's image did not read back as written ({diff}); {restored}"
         )));
     }
     Ok(())
 }
 
 /// One session that writes `bytes` at image offset `at` in chunks and commits.
-fn put_bytes(
+pub(super) fn put_bytes(
     vendor: &mut dyn VendorTransport,
     pace: Pace,
     at: usize,
@@ -576,44 +653,103 @@ fn put_bytes(
     write_session(vendor, pace, &packets)
 }
 
-/// One session that writes the custom ring `record` at `at`.
-fn put_record(
-    vendor: &mut dyn VendorTransport,
-    pace: Pace,
-    at: usize,
-    record: &[u8],
-) -> Result<(), AdapterError> {
-    put_bytes(vendor, pace, at, record)
+/// Where two images differ: the first few differing ranges and the count of differing bytes.
+pub(super) fn diff_summary(expected: &[u8], got: &[u8]) -> String {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut count = 0;
+    for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+        if a != b {
+            count += 1;
+            match ranges.last_mut() {
+                Some((_, end)) if *end + 1 == i => *end = i,
+                _ => ranges.push((i, i)),
+            }
+        }
+    }
+    if expected.len() != got.len() {
+        return format!("lengths differ: {} and {} bytes", expected.len(), got.len());
+    }
+    let shown: Vec<String> = ranges
+        .iter()
+        .take(6)
+        .map(|(a, b)| if a == b { format!("{a:#05x}") } else { format!("{a:#05x}..{b:#05x}") })
+        .collect();
+    format!(
+        "{count} byte(s) differ at {}{}",
+        shown.join(", "),
+        if ranges.len() > 6 { ", ..." } else { "" }
+    )
 }
 
-/// How far a restore goes back.
-#[derive(Clone, Copy)]
-enum Restore {
-    /// The write itself failed: only the ring record can have changed.
-    Record,
-    /// The image read back wrong: a byte outside the record may have changed, so every byte is
-    /// written back.
+/// How an exact restore went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Restored {
+    /// The pad already held the saved image: nothing needed writing.
+    AlreadyMatched,
+    /// The bytes from the first to the last difference were written back and the image then read
+    /// back as saved.
+    Range,
+    /// The whole saved image was written back and the image then read back as saved.
     Whole,
 }
 
-/// Writes the saved bytes back and says whether the pad's image is the saved image again.
-fn restore(vendor: &mut dyn VendorTransport, pace: Pace, at: usize, saved: &[u8], how: Restore) -> String {
-    let put = match how {
-        Restore::Record => put_record(vendor, pace, at, &saved[at..at + SINGLE_LEN]),
-        Restore::Whole => put_bytes(vendor, pace, 0, saved),
-    };
-    if let Err(e) = put {
-        return format!("the saved bytes could not be written back ({e}): the rings may be partly written");
+/// Puts the pad's image back to `saved`, byte for byte, and proves it by reading the image again.
+///
+/// It reads the pad first and writes only the span from the first differing byte to the last, so
+/// an image that is already right is not written at all. A write session that fails is not the
+/// end: the image is read again, and if it reads back as saved the restore is done (a lost
+/// acknowledgement does not make the bytes wrong). If the span does not do it, every byte is
+/// written back. An image that still differs after that is an error.
+pub(super) fn restore_exact(
+    vendor: &mut dyn VendorTransport,
+    pace: Pace,
+    saved: &[u8],
+) -> Result<Restored, AdapterError> {
+    if saved.len() != codec::IMAGE_LEN {
+        return Err(refuse(format!("the saved image is {} bytes, not {}", saved.len(), codec::IMAGE_LEN)));
     }
+    let now = read_image(vendor, pace)?;
+    if now == saved {
+        return Ok(Restored::AlreadyMatched);
+    }
+    let first = now.iter().zip(saved).position(|(a, b)| a != b).unwrap_or(0);
+    let last = now.iter().zip(saved).rposition(|(a, b)| a != b).unwrap_or(first);
+    let ranged = put_bytes(vendor, pace, first, &saved[first..=last]);
     match read_image(vendor, pace) {
-        Ok(img) if img == saved => {
+        Ok(img) if img == saved => return Ok(Restored::Range),
+        Ok(_) => {}
+        Err(e) => {
+            return Err(refuse(format!(
+                "the saved bytes were written back but the image could not be read to check it ({e})"
+            )))
+        }
+    }
+    let whole = put_bytes(vendor, pace, 0, saved);
+    match read_image(vendor, pace) {
+        Ok(img) if img == saved => Ok(Restored::Whole),
+        Ok(img) => Err(refuse(format!(
+            "the image still differs from the saved one after a full write-back ({}; first try: {:?}, \
+             second try: {:?})",
+            diff_summary(saved, &img),
+            ranged.err().map(|e| e.to_string()),
+            whole.err().map(|e| e.to_string())
+        ))),
+        Err(e) => Err(refuse(format!(
+            "the saved image was written back but could not be read to check it ({e})"
+        ))),
+    }
+}
+
+/// [`restore_exact`], as a sentence for an error message.
+fn restore(vendor: &mut dyn VendorTransport, pace: Pace, saved: &[u8]) -> String {
+    match restore_exact(vendor, pace, saved) {
+        Ok(Restored::AlreadyMatched) => {
+            "the image already read back as saved; nothing needed writing back".to_string()
+        }
+        Ok(Restored::Range) | Ok(Restored::Whole) => {
             "the saved bytes were written back and the image read back as saved".to_string()
         }
-        Ok(_) => "the saved bytes were written back but the image still differs from the saved one:                   the rings may be partly written"
-            .to_string(),
-        Err(e) => format!(
-            "the saved bytes were written back but the image could not be read to check it ({e})"
-        ),
+        Err(e) => format!("the saved bytes could not be confirmed back ({e}): the rings may be partly written"),
     }
 }
 

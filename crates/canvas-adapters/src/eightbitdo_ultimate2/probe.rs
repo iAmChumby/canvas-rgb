@@ -147,6 +147,18 @@ pub(super) fn capture_from_opener_paced(
     opener: &dyn Opener,
     pace: Pace,
 ) -> Result<ProfileCapture, AdapterError> {
+    let (mut vendor, personality) = open_pad_vendor(opener)?;
+    capture_profile(vendor.as_mut(), pace, Some(personality.label()))
+}
+
+/// Opens the pad's vendor channel through `opener`. Blocking.
+///
+/// Refuses, with a message that says what to do, when no pad is found, when the receiver is idle,
+/// when the personality has no vendor channel, and when the channel will not open. Nothing is
+/// sent.
+pub(super) fn open_pad_vendor(
+    opener: &dyn Opener,
+) -> Result<(Box<dyn VendorTransport>, Personality), AdapterError> {
     let personalities = opener.personalities();
     let Some(personality) = personalities.first().copied() else {
         return Err(AdapterError::NotConnected);
@@ -154,32 +166,23 @@ pub(super) fn capture_from_opener_paced(
     match personality {
         Personality::Idle => {
             return Err(refuse(
-                "the receiver is idle: no pad is linked to it, so nothing answers the profile read. \
-                 Turn the pad on (press a button on it) and run again",
+                "the receiver is idle: no pad is linked to it, so nothing answers the profile read.                  Turn the pad on (press a button on it) and run again",
             ));
         }
         Personality::DInput => {
             return Err(refuse(
-                "the pad is in its DInput personality, which has no vendor channel to read the \
-                 profile through",
+                "the pad is in its DInput personality, which has no vendor channel to read the                  profile through",
             ));
         }
         Personality::XInput => {}
     }
-    let mut vendor = match opener.open_vendor(personality) {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            return Err(refuse("the pad shows no vendor channel to read the profile through"));
-        }
-        Err(why) => {
-            return Err(refuse(format!(
-                "the pad's vendor channel would not open: {why}. Another program may hold it: the \
-                 canvas-rgb daemon (turn the pad's reads off on the Peripherals page, then run \
-                 again) or the 8BitDo app (close it). Nothing was sent"
-            )));
-        }
-    };
-    capture_profile(vendor.as_mut(), pace, Some(personality.label()))
+    match opener.open_vendor(personality) {
+        Ok(Some(v)) => Ok((v, personality)),
+        Ok(None) => Err(refuse("the pad shows no vendor channel to read the profile through")),
+        Err(why) => Err(refuse(format!(
+            "the pad's vendor channel would not open: {why}. Another program may hold it: the              canvas-rgb daemon (turn the pad's reads off on the Peripherals page, then run              again) or the 8BitDo app (close it). Nothing was sent"
+        ))),
+    }
 }
 
 /// Reads the profile from the real pad with hidapi. Blocking.
