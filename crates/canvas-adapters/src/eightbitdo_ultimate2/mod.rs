@@ -1006,6 +1006,18 @@ struct HandleInner {
     /// True while the pad shows the personality that has a vendor channel (XInput).
     present: std::sync::atomic::AtomicBool,
     idle: std::sync::Mutex<Option<IdleSource>>,
+    /// Whether a channel is open, as the last `open_with` or `close` left it. `is_open` reads
+    /// this and never the slot, so an async task can ask while a session holds the lock.
+    open: std::sync::atomic::AtomicBool,
+    /// An open or a close that found the slot locked by a session. The next `with` takes it
+    /// before it runs, and a session that was running when it arrived takes it as it ends.
+    pending: std::sync::Mutex<Option<Pending>>,
+}
+
+/// A change of the channel that waited for the session in flight.
+enum Pending {
+    Open(Box<dyn VendorTransport>),
+    Close,
 }
 
 /// The pad's vendor channel, shared.
@@ -1032,6 +1044,8 @@ impl Default for VendorHandle {
                 writes: std::sync::atomic::AtomicBool::new(false),
                 present: std::sync::atomic::AtomicBool::new(false),
                 idle: std::sync::Mutex::new(None),
+                open: std::sync::atomic::AtomicBool::new(false),
+                pending: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -1047,19 +1061,59 @@ impl VendorHandle {
         self.inner.slot.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// True while a vendor channel is open.
+    /// True while a vendor channel is open. **Never blocks**: it reads a flag, not the channel,
+    /// so it answers at once while a session holds the lock.
     pub fn is_open(&self) -> bool {
-        self.slot().is_some()
+        self.inner.open.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Puts `transport` in the handle. The peripheral adapter does this when it opens the pad.
+    /// **Never blocks**: when a session holds the channel, the transport waits in a pending
+    /// slot and the session in flight takes it as it ends.
     pub fn open_with(&self, transport: Box<dyn VendorTransport>) {
-        *self.slot() = Some(transport);
+        self.inner.open.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.change(Pending::Open(transport));
     }
 
-    /// Closes the channel.
+    /// Closes the channel. **Never blocks**, as `open_with`: a session in flight finishes on the
+    /// channel it has and then lets go of it.
     pub fn close(&self) {
-        *self.slot() = None;
+        self.inner.open.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.change(Pending::Close);
+    }
+
+    /// Leaves `change` for the slot's next holder, then takes the slot itself if it is free.
+    ///
+    /// The change is set before the slot is tried, and a session looks at the pending slot after
+    /// it lets go: either this call finds the slot free and applies the change, or the holder
+    /// has not let go yet and sees the change when it does.
+    fn change(&self, change: Pending) {
+        *self.pending() = Some(change);
+        self.settle();
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, Option<Pending>> {
+        self.inner.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Applies a pending change if the slot is free; leaves it for the holder when it is not.
+    fn settle(&self) {
+        let slot = match self.inner.slot.try_lock() {
+            Ok(slot) => slot,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        let mut slot = slot;
+        let change = self.pending().take();
+        Self::apply(&mut slot, change);
+    }
+
+    fn apply(slot: &mut Option<Box<dyn VendorTransport>>, change: Option<Pending>) {
+        match change {
+            Some(Pending::Open(transport)) => *slot = Some(transport),
+            Some(Pending::Close) => *slot = None,
+            None => {}
+        }
     }
 
     /// Runs `f` with the channel to itself and returns what it returns; `None` when the channel is
@@ -1067,8 +1121,14 @@ impl VendorHandle {
     /// call it from `spawn_blocking`.
     pub(crate) fn with<R>(&self, f: impl FnOnce(&mut dyn VendorTransport) -> R) -> Option<R> {
         let mut slot = self.slot();
-        let transport = slot.as_mut()?;
-        Some(f(transport.as_mut()))
+        // An open or a close that came while the last session ran lands before this one starts.
+        let pending = self.pending().take();
+        Self::apply(&mut slot, pending);
+        let out = slot.as_mut().map(|transport| f(transport.as_mut()));
+        drop(slot);
+        // One that came during `f` lands now, so the channel does not stay as it was.
+        self.settle();
+        out
     }
 
     /// The peripheral write gate. False until the daemon turns it on with the pad's access; the

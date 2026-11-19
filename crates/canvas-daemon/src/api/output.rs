@@ -94,7 +94,7 @@ pub fn apply_power(app: &Arc<App>, power: Power) -> ApiResult<()> {
         Power::Paused => {
             // Paused writes black once, then stops the render loop.
             app.identify.stop();
-            app.engine.write_solid(canvas_proto::Rgb8::BLACK);
+            app.identify.paint_solid(app.engine.as_ref(), canvas_proto::Rgb8::BLACK);
             app.engine.set_power(Power::Paused);
             tracing::info!(reason = "requested", "output paused");
         }

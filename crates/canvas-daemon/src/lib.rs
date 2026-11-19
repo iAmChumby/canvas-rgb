@@ -217,11 +217,20 @@ pub fn takeover_builder(app: &Arc<App>, id: &str) -> crate::scenes::EffectBuilde
 /// the same one the daemon does (#413). The daemon's own places keep calling it by this name.
 pub use canvas_adapters::drive::{is_driven, NOT_DRIVEN};
 
-/// How many of `devices` the engine's `write_solid` reaches: connected, driven, and with LEDs.
+/// How many of `devices` a solid paint reaches: connected, driven, with LEDs, and not the
+/// controller rings (an [`identify::IdentifyGate::paint_solid`] leaves them out, #376).
 /// The engine skips a sink with no LEDs, so counting every sink would report a write to a device
 /// that got none (class `cause:unchecked-state`, #18).
 pub fn solid_write_targets(devices: &[canvas_proto::DeviceInfo]) -> usize {
-    devices.iter().filter(|d| d.connected && is_driven(&d.id) && d.led_count() > 0).count()
+    devices
+        .iter()
+        .filter(|d| {
+            d.connected
+                && is_driven(&d.id)
+                && d.led_count() > 0
+                && !d.id.0.starts_with(canvas_adapters::eightbitdo_ultimate2::ring::RING_PREFIX)
+        })
+        .count()
 }
 
 /// The daemon's version, as reported by `/status`.
@@ -268,8 +277,9 @@ mod tests {
             device("openrgb:gone", 4, false),
             device(r"openrgb:HID#VID_3151&PID_4015&MI_02", 4, true),
             device("openrgb:b", 9, true),
+            device("ring:8bitdo-ultimate-2", 24, true),
         ];
-        assert_eq!(super::solid_write_targets(&devices), 2);
+        assert_eq!(super::solid_write_targets(&devices), 2, "the rings are not painted");
         assert_eq!(super::solid_write_targets(&[device("openrgb:empty-header", 0, true)]), 0);
     }
 }

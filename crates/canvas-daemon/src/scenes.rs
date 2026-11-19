@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 
+use canvas_adapters::eightbitdo_ultimate2::ring::{RING_PREFIX, RING_TOP_LED};
 use canvas_proto::device::{DeviceInfo, ZoneInfo};
 use canvas_proto::pattern::LightFit;
 use canvas_proto::props::Props;
@@ -86,18 +87,24 @@ pub fn empty_lights() -> LightsFile {
 }
 
 /// The light that is a whole zone, with the arrangement its kind starts as.
+///
+/// The one exception is the controller's stick rings: the hardware cannot say it is a ring, but
+/// the marker run of 2026-11-18 showed that it is one, with LED 0 at the bottom and the indices
+/// running clockwise. Its lights start as a `Ring` (drawn from the top, clockwise) whose first
+/// LED is the physical LED at the top, so an effect's position 0 is the top of the ring.
 fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
+    let stick_ring = device.id.0.starts_with(RING_PREFIX);
     Light {
         id: zone_light_id(&device.id, zone.index),
         device_id: device.id.clone(),
         zone_index: zone.index,
         leds: None,
         name: None,
-        arrangement: Arrangement::default_for(&zone.kind),
+        arrangement: if stick_ring { Arrangement::Ring } else { Arrangement::default_for(&zone.kind) },
         reversed: false,
         kind: None,
         copies: None,
-        first_led: None,
+        first_led: stick_ring.then_some(RING_TOP_LED),
     }
 }
 
@@ -2195,6 +2202,31 @@ pub(crate) mod tests {
         assert!(sync_lights(&mut lights, std::slice::from_ref(&board)).is_empty());
         assert!(repair(&mut scenes, &lights).is_empty());
         assert_eq!(canvas_proto::scene::unassigned(active_scene(&scenes), &lights.lights).len(), 2);
+    }
+
+    /// The marker run of 2026-11-18: on both rings LED 0 is at the bottom and the indices run
+    /// clockwise. A ring light draws from the top, clockwise, so its first LED is the top one.
+    #[test]
+    fn the_stick_rings_start_as_rings_whose_position_zero_is_the_top_led() {
+        use canvas_adapters::eightbitdo_ultimate2::{ring::RingLightAdapter, VendorHandle};
+        let ring = RingLightAdapter::without_store(VendorHandle::new()).device_info();
+        let mut lights = empty_lights();
+        assert_eq!(sync_lights(&mut lights, std::slice::from_ref(&ring)).len(), 2);
+        for light in &lights.lights {
+            assert_eq!(light.arrangement, Arrangement::Ring, "{}", light.id);
+            assert_eq!(light.first_led, Some(RING_TOP_LED), "{}", light.id);
+            assert!(!light.reversed, "the indices already run clockwise: {}", light.id);
+        }
+        // Position p of an effect (from the top, clockwise) lands on LED 6 + p.
+        let mut leds: Vec<u32> = (0..12).collect();
+        canvas_core::arrangement::apply_led_order(&mut leds, lights.lights[0].first_led, lights.lights[0].reversed);
+        assert_eq!(leds[6], 0, "the top LED (6) shows position 0");
+        assert_eq!(leds[7], 1, "clockwise: the next LED shows position 1");
+        assert_eq!(leds[0], 6, "LED 0, the bottom, is half a ring from the top");
+        // Every other device keeps what its kind starts as.
+        let board = device("openrgb:board", 0, vec![zone(0, ZoneKind::Linear, 30)]);
+        assert_eq!(whole_zone_light(&board, &board.zones[0]).first_led, None);
+        assert_eq!(whole_zone_light(&board, &board.zones[0]).arrangement, Arrangement::Strip);
     }
 
     #[test]

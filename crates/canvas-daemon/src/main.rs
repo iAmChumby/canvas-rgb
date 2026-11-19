@@ -449,7 +449,7 @@ async fn write_on_quit(app: &Arc<App>) {
             app.identify.stop();
             // The engine skips a sink with no LEDs, so only the devices it writes are counted.
             let targets = canvas_daemon::solid_write_targets(&app.devices.read().await);
-            app.engine.write_solid(canvas_proto::Rgb8::BLACK);
+            app.identify.paint_solid(app.engine.as_ref(), canvas_proto::Rgb8::BLACK);
             canvas_daemon::logging::log_device_write("queued black for", targets);
             tokio::time::sleep(BLACK_GRACE).await;
         }

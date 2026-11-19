@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use canvas_adapters::eightbitdo_ultimate2::ring::RING_PREFIX;
 use canvas_proto::api::{Power, SetupRun};
 use canvas_proto::scene::SETUP_TIMEOUT_MS;
 use canvas_proto::{DeviceId, DeviceInfo, Rgb8};
@@ -191,6 +192,17 @@ pub struct Pushed {
 #[derive(Default)]
 pub struct IdentifyGate {
     inner: Mutex<Inner>,
+    /// How many solid paints (a black on pause, quit, lock or suspend) are being written now.
+    solid_paints: std::sync::atomic::AtomicUsize,
+}
+
+/// Held while a solid paint is written; see [`IdentifyGate::paint_solid`].
+struct SolidPaint<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for SolidPaint<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl IdentifyGate {
@@ -202,6 +214,22 @@ impl IdentifyGate {
     pub fn is_active(&self) -> bool {
         let inner = self.lock();
         inner.target.is_some() || inner.setup.is_some()
+    }
+
+    /// Writes `color` to every device's sink through `engine`, except the controller rings'. A
+    /// black on pause, quit, lock or suspend is a paint of every sink, and the rings hold their
+    /// colour in the pad's flash and take a still a scene change rarely (#376): a paint would
+    /// write the pad. The rings' sinks drop frames while this runs; `write_solid` hands its
+    /// frames over before it returns, so nothing of the scene is dropped after it.
+    pub fn paint_solid(&self, engine: &dyn canvas_proto::traits::Engine, color: Rgb8) {
+        self.solid_paints.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _paint = SolidPaint(&self.solid_paints);
+        engine.write_solid(color);
+    }
+
+    /// True while [`Self::paint_solid`] is writing.
+    pub fn is_painting_solid(&self) -> bool {
+        self.solid_paints.load(std::sync::atomic::Ordering::SeqCst) > 0
     }
 
     /// True while a chain setup holds the lights: the transient restore waits for it, so a
@@ -418,6 +446,10 @@ fn frames(
     devices
         .iter()
         .filter(|d| d.connected)
+        // The controller rings keep their colours in the pad's flash and take a still a scene
+        // change rarely. A flash of black or white would write the pad on every identify, so
+        // they get no frame at all (#376).
+        .filter(|d| !d.id.0.starts_with(RING_PREFIX))
         .map(|d| {
             let mut colors = vec![Rgb8::BLACK; d.led_count() as usize];
             if let Some(setup) = setup {
@@ -578,7 +610,7 @@ pub fn spawn_ticker(app: Arc<App>) {
 pub async fn restore(app: &Arc<App>) {
     let power = app.store.read().await.config.settings.power;
     if power == Power::Paused {
-        app.engine.write_solid(Rgb8::BLACK);
+        app.identify.paint_solid(app.engine.as_ref(), Rgb8::BLACK);
     }
 }
 
@@ -677,6 +709,32 @@ mod tests {
         let frames = frames_of(gate.tick(t0, &devices));
         assert_eq!(frames[0].1, vec![TARGET]);
         assert!(frames[1].1.iter().all(|c| *c == Rgb8::BLACK));
+    }
+
+    /// The pad's rings hold a still in the pad's flash (#376): an identify or a chain setup that
+    /// flashed black or white over them would write the pad, so they are given no frame.
+    #[test]
+    fn a_ring_device_gets_no_identify_frame_and_the_others_still_do() {
+        let ring = device(&format!("{RING_PREFIX}8bitdo-ultimate-2"), vec![zone(0, 12), zone(1, 12)]);
+        let devices = vec![device("openrgb:ram", vec![zone(0, 8)]), ring.clone()];
+        let t0 = Instant::now();
+        // A flash on another device blacks the rest, and the rings are not part of the rest.
+        let gate = IdentifyGate::default();
+        gate.start(DeviceId("openrgb:ram".into()), 0, 1, 2, t0);
+        let frames = frames_of(gate.tick(t0, &devices));
+        assert_eq!(frames.iter().map(|(id, _)| id.0.as_str()).collect::<Vec<_>>(), vec!["openrgb:ram"]);
+        // A flash on the ring itself lights nothing.
+        let gate = IdentifyGate::default();
+        gate.start(ring.id.clone(), 0, 0, 1, t0);
+        let frames = frames_of(gate.tick(t0, &devices));
+        assert!(frames.iter().all(|(id, _)| !id.0.starts_with(RING_PREFIX)), "{frames:?}");
+        // A chain setup on another device blacks every other device, the rings excepted.
+        let gate = IdentifyGate::default();
+        let red = Rgb8::new(255, 0, 0);
+        assert!(gate.start_setup(DeviceId("openrgb:ram".into()), 0, "s1".into(), t0).is_some());
+        assert!(gate.set_runs("s1", vec![SetupRun { start: 0, count: 2, color: red }], t0));
+        let frames = frames_of(gate.tick(t0, &devices));
+        assert_eq!(frames.iter().map(|(id, _)| id.0.as_str()).collect::<Vec<_>>(), vec!["openrgb:ram"]);
     }
 
     #[test]

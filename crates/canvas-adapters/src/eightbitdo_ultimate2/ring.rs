@@ -78,6 +78,13 @@ pub const RINGS: usize = 2;
 pub const LEDS_PER_RING: usize = 12;
 /// LEDs on the device: the length of every frame it takes.
 pub const RING_LEDS: usize = RINGS * LEDS_PER_RING;
+/// The LED index at the top of a ring, as the marker run of 2026-11-18 placed it: index 0 is at
+/// the bottom and the indices run clockwise, so the top, half a ring on, is index 6. A light that
+/// draws a ring from the top, clockwise (`Arrangement::Ring`), takes this as its `first_led`, with
+/// `reversed` false.
+pub const RING_TOP_LED: u32 = (LEDS_PER_RING / 2) as u32;
+/// Zone names: zone 0 is the left stick's ring, zone 1 the right stick's.
+pub const ZONE_NAMES: [&str; RINGS] = ["Left stick", "Right stick"];
 
 /// How long the person must have been away from the keyboard and mouse before a ring write goes
 /// out. It is the daemon's `PERIPHERAL_IDLE_READ_S`; a daemon test holds the two equal.
@@ -101,9 +108,13 @@ pub fn ring_device_id() -> DeviceId {
 ///   (`ring_s3 --order bgr`): a pure-red write, packed as `00 00 ff 00`, read back as written
 ///   and Luke saw both rings red. So a colour word's bytes in file order are blue, green, red and
 ///   a pad byte of 0 (the research's `u32 0x00RRGGBB`, little-endian).
-/// - *LED order: TODO(S3 marker run), UNKNOWN.* Zone 0 is taken as words 0-11 and zone 1 as words
-///   12-23, each in frame order. Which index is which LED, which ring is the left stick's, and
-///   which way a ring runs are UNKNOWN until `ring_s3 --marker` is run on the pad.
+/// - *LED order: CONFIRMED by the marker run of 2026-11-18* (`ring_s3 --order bgr --marker`: on each
+///   ring LED 0 red, 1 green, 2 blue, the rest off). Zone 0 is words 0-11 and is the **left
+///   stick's** ring; zone 1 is words 12-23 and is the **right stick's**. On both rings index 0 sits
+///   at the bottom (about 5-6 o'clock seen from the front of the pad), index 1 at about 7-8
+///   o'clock and index 2 at about 9: the indices run **clockwise** from the front. The diffuser
+///   smears each LED into an arc, so a position is good to one LED. [`RING_TOP_LED`] and the
+///   device's zone names carry this; frame order needs no remapping.
 ///
 /// No other function may know either order.
 pub fn pack_ring_colours(frame: &[Rgb8; RING_LEDS]) -> [[u8; 4]; CUSTOM_COLOURS] {
@@ -276,7 +287,7 @@ impl RingLightAdapter {
         let zones = (0..RINGS)
             .map(|i| ZoneInfo {
                 index: i as u32,
-                name: format!("Ring {}", i + 1),
+                name: ZONE_NAMES[i].to_string(),
                 kind: ZoneKind::Linear,
                 led_count: LEDS_PER_RING as u32,
                 min_leds: LEDS_PER_RING as u32,
@@ -479,7 +490,18 @@ impl DeviceAdapter for RingLightAdapter {
         let handle = self.handle.clone();
         let pace = self.pace;
         let outcome = tokio::task::spawn_blocking(move || {
-            handle.with(|v| write_still(v, pace, &words))
+            handle.with(|v| {
+                // `with` can wait a whole read or write session for the channel. The gate and
+                // the idle rule were checked before that wait, so they are checked again now,
+                // under the lock, as the last step before a byte goes out.
+                if !handle.writes_enabled() {
+                    return Err(Held::WritesOff);
+                }
+                if !handle.idle_for().is_some_and(|idle| idle >= IDLE_BEFORE_WRITE) {
+                    return Err(Held::NotIdle);
+                }
+                Ok(write_still(v, pace, &words))
+            })
         })
         .await
         .map_err(|e| refuse(format!("the ring write task failed: {e}")))?;
@@ -491,14 +513,22 @@ impl DeviceAdapter for RingLightAdapter {
                 let _ = self.persist(None);
                 Ok(())
             }
-            Some(Ok(())) => {
+            Some(Err(held)) => {
+                // A gate turned while this write waited for the channel: nothing was sent, so
+                // the attempt does not count.
+                self.status.held = Some(held);
+                self.attempts_ms.pop_back();
+                let _ = self.persist(None);
+                Ok(())
+            }
+            Some(Ok(Ok(()))) => {
                 self.shown = Some(hash);
                 self.shown_colors = colors.to_vec();
                 self.status.complete = true;
                 let _ = self.persist(Some(hash));
                 Ok(())
             }
-            Some(Err(e)) => Err(e),
+            Some(Ok(Err(e))) => Err(e),
         }
     }
 
@@ -876,6 +906,22 @@ mod tests {
         assert!(r.adapter.discover().await.unwrap().is_empty());
     }
 
+    /// The marker run (2026-11-18) put ring 1 (words 0-11) on the left stick and ring 2 (words
+    /// 12-23) on the right one.
+    #[tokio::test]
+    async fn the_zones_are_the_left_and_the_right_stick() {
+        let r = rig().await;
+        let d = r.adapter.device_info();
+        assert_eq!(d.zones.iter().map(|z| z.name.as_str()).collect::<Vec<_>>(), ["Left stick", "Right stick"]);
+        assert_eq!(d.zones.iter().map(|z| z.index).collect::<Vec<_>>(), [0, 1]);
+        // A frame whose zone 0 is red and zone 1 is blue puts red in words 0-11 and blue in 12-23.
+        let mut frame = [Rgb8::new(255, 0, 0); RING_LEDS];
+        frame[LEDS_PER_RING..].fill(Rgb8::new(0, 0, 255));
+        let words = pack_ring_colours(&frame);
+        assert!(words[..12].iter().all(|w| *w == [0, 0, 255, 0]), "left stick: red");
+        assert!(words[12..].iter().all(|w| *w == [255, 0, 0, 0]), "right stick: blue");
+    }
+
     #[tokio::test]
     async fn a_still_is_written_to_the_active_profile_and_the_pad_reads_back_what_was_sent() {
         let mut r = rig().await;
@@ -948,6 +994,135 @@ mod tests {
         r.idle.store(10, Ordering::SeqCst);
         r.adapter.write_frame(&id, &solid(1, 2, 3)).await.unwrap();
         assert_eq!(counts(&r.pad).2, 1, "the held set went out once the person was away");
+    }
+
+    /// Takes the channel on another thread and keeps it until the returned sender fires: the
+    /// stand-in for a settings read or another write session that is mid-flight. Returns once
+    /// the thread holds the lock.
+    fn hold_channel(handle: &VendorHandle) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let held = handle.clone();
+        let thread = std::thread::spawn(move || {
+            held.with(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        });
+        locked_rx.recv().unwrap();
+        (release_tx, thread)
+    }
+
+    /// Starts a write that passes the gates and then waits for the channel `hold_channel` has.
+    /// Returns once the write has counted its attempt, which it does just before it waits.
+    async fn start_write_behind_a_held_channel(
+        r: &mut Rig,
+        frame: Vec<Rgb8>,
+    ) -> tokio::task::JoinHandle<(RingLightAdapter, Result<(), AdapterError>)> {
+        let mut adapter = std::mem::replace(
+            &mut r.adapter,
+            RingLightAdapter::without_store(VendorHandle::new()),
+        );
+        let task = tokio::spawn(async move {
+            let res = adapter.write_frame(&ring_device_id(), &frame).await;
+            (adapter, res)
+        });
+        while r.store.saved().is_none_or(|s| s.attempts_ms.is_empty()) {
+            tokio::task::yield_now().await;
+        }
+        task
+    }
+
+    /// Runs `f` on its own thread and waits for it; `None` when it has not returned in 5 s. A call
+    /// that blocks on the session shows up as `None` and the test fails, where waiting on it
+    /// directly would hang the run.
+    fn promptly<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> Option<R> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(5)).ok()
+    }
+
+    /// The handle is asked from async tasks, and a session holds its lock for a whole read, write
+    /// and read-back: none of these may wait for it (#376 review).
+    #[test]
+    fn is_open_open_with_and_close_return_at_once_while_a_session_holds_the_channel() {
+        let pad = FakePad::with_image(fake_pad::ring_fixture_image(), Personality::XInput);
+        let handle = VendorHandle::new();
+        handle.open_with(pad.open_vendor(Personality::XInput).unwrap().unwrap());
+        let (release, holder) = hold_channel(&handle);
+
+        let h = handle.clone();
+        assert_eq!(promptly(move || h.is_open()), Some(true), "is_open waited for the session");
+        let h = handle.clone();
+        assert!(promptly(move || h.close()).is_some(), "close waited for the session");
+        let h = handle.clone();
+        assert_eq!(promptly(move || h.is_open()), Some(false), "the close is seen at once");
+        let reopened = pad.open_vendor(Personality::XInput).unwrap().unwrap();
+        let h = handle.clone();
+        assert!(promptly(move || h.open_with(reopened)).is_some(), "open_with waited for the session");
+        let h = handle.clone();
+        assert_eq!(promptly(move || h.is_open()), Some(true), "the open is seen at once");
+
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        // The open that waited has landed: the channel is there for the next session.
+        assert_eq!(handle.with(|_| 1), Some(1));
+    }
+
+    /// A close that came during a session ends the channel once the session lets go.
+    #[test]
+    fn a_close_that_waited_for_the_session_closes_the_channel_when_it_ends() {
+        let pad = FakePad::with_image(fake_pad::ring_fixture_image(), Personality::XInput);
+        let handle = VendorHandle::new();
+        handle.open_with(pad.open_vendor(Personality::XInput).unwrap().unwrap());
+        let (release, holder) = hold_channel(&handle);
+        let h = handle.clone();
+        assert!(promptly(move || h.close()).is_some());
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(!handle.is_open());
+        assert_eq!(handle.with(|_| 1), None, "no session runs on a channel that was closed");
+    }
+
+    #[tokio::test]
+    async fn the_gate_turned_off_while_the_write_waits_for_the_channel_sends_nothing() {
+        let mut r = rig().await;
+        let (release, holder) = hold_channel(&r.handle);
+        let task = start_write_behind_a_held_channel(&mut r, solid(200, 0, 0)).await;
+        // The write has passed the gates and waits for the lock; now the person turns writes off.
+        r.handle.set_writes_enabled(false);
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let (mut adapter, res) = task.await.unwrap();
+        res.unwrap();
+        assert!(r.pad.sent_reports().is_empty(), "gate off under the lock: not one report");
+        assert_eq!(adapter.status().held, Some(Held::WritesOff));
+        assert_eq!(
+            r.store.saved().map(|s| s.attempts_ms.len()),
+            Some(0),
+            "nothing was sent, so the attempt does not count"
+        );
+        // The next frame, gate back on, still goes out: the held attempt cost nothing.
+        r.handle.set_writes_enabled(true);
+        adapter.write_frame(&ring_device_id(), &solid(200, 0, 0)).await.unwrap();
+        assert_eq!(counts(&r.pad).2, 1);
+    }
+
+    #[tokio::test]
+    async fn the_person_back_at_the_keyboard_while_the_write_waits_for_the_channel_sends_nothing() {
+        let mut r = rig().await;
+        let (release, holder) = hold_channel(&r.handle);
+        let task = start_write_behind_a_held_channel(&mut r, solid(0, 200, 0)).await;
+        r.idle.store(2, Ordering::SeqCst);
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let (adapter, res) = task.await.unwrap();
+        res.unwrap();
+        assert!(r.pad.sent_reports().is_empty(), "idle 2 s under the lock: not one report");
+        assert_eq!(adapter.status().held, Some(Held::NotIdle));
+        assert_eq!(r.store.saved().map(|s| s.attempts_ms.len()), Some(0));
     }
 
     #[tokio::test]
@@ -1180,14 +1355,15 @@ mod tests {
 
     #[test]
     fn the_mapping_is_the_only_function_that_knows_the_byte_and_led_order() {
-        // The test pins the byte order (confirmed) and the LED order (TODO, the marker run) in one place, so the day the marker run settles the LED order,
-        // this is the test that changes with `pack_ring_colours` and nothing else does.
+        // The test pins the byte order and the LED order (both confirmed on the pad, 2026-11-18)
+        // in one place: a change of either changes `pack_ring_colours` and this test, and
+        // nothing else.
         let mut frame = [Rgb8::BLACK; RING_LEDS];
         frame[0] = Rgb8::new(1, 2, 3);
         frame[12] = Rgb8::new(4, 5, 6);
         let words = pack_ring_colours(&frame);
         assert_eq!(words[0], [3, 2, 1, 0], "CONFIRMED by S3: B, G, R, pad");
-        assert_eq!(words[12], [6, 5, 4, 0], "UNCONFIRMED: zone 1 is words 12-23");
+        assert_eq!(words[12], [6, 5, 4, 0], "CONFIRMED by the marker run: zone 1 (the right stick) is words 12-23");
         assert_eq!(words[1], [0, 0, 0, 0]);
     }
 
