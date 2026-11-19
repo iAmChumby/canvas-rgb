@@ -9,8 +9,13 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - Devices: the 8BitDo Ultimate 2's two stick rings can join the lighting engine as one device of two rings of 12 LEDs that takes one still colour set per scene. A scene change writes that set to the pad's stored profile only while you are away from the keyboard and mouse, only when the pad's reads and writes are on, at most once in 10 seconds, 4 an hour and 24 a day, and the profile is read back and restored if it does not match. The two rings are named Left stick and Right stick and start as rings drawn from the top, clockwise; their colour and LED order were checked on the pad with `ring_s3`. `ring_probe` (a canvas-adapters example) reads the pad's stored profile, writing nothing, and `ring_s3` writes pure red, or one marker colour per LED, to the rings once and puts the saved profile back. (#376)
+### Changed
+
+- Patterns: the editor's controls are tidied. Every word in the frame strip is 14 px or more, the Loop key sits beside Add and Play so it is always on screen, and the frame strip is two rows at every width. "Find LED 1" and "Reverse" are worded keys at the top of the device instead of two bare corner icons, and the notch has room above it. The device's well has the same corner as the strip, the title lines up with the other pages at 1920 px, a connector's panel labels its Cut or Fade row, and on a phone the header is two rows instead of four, the tools take two rows instead of three, the Spin speed one instead of two, and the page no longer scrolls at 390 px. (#468)
+
 ### Fixed
 
+- Patterns: adding, copying, deleting or moving a frame no longer loses the transition you set for the loop (the last frame back to frame 1); the loop connector stays on whichever frame is last, and a frame that stops being last passes to the next as a cut. (#468)
 - Light setup: the orange-light question now asks for the whole case ("in total, adding up every fan and strip") and shows both answers as pictures (one orange light in all means a row; one on every device means a shared signal), and the "Eight 1-LED devices" warning names what it means (every device shows the same colours, one per LED) and what to do, so a header whose fans and strip share one signal is easier to answer correctly. (#470)
 
 ## [0.18.0] - 2026-11-18

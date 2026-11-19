@@ -314,6 +314,27 @@ describe("the frame strip", () => {
 });
 
 describe("transitions", () => {
+  it("Loop set to Fade 800 ms still says Fade 800 ms after a frame is added at the end (#468)", async () => {
+    show(framed([RED, GREEN]));
+    await settle();
+    await playAll();
+    fireEvent.click(screen.getByRole("button", { name: /^After frame 2:/ }));
+    fireEvent.click(screen.getByRole("radio", { name: "Fade" }));
+    const field = screen.getByRole("textbox", { name: "Frame 2 fade duration" });
+    fireEvent.focus(field);
+    fireEvent.change(field, { target: { value: "800" } });
+    fireEvent.blur(field);
+    await frames();
+    expect(screen.getByRole("button", { name: "After frame 2: loops to frame 1, fading 800 milliseconds" })).toBeTruthy();
+    fireEvent.click(key(2));
+    fireEvent.click(screen.getByRole("button", { name: "Add frame" }));
+    await frames();
+    expect(keys()).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "After frame 3: loops to frame 1, fading 800 milliseconds" })).toBeTruthy();
+    expect(sent().frames.at(-1)!.transition).toEqual({ kind: "fade", ms: 800, easing: "linear" });
+    expect(connector(2).getAttribute("aria-label")).toBe("Frame 2 to 3: cut");
+  });
+
   it("a connector starts as a cut and its panel makes it a fade of 400 ms, linear", async () => {
     show(framed([RED, GREEN]));
     await settle();
@@ -380,6 +401,31 @@ describe("transitions", () => {
     fireEvent.click(screen.getByRole("switch", { name: "Loop back to frame 1" }));
     await frames();
     expect("playback" in sent()).toBe(false);
+  });
+
+  it("Loop is a key beside the frame keys, so it is on the page however far the frames are scrolled (#468)", async () => {
+    show(framed([RED, GREEN]));
+    await settle();
+    await playAll();
+    const loop = screen.getByRole("button", { name: "Loop" });
+    // Outside the scrolling frames: a sibling of the Add key, not a child of the strip's track.
+    expect(loop.closest("[aria-label='Frame keys']")).toBe(screen.getByRole("button", { name: "Add frame" }).closest("[aria-label='Frame keys']"));
+    expect(loop.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(loop);
+    await frames();
+    expect(sent().playback).toEqual({ loop: false });
+    expect(screen.getByRole("button", { name: "Loop" }).getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "Loop" }));
+    await frames();
+    expect("playback" in sent()).toBe(false);
+  });
+
+  it("every row of a connector's panel has its label, Cut or Fade included (#468)", async () => {
+    show(framed([RED, GREEN]));
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: /^Frame 1 to 2:/ }));
+    const panel = screen.getByRole("dialog", { name: "Transition after frame 1" });
+    for (const word of ["Change", "Duration", "Pace"]) expect(within(panel).getByText(word)).toBeTruthy();
   });
 
   it("a frame a later version wrote keeps every field it carries through a transition edit", async () => {
