@@ -9,7 +9,7 @@
 //! 1. reads the profile image (36 read requests) and saves it to the backup file BEFORE writing;
 //!    refuses unless the pad is on profile 1 (`--profile N` to change) and that profile's custom
 //!    ring record is marked in use;
-//! 2. writes pure red to all 24 LEDs, commits, reads the image back and checks that only the ring
+//! 2. writes pure red to all 24 LEDs (or the `--marker` pattern), commits, reads the image back and checks that only the ring
 //!    record changed (a mismatch restores at once and stops);
 //! 3. prints "rings should be RED now; press Enter to restore" and waits for Enter, or for
 //!    `--hold-secs N` seconds;
@@ -18,9 +18,14 @@
 //!
 //! An error at any step after the first write restores and says so.
 //!
-//! `--backup PATH` where the backup goes (default `ring_s3_backup_<unix>.txt` in the current folder).
+//! `--backup PATH` where the backup goes (default `ring_s3_backup_<unix>.txt` in the current folder);
+//! an existing file is never overwritten.
 //! `--restore-from FILE --i-mean-it` is the escape hatch: it puts a backup back and does nothing else.
 //! `--hold-secs N` waits N seconds instead of Enter (for a run with no keyboard).
+//! `--marker` is the LED-order run (the byte order is settled: B, G, R, pad; use `--order bgr`).
+//! Instead of all red it writes, on each ring, one red, one green and one blue LED (ring 1 is LEDs 0,
+//! 1, 2; ring 2 is LEDs 12, 13, 14) with the rest off, holds, and restores exactly as the red write
+//! does. Say where on each ring the red, green and blue sit and which way they run.
 //!
 //! Turn the pad's reads off on the Peripherals page first, or the daemon's idle read may overlap
 //! the write session. Ctrl-C while the rings are red leaves them red: run `--restore-from` with the
@@ -31,12 +36,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use canvas_adapters::eightbitdo_ultimate2::probe::ProfileCapture;
 use canvas_adapters::eightbitdo_ultimate2::ring::ByteOrder;
-use canvas_adapters::eightbitdo_ultimate2::s3::{self, S3Io, S3Options};
+use canvas_adapters::eightbitdo_ultimate2::s3::{self, Pattern, S3Io, S3Options};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
-        println!("usage: ring_s3 --order bgr|rgb --i-mean-it [--profile N] [--backup PATH] [--hold-secs N]");
+        println!("usage: ring_s3 --order bgr|rgb --i-mean-it [--marker] [--profile N] [--backup PATH] [--hold-secs N]");
         println!("       ring_s3 --restore-from FILE --i-mean-it");
         println!("  writes pure red to the rings, waits, restores the saved profile; see the file's header");
         return;
@@ -85,7 +90,12 @@ fn main() {
 
     let mut backup = |capture: &ProfileCapture| -> Result<(), String> {
         let text = capture.to_text();
-        let mut file = std::fs::File::create(&backup_path).map_err(|e| format!("{backup_path}: {e}"))?;
+        // create_new: an existing file (an earlier run's backup) is never overwritten.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup_path)
+            .map_err(|e| format!("{backup_path}: {e} (choose a --backup path that does not exist yet)"))?;
         std::io::Write::write_all(&mut file, text.as_bytes()).map_err(|e| format!("{backup_path}: {e}"))?;
         file.sync_all().map_err(|e| format!("{backup_path}: {e}"))?;
         drop(file);
@@ -116,7 +126,8 @@ fn main() {
             }
         }
     };
-    let opts = S3Options { order, expect_profile: profile - 1 };
+    let pattern = if args.iter().any(|a| a == "--marker") { Pattern::Marker } else { Pattern::Red };
+    let opts = S3Options { pattern, order, expect_profile: profile - 1 };
     let mut io = S3Io { say: &mut say, backup: &mut backup, hold: &mut hold };
     match s3::run_on_hardware(&opts, &mut io) {
         Ok(outcome) => println!("done: {outcome:?}"),

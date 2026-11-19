@@ -41,12 +41,13 @@
 //! the restore took. The write session is the adapter's own ([`super::write_session`]):
 //! `Reportstate(0)`, the chunks, the commit, `Reportstate(1)`.
 //!
-//! # UNKNOWN until S2 and S3
+//! # What the pad has settled, and what it has not
 //!
-//! The byte order of a colour word and the order of the 24 LEDs are UNKNOWN: no ring write has
-//! ever been captured, and the profile has never been read from the pad. Both live in
-//! [`pack_ring_colours`], and nowhere else. The commit argument `0x0123` is errata-flagged
-//! (research 420). Nothing here has run on a pad.
+//! S2 (2026-11-18) read the stored profile; S3 (the same day) wrote 24 words of `00 00 ff 00`, the
+//! pad read the image back as written, and both rings showed red. So the **byte order is B, G, R,
+//! pad: CONFIRMED.** The **order of the 24 LEDs is UNKNOWN** until the marker run (`ring_s3
+//! --marker`). Both live in [`pack_ring_colours`], and nowhere else. The commit argument `0x0123`
+//! was accepted by the pad on that write.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -95,32 +96,32 @@ pub fn ring_device_id() -> DeviceId {
 /// Packs a frame of 24 colours into the 24 colour words of the custom theme record, in the order
 /// the pad stores them.
 ///
-/// **TODO(S2): this is the one place that knows the pad's byte order and LED order, and both are
-/// UNKNOWN.**
-/// - *Byte order.* The research reads each word as a `u32` `0x00RRGGBB` stored little-endian, so
-///   the bytes in file order are blue, green, red, pad. That reading is UNCONFIRMED: the stored
-///   words cannot say which byte is red (`ring_probe` prints the evidence), and only the S3
-///   pure-red write settles it.
-/// - *LED order.* Zone 0 is taken as words 0-11 and zone 1 as words 12-23, each in frame order.
-///   Which index is which LED, which ring is the left stick's, and which way a ring runs are all
-///   UNKNOWN until the map step after S3.
+/// **This is the one place that knows the pad's byte order and LED order.**
+/// - *Byte order: CONFIRMED, B, G, R, pad.* S3 ran on the real pad on 2026-11-18
+///   (`ring_s3 --order bgr`): a pure-red write, packed as `00 00 ff 00`, read back as written
+///   and Luke saw both rings red. So a colour word's bytes in file order are blue, green, red and
+///   a pad byte of 0 (the research's `u32 0x00RRGGBB`, little-endian).
+/// - *LED order: TODO(S3 marker run), UNKNOWN.* Zone 0 is taken as words 0-11 and zone 1 as words
+///   12-23, each in frame order. Which index is which LED, which ring is the left stick's, and
+///   which way a ring runs are UNKNOWN until `ring_s3 --marker` is run on the pad.
 ///
-/// The main agent fills this in from the `ring_probe` output; no other function may know either
-/// order.
+/// No other function may know either order.
 pub fn pack_ring_colours(frame: &[Rgb8; RING_LEDS]) -> [[u8; 4]; CUSTOM_COLOURS] {
     pack_ring_colours_as(frame, DEFAULT_ORDER)
 }
 
-/// The byte order of a colour word in the custom theme record: the one open question S3 settles.
+/// The byte order of a colour word in the custom theme record. S3 settled it: [`ByteOrder::Bgr`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ByteOrder {
-    /// File order blue, green, red, pad: the research's `u32 0x00RRGGBB`, little-endian.
+    /// File order blue, green, red, pad: the research's `u32 0x00RRGGBB`, little-endian. This is
+    /// the pad's order (S3, 2026-11-18).
     Bgr,
-    /// File order red, green, blue, pad.
+    /// File order red, green, blue, pad. Shown red by no pad seen so far; kept so the S3 tool can
+    /// try it.
     Rgb,
 }
 
-/// The order the adapter writes with, until S3 settles it. **TODO(S2/S3).**
+/// The order the adapter writes with: B, G, R, pad. CONFIRMED by S3 on the pad (2026-11-18).
 pub const DEFAULT_ORDER: ByteOrder = ByteOrder::Bgr;
 
 /// [`pack_ring_colours`] with a byte order of the caller's: how the S3 tool tries a candidate. The
@@ -1179,15 +1180,30 @@ mod tests {
 
     #[test]
     fn the_mapping_is_the_only_function_that_knows_the_byte_and_led_order() {
-        // The test pins the two TODO(S2) assumptions in one place, so the day S2 settles them,
+        // The test pins the byte order (confirmed) and the LED order (TODO, the marker run) in one place, so the day the marker run settles the LED order,
         // this is the test that changes with `pack_ring_colours` and nothing else does.
         let mut frame = [Rgb8::BLACK; RING_LEDS];
         frame[0] = Rgb8::new(1, 2, 3);
         frame[12] = Rgb8::new(4, 5, 6);
         let words = pack_ring_colours(&frame);
-        assert_eq!(words[0], [3, 2, 1, 0], "UNCONFIRMED: B, G, R, pad");
+        assert_eq!(words[0], [3, 2, 1, 0], "CONFIRMED by S3: B, G, R, pad");
         assert_eq!(words[12], [6, 5, 4, 0], "UNCONFIRMED: zone 1 is words 12-23");
         assert_eq!(words[1], [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn pure_red_packs_as_00_00_ff_00_the_order_s3_confirmed_on_the_pad() {
+        // S3 (2026-11-18): `ring_s3 --order bgr` wrote 24 words of 00 00 ff 00 and both rings
+        // showed red. This pins it: a change to the byte order fails here.
+        let red = [Rgb8::new(255, 0, 0); RING_LEDS];
+        for word in pack_ring_colours(&red) {
+            assert_eq!(word, [0x00, 0x00, 0xFF, 0x00]);
+        }
+        assert_eq!(pack_ring_colours_as(&red, ByteOrder::Bgr), pack_ring_colours(&red));
+        assert_eq!(DEFAULT_ORDER, ByteOrder::Bgr);
+        // And the frame a scene sends reaches the pad in that order end to end: green and blue.
+        assert_eq!(pack_ring_colours(&[Rgb8::new(0, 255, 0); RING_LEDS])[5], [0x00, 0xFF, 0x00, 0x00]);
+        assert_eq!(pack_ring_colours(&[Rgb8::new(0, 0, 255); RING_LEDS])[23], [0xFF, 0x00, 0x00, 0x00]);
     }
 
     #[test]

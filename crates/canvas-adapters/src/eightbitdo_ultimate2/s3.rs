@@ -32,9 +32,51 @@ use super::probe::ProfileCapture;
 use super::ring::{self, ByteOrder, RING_LEDS};
 use super::{read_image_raw, refuse, HidOpener, Pace, VendorTransport};
 
+/// What the rings are asked to show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pattern {
+    /// All 24 LEDs pure red: the byte-order test (S3).
+    Red,
+    /// The LED-order test: on each ring the first three LEDs are red, green and blue and the rest
+    /// are off. Ring 1 is words 0-2 (LED 0 red, 1 green, 2 blue), ring 2 is words 12-14 (12 red,
+    /// 13 green, 14 blue). Where the colours sit and which way they run says what the order is.
+    Marker,
+}
+
+impl Pattern {
+    /// The 24-colour frame of the pattern, in zone order.
+    pub fn frame(self) -> [Rgb8; RING_LEDS] {
+        match self {
+            Pattern::Red => [Rgb8::new(255, 0, 0); RING_LEDS],
+            Pattern::Marker => {
+                let mut frame = [Rgb8::BLACK; RING_LEDS];
+                for ring in 0..ring::RINGS {
+                    let base = ring * ring::LEDS_PER_RING;
+                    frame[base] = Rgb8::new(255, 0, 0);
+                    frame[base + 1] = Rgb8::new(0, 255, 0);
+                    frame[base + 2] = Rgb8::new(0, 0, 255);
+                }
+                frame
+            }
+        }
+    }
+
+    /// What to tell the person to look for.
+    fn look_for(self) -> &'static str {
+        match self {
+            Pattern::Red => "rings should be RED now; press Enter to restore",
+            Pattern::Marker => {
+                "rings should show markers now: on each ring one RED, one GREEN and one BLUE LED, side by side, the rest off.                  Note where they sit and which way red, green, blue run (clockwise or not); press Enter to restore"
+            }
+        }
+    }
+}
+
 /// What the tool is asked to do.
 #[derive(Clone, Copy, Debug)]
 pub struct S3Options {
+    /// What to put on the rings.
+    pub pattern: Pattern,
     /// The byte order to try for the colour words.
     pub order: ByteOrder,
     /// The profile the pad must be on (0-based). The pad's own active profile decides which
@@ -57,16 +99,16 @@ pub struct S3Io<'a> {
 /// How the run ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum S3Outcome {
-    /// The pad already held pure red in this byte order: nothing was written and nothing needs
-    /// restoring.
-    AlreadyRed,
+    /// The pad already held this pattern in this byte order: nothing was written and nothing
+    /// needs restoring.
+    AlreadyShown,
     /// Red was written, held and the saved image is back, byte for byte.
     Done(ring::Restored),
 }
 
-/// The 24 LEDs of pure red.
-fn red_words(order: ByteOrder) -> [[u8; 4]; super::probe::CUSTOM_COLOURS] {
-    ring::pack_ring_colours_as(&[Rgb8::new(255, 0, 0); RING_LEDS], order)
+/// The colour words of a pattern in a byte order.
+fn pattern_words(pattern: Pattern, order: ByteOrder) -> [[u8; 4]; super::probe::CUSTOM_COLOURS] {
+    ring::pack_ring_colours_as(&pattern.frame(), order)
 }
 
 /// Runs S3 on an open vendor channel. Blocking.
@@ -84,7 +126,7 @@ pub(super) fn run(
         replies,
         image: saved.clone(),
     };
-    let prepared = ring::prepare_from(saved, &red_words(opts.order), Some(opts.expect_profile))?;
+    let prepared = ring::prepare_from(saved, &pattern_words(opts.pattern, opts.order), Some(opts.expect_profile))?;
     (io.say)(&format!(
         "profile {} is active and its custom ring record is marked in use",
         prepared.active + 1
@@ -93,12 +135,13 @@ pub(super) fn run(
         .map_err(|e| refuse(format!("the backup could not be saved ({e}); nothing was written")))?;
     (io.say)("the backup is saved");
     if prepared.is_noop() {
-        (io.say)("the pad already holds pure red in this order; nothing to write");
-        return Ok(S3Outcome::AlreadyRed);
+        (io.say)("the pad already holds this pattern in this order; nothing to write");
+        return Ok(S3Outcome::AlreadyShown);
     }
 
     (io.say)(&format!(
-        "writing 24 LEDs of pure red ({:?} order): {} chunks, a commit, then a read-back",
+        "writing the {:?} pattern ({:?} order): {} chunks, a commit, then a read-back",
+        opts.pattern,
         opts.order,
         prepared.record.len().div_ceil(super::codec::CHUNK)
     ));
@@ -109,7 +152,7 @@ pub(super) fn run(
         return Err(e);
     }
     (io.say)("the pad's image reads back as written: only the ring record changed");
-    (io.say)("rings should be RED now; press Enter to restore");
+    (io.say)(opts.pattern.look_for());
 
     if let Err(why) = (io.hold)() {
         (io.say)(&format!("the wait ended with an error ({why}); restoring"));
@@ -204,7 +247,7 @@ mod tests {
 
     fn opts(order: ByteOrder) -> S3Options {
         // The fixture's active profile is profile 3.
-        S3Options { order, expect_profile: 2 }
+        S3Options { pattern: Pattern::Red, order, expect_profile: 2 }
     }
 
     /// The custom record of the fixture's active profile in an image.
@@ -396,7 +439,7 @@ mod tests {
         let mut backup = |_: &ProfileCapture| Ok(());
         let mut hold = || Ok(());
         let mut io = S3Io { say: &mut say, backup: &mut backup, hold: &mut hold };
-        let wrong = S3Options { order: ByteOrder::Bgr, expect_profile: 0 };
+        let wrong = S3Options { pattern: Pattern::Red, order: ByteOrder::Bgr, expect_profile: 0 };
         let err = run(&mut vendor, pace(), &wrong, &mut io).unwrap_err().to_string();
         assert!(err.contains("active profile is 3, not 1"), "{err}");
         assert_eq!(pad.report_counts().1, 0);
@@ -417,12 +460,12 @@ mod tests {
     fn a_pad_that_already_shows_red_is_not_written_and_not_restored() {
         let mut image = fake_pad::ring_fixture_image();
         let at = codec::SINGLE + ring::SINGLE_LEN * 2;
-        for (i, w) in red_words(ByteOrder::Bgr).iter().enumerate() {
+        for (i, w) in pattern_words(Pattern::Red, ByteOrder::Bgr).iter().enumerate() {
             image[at + 4 + 4 * i..at + 8 + 4 * i].copy_from_slice(w);
         }
         let pad = FakePad::with_image(image, Personality::XInput);
         let r = drive(&pad, ByteOrder::Bgr, Ok(()), Ok(()));
-        assert_eq!(r.result.unwrap(), S3Outcome::AlreadyRed);
+        assert_eq!(r.result.unwrap(), S3Outcome::AlreadyShown);
         assert_eq!(pad.report_counts().1, 0);
         assert!(r.held_image.is_none());
     }
@@ -433,7 +476,7 @@ mod tests {
         let backup = fake_pad::capture_of(&fake_pad::ring_fixture_image(), Personality::XInput);
         let mut red = fake_pad::ring_fixture_image();
         let at = codec::SINGLE + ring::SINGLE_LEN * 2;
-        for (i, w) in red_words(ByteOrder::Bgr).iter().enumerate() {
+        for (i, w) in pattern_words(Pattern::Red, ByteOrder::Bgr).iter().enumerate() {
             red[at + 4 + 4 * i..at + 8 + 4 * i].copy_from_slice(w);
         }
         let pad = FakePad::with_image(red.clone(), Personality::XInput);
@@ -506,7 +549,7 @@ mod tests {
     }
 
     fn real_opts(order: ByteOrder) -> S3Options {
-        S3Options { order, expect_profile: 0 }
+        S3Options { pattern: Pattern::Red, order, expect_profile: 0 }
     }
 
     fn drive_real(pad: &FakePad, order: ByteOrder) -> (Result<S3Outcome, AdapterError>, Option<Vec<u8>>, Vec<ProfileCapture>) {
@@ -573,5 +616,129 @@ mod tests {
             assert!(held.is_none(), "{name}: the rings are never said to be red");
             assert_eq!(pad.image(), real, "{name}: the image is the backup again");
         }
+    }
+
+    // ---- the marker pattern (the LED-order run)
+
+    #[test]
+    fn the_marker_frame_is_red_green_blue_at_the_start_of_each_ring_and_the_rest_off() {
+        let frame = Pattern::Marker.frame();
+        for ring in 0..2 {
+            let base = ring * 12;
+            assert_eq!(frame[base], Rgb8::new(255, 0, 0), "ring {} LED {}", ring + 1, base);
+            assert_eq!(frame[base + 1], Rgb8::new(0, 255, 0));
+            assert_eq!(frame[base + 2], Rgb8::new(0, 0, 255));
+            for (led, colour) in frame.iter().enumerate().skip(base + 3).take(9) {
+                assert_eq!(*colour, Rgb8::BLACK, "LED {led} is off");
+            }
+        }
+    }
+
+    /// The words of a marker run in the confirmed order: red, green, blue, then zeros.
+    fn marker_record_words() -> Vec<[u8; 4]> {
+        let mut words = vec![[0u8; 4]; 24];
+        for base in [0, 12] {
+            words[base] = [0x00, 0x00, 0xFF, 0x00];
+            words[base + 1] = [0x00, 0xFF, 0x00, 0x00];
+            words[base + 2] = [0xFF, 0x00, 0x00, 0x00];
+        }
+        words
+    }
+
+    /// What a marker run gave: its result, the image while held, what it said, its backups.
+    type MarkerRun = (Result<S3Outcome, AdapterError>, Option<Vec<u8>>, Vec<String>, Vec<ProfileCapture>);
+
+    fn drive_marker(pad: &FakePad, expect_profile: usize) -> MarkerRun {
+        let mut vendor = pad.vendor();
+        let mut said = Vec::new();
+        let mut backups = Vec::new();
+        let mut held = None;
+        let result = {
+            let mut say = |l: &str| said.push(l.to_string());
+            let mut backup = |c: &ProfileCapture| {
+                backups.push(c.clone());
+                Ok(())
+            };
+            let mut hold = || {
+                held = Some(pad.image());
+                Ok(())
+            };
+            let mut io = S3Io { say: &mut say, backup: &mut backup, hold: &mut hold };
+            let opts = S3Options { pattern: Pattern::Marker, order: ByteOrder::Bgr, expect_profile };
+            run(&mut vendor, pace(), &opts, &mut io)
+        };
+        (result, held, said, backups)
+    }
+
+    #[test]
+    fn the_marker_run_writes_rgb_markers_to_both_rings_holds_and_restores_exactly() {
+        let pad = fresh();
+        let before = pad.image();
+        let (result, held, said, backups) = drive_marker(&pad, 2);
+        assert_eq!(result.unwrap(), S3Outcome::Done(ring::Restored::Range));
+        let held = held.expect("it waited");
+        let at = codec::SINGLE + ring::SINGLE_LEN * 2;
+        assert_eq!(&held[at..at + 4], &codec::ENABLED.to_le_bytes());
+        for (i, word) in marker_record_words().iter().enumerate() {
+            assert_eq!(&held[at + 4 + 4 * i..at + 8 + 4 * i], word, "word {i}");
+        }
+        assert_eq!(&held[..at], &before[..at]);
+        assert_eq!(&held[at + ring::SINGLE_LEN..], &before[at + ring::SINGLE_LEN..]);
+        assert_eq!(pad.image(), backups[0].image, "byte-identical to the backup");
+        assert_eq!(pad.image(), before);
+        assert!(said.iter().any(|l| l.contains("markers") && l.contains("clockwise") && l.contains("press Enter to restore")), "{said:?}");
+        assert!(!said.iter().any(|l| l.contains("should be RED")));
+    }
+
+    #[test]
+    fn the_marker_run_on_the_real_pads_image_writes_profile_1_and_restores_to_the_backup() {
+        let pad = real_pad();
+        let real = fake_pad::real_profile_capture().image;
+        let (result, held, _, backups) = drive_marker(&pad, 0);
+        result.unwrap();
+        let held = held.unwrap();
+        let at = codec::SINGLE; // profile 1
+        for (i, word) in marker_record_words().iter().enumerate() {
+            assert_eq!(&held[at + 4 + 4 * i..at + 8 + 4 * i], word, "word {i}");
+        }
+        assert_eq!(&held[..at + 4], &real[..at + 4], "nothing before the words moved");
+        assert_eq!(&held[at + ring::SINGLE_LEN..], &real[at + ring::SINGLE_LEN..]);
+        assert_eq!(backups[0].image, real);
+        assert_eq!(pad.image(), real, "byte-identical after the restore");
+    }
+
+    #[test]
+    fn every_failure_mode_of_the_marker_run_on_the_real_image_ends_with_the_image_equal_to_the_backup() {
+        let real = fake_pad::real_profile_capture().image;
+        type Arm = fn(&FakePad);
+        let modes: [(&str, Arm); 5] = [
+            ("failed commit", |p| p.silence_next_commits(1)),
+            ("dropped write ack", |p| p.silence_next_write_acks(1)),
+            ("dropped write", |p| p.drop_next_commit()),
+            ("write not taken", |p| p.ignore_writes()),
+            ("stray byte", |p| p.scribble_on_next_commit(codec::NAME)),
+        ];
+        for (name, arm) in modes {
+            let pad = real_pad();
+            arm(&pad);
+            let (result, held, _, _) = drive_marker(&pad, 0);
+            assert!(result.is_err(), "{name}");
+            assert!(held.is_none(), "{name}: the markers are never said to be showing");
+            assert_eq!(pad.image(), real, "{name}: the image is the backup again");
+        }
+    }
+
+    #[test]
+    fn a_pad_already_showing_the_markers_is_not_written() {
+        let mut image = fake_pad::ring_fixture_image();
+        let at = codec::SINGLE + ring::SINGLE_LEN * 2;
+        for (i, w) in marker_record_words().iter().enumerate() {
+            image[at + 4 + 4 * i..at + 8 + 4 * i].copy_from_slice(w);
+        }
+        let pad = FakePad::with_image(image, Personality::XInput);
+        let (result, held, _, _) = drive_marker(&pad, 2);
+        assert_eq!(result.unwrap(), S3Outcome::AlreadyShown);
+        assert!(held.is_none());
+        assert_eq!(pad.report_counts().1, 0);
     }
 }
