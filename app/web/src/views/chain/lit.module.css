@@ -1,0 +1,56 @@
+/*
+ * The two pictures under "how many orange lights?": four devices of four LEDs, in a row (one
+ * orange light in all) and on one shared signal (an orange light on every device). Every colour is
+ * a token, except the orange of the LED itself, which the screen sets from the one constant the
+ * flow lights it with. The LED cells are the drawing's own shapes, like the slide's, not chrome.
+ */
+
+.answers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3) var(--s5);
+}
+
+.answer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+  margin: 0;
+}
+
+.devices {
+  display: flex;
+  gap: var(--s2);
+  height: 16px;
+}
+
+.device {
+  display: flex;
+  gap: 2px;
+}
+
+.led {
+  flex: none;
+  width: 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  background: var(--sunk);
+}
+
+.led[data-lit="true"] {
+  border-color: var(--orange);
+  background: var(--orange);
+}
+
+.caption {
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+.count {
+  color: var(--ink);
+  font-family: var(--fm);
+  font-variant-numeric: tabular-nums;
+}
