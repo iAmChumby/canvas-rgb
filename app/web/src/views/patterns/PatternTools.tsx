@@ -57,27 +57,28 @@ export function PatternTools({
   return (
     <div className={s.tools}>
       <div className={s.toolKeys} role="group" aria-label="Tools">
-        <Chip icon={<PaintBrush size={14} weight="bold" aria-hidden="true" />} pressed={tool === "paint"} onClick={() => onTool("paint")}>
-          Paint
+        <Chip icon={<PaintBrush size={14} weight="bold" aria-hidden="true" />} label="Paint" pressed={tool === "paint"} onClick={() => onTool("paint")}>
+          <span className={s.toolWord}>Paint</span>
         </Chip>
-        <Chip icon={<Eraser size={14} weight="bold" aria-hidden="true" />} pressed={tool === "off"} onClick={() => onTool("off")}>
-          Off
+        <Chip icon={<Eraser size={14} weight="bold" aria-hidden="true" />} label="Off" pressed={tool === "off"} onClick={() => onTool("off")}>
+          <span className={s.toolWord}>Off</span>
         </Chip>
-        <Chip icon={<Eyedropper size={14} weight="bold" aria-hidden="true" />} pressed={tool === "pick"} onClick={() => onTool("pick")}>
-          Pick
+        <Chip icon={<Eyedropper size={14} weight="bold" aria-hidden="true" />} label="Pick" pressed={tool === "pick"} onClick={() => onTool("pick")}>
+          <span className={s.toolWord}>Pick</span>
         </Chip>
         <Chip
           icon={<PaintBucket size={14} weight="bold" aria-hidden="true" />}
+          label="Fill all"
           pressed={tool === "fill"}
           onClick={() => {
             onTool("fill");
             onFillAll();
           }}
         >
-          Fill all
+          <span className={s.toolWord}>Fill all</span>
         </Chip>
-        <Chip icon={<Gradient size={14} weight="bold" aria-hidden="true" />} pressed={tool === "gradient"} onClick={() => onTool("gradient")}>
-          Gradient
+        <Chip icon={<Gradient size={14} weight="bold" aria-hidden="true" />} label="Gradient" pressed={tool === "gradient"} onClick={() => onTool("gradient")}>
+          <span className={s.toolWord}>Gradient</span>
         </Chip>
       </div>
       {/* The Gradient tool's own keys keep their room when the tool is not in the hand (dimmed,

@@ -1,7 +1,7 @@
 /*
  * The pattern editor. The device is the page: a recessed well with one dot per LED, drawn as large
- * as the window gives it, with the tools as flat keys under it and the space for a future frame
- * strip between the two. Every colour is a token, every radius 8 to 16 px, and nothing glows.
+ * as the window gives it, with the tools as flat keys under it and the frame strip between the two.
+ * Every colour is a token, every radius 8 to 10 px, every word 14 px or more, and nothing glows.
  *
  * The editor fills the box it is put in and never scrolls: the device's well is the only part that
  * gives way, so the head, the note, the reserved strip and the keys keep their height while the
@@ -13,8 +13,8 @@
   min-height: 0;
   height: 100%;
   width: 100%;
-  max-width: 1280px;
-  margin-inline: auto;
+  /* No cap and no centring: the title keeps the left edge Effects and Scenes use at every width
+     (#468). The device itself stops growing at 980 px (.surfaceBox). */
   display: flex;
   flex-direction: column;
   gap: var(--s2);
@@ -140,12 +140,24 @@
      must not hold the stage open when the window gets shorter (the frame strip took height from it). */
   grid-template: minmax(0, 1fr) / minmax(0, 1fr);
   place-items: center;
-  padding: var(--s3);
+  /* The top band holds the LED-order keys and the room the notch's arrow needs above the run. */
+  padding: 44px var(--s3) var(--s3);
   border: 1px solid var(--line);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-md);
   background: var(--sunk);
   box-shadow: var(--well);
   overflow: hidden;
+}
+
+/* Find LED and Reverse: flat keys in the stage's top-left band, clear of the notch at the top. */
+.orderKeys {
+  position: absolute;
+  top: var(--s2);
+  left: var(--s2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 1;
 }
 
 /* The surface and whatever is laid over it (the Gradient tool's handles) share one box. */
@@ -184,11 +196,10 @@
 .frameStrip {
   position: relative;
   flex: 0 0 auto;
-  min-height: 84px;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--s2) var(--s3);
+  gap: 4px var(--s3);
   padding: 6px var(--s3);
   border: 1px solid var(--line);
   border-radius: var(--r-md);
@@ -198,7 +209,9 @@
 
 /* The frames scroll sideways inside their own box; the keys and the timing stay where they are. */
 .frameScroll {
-  flex: 1 1 280px;
+  /* Two rows at every width: the frames on a row of their own, the keys and the timing under them.
+     The strip's height then never changes with the width or with the number of frames. */
+  flex: 1 1 100%;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -216,9 +229,14 @@
   padding: 4px 22px 2px 2px;
 }
 
+/* A word on a key that gives way to its icon on a phone (the key keeps its aria-label and tooltip). */
+.keyWord {
+  white-space: nowrap;
+}
+
 .frameCol {
   flex: none;
-  width: 62px;
+  min-width: 82px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -229,11 +247,13 @@
 /* A frame is a flat key: its own box, a lit rim when it is the one being painted. */
 .frameKey {
   position: relative;
-  width: 62px;
+  min-width: 82px;
   height: 48px;
-  padding: 3px;
-  display: grid;
-  place-items: center;
+  padding: 3px 5px 3px 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   background: var(--panel, transparent);
@@ -276,40 +296,39 @@
 }
 
 .frameNo {
-  position: absolute;
-  top: 2px;
-  left: 4px;
+  flex: none;
   font-family: var(--fm);
-  font-size: 10px;
+  font-size: var(--t14);
   line-height: 1;
-  color: var(--mute);
+  color: var(--dim);
   font-variant-numeric: tabular-nums;
   pointer-events: none;
 }
 
 .frameHold {
   font-family: var(--fm);
-  font-size: 12px;
-  line-height: 14px;
-  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 16px;
+  color: var(--dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-/* The connector sits level with the middle of the thumbnails, its word under it. */
+/* The connector sits level with the thumbnails, its word under it on the holds' line. */
 .connector {
   flex: none;
-  width: 54px;
+  /* Wide enough for the longest word, "60000ms". */
+  width: 64px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  padding-top: 10px;
 }
 
+/* As tall as the frame keys, so a connector's word lands on the same line as the frames' holds. */
 .connectorKey {
   width: 44px;
-  height: 28px;
+  height: 48px;
   display: grid;
   place-items: center;
   padding: 0;
@@ -351,9 +370,9 @@
 
 .connectorWord {
   font-family: var(--fm);
-  font-size: 11px;
-  line-height: 12px;
-  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 16px;
+  color: var(--dim);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -362,7 +381,7 @@
 .frameMarker {
   position: absolute;
   top: 2px;
-  height: 52px;
+  height: 54px;
   width: 2px;
   border-radius: 1px;
   background: var(--live);
@@ -396,6 +415,7 @@
   display: flex;
   align-items: center;
   gap: var(--s2);
+  margin-left: auto;
 }
 
 /* Wide enough for the longest reading ("600000 ms"), so a figure never resizes the row. */
@@ -450,17 +470,12 @@
     gap: 4px 8px;
   }
 
-  .frameScroll {
-    flex: 1 1 100%;
-  }
-
   .frameKeys {
     gap: 2px;
   }
 
   .frameTiming {
     gap: 6px;
-    margin-left: auto;
   }
 
   .frameField {
@@ -468,7 +483,7 @@
   }
 
   .frameField :global(.num) {
-    width: 64px;
+    width: 56px;
   }
 }
 
@@ -517,6 +532,18 @@
   .editor {
     gap: 6px;
   }
+
+  /* The tool keys keep their icons and give up their words, so Paint, Off, Pick, Fill all and Gradient
+     share one row and the Gradient keys, undo and redo share the next. Each key keeps its name for a
+     screen reader and its tooltip. */
+  .toolWord,
+  .keyWord {
+    display: none;
+  }
+
+  .stage {
+    padding-top: 40px;
+  }
 }
 
 /* A narrow window: the name has its own line, so it is never squeezed to an ellipsis beside the
@@ -530,12 +557,22 @@
 }
 
 @media (max-width: 640px) {
+  /* The name and the two keys share the first row; the shape and the count take the second. The
+     kind ("ring of 12") is said again by the shape picker and the count, so it is dropped here. */
   .who {
-    flex: 1 1 100%;
+    flex: 1 1 140px;
+  }
+
+  .kind {
+    display: none;
   }
 
   .name {
     font-size: var(--t16);
+  }
+
+  .headKeys {
+    gap: 2px;
   }
 }
 
@@ -666,6 +703,24 @@
   width: 1px;
   height: 12px;
   background: var(--line-2);
+}
+
+/* A phone: the segmented keys and the speed share one row, so Off costs no second row. */
+@media (max-width: 520px) {
+  .motionKey,
+  .motionArrow {
+    display: none;
+  }
+
+  .motionSpeed {
+    flex: 1 1 0;
+    min-width: 0;
+    gap: 6px;
+  }
+
+  .motionSlider {
+    min-width: 40px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
