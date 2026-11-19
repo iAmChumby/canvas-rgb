@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Light setup: the orange-light question now asks for the whole case ("in total, adding up every fan and strip") and shows both answers as pictures (one orange light in all means a row; one on every device means a shared signal), and the "Eight 1-LED devices" warning names what it means (every device shows the same colours, one per LED) and what to do, so a header whose fans and strip share one signal is easier to answer correctly. (#470)
+
 ## [0.18.0] - 2026-11-18
 
 ### Added

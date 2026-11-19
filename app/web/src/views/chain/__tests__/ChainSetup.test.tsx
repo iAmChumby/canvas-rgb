@@ -72,7 +72,9 @@ const SESSION = "session-1";
 const ORANGE = PART_COLOURS[0];
 const WHITE = "#ffffff";
 const WHY = "The app cannot see what is plugged into this ARGB header.";
-const ASK = "Look at your case. How many orange lights can you see?";
+const ASK = "Look across your whole case. How many orange lights can you see in total, adding up every fan and strip?";
+const HINT =
+  "One orange light means your devices are in a row: each takes its own LEDs. An orange light on every device means they share one signal and show the same lights: type how many devices.";
 const SLIDE_ONE = "Slide until the orange light is on the last LED of the last device along the cable.";
 const SLIDE_MANY = "Slide until the orange light is on the last LED of each device.";
 const DEVICES_Q = "How many devices are plugged into JARGB 1?";
@@ -347,9 +349,7 @@ describe("the header setup screens", () => {
 
     expect(screen.getByText(ASK)).toBeTruthy();
     expect(screen.getByText(WHY)).toBeTruthy();
-    expect(
-      screen.getByText("Only one LED (one tiny light) is on. It can show on more than one fan or strip."),
-    ).toBeTruthy();
+    expect(screen.getByText(HINT)).toBeTruthy();
     expect((screen.getByRole("textbox", { name: "Orange lights" }) as HTMLInputElement).value).toBe("1");
     expect(lastRuns()).toEqual([{ start: 0, count: 1, color: ORANGE }]);
     expect(screen.getByRole("button", { name: "Nothing lit up" })).toBeTruthy();
@@ -574,7 +574,7 @@ describe("the header setup screens", () => {
 
     expect(
       screen.getByText(
-        "Eight 1-LED devices is unusual. If every device shows the same lights, count the orange lights again.",
+        "Eight 1-LED devices is unusual. If every device shows the same colours, one per LED, they share one signal. Count again, and count the orange lights on every device together.",
       ),
     ).toBeTruthy();
     // Saving stays possible: Next is still there.

@@ -77,7 +77,7 @@ const SESSION = "session-1";
 const ORANGE = PART_COLOURS[0];
 const WHITE = "#ffffff";
 const SETUP = { name: "Light setup" };
-const ASK = "Look at your case. How many orange lights can you see?";
+const ASK = "Look across your whole case. How many orange lights can you see in total, adding up every fan and strip?";
 
 const STATUS = {
   onboarding_complete: true,
@@ -268,7 +268,7 @@ describe("five people meet the header setup", () => {
     await typeInto(screen.getByRole("textbox", { name: "Devices on JARGB 1" }), "8");
     expect(
       screen.getByText(
-        "Eight 1-LED devices is unusual. If every device shows the same lights, count the orange lights again.",
+        "Eight 1-LED devices is unusual. If every device shows the same colours, one per LED, they share one signal. Count again, and count the orange lights on every device together.",
       ),
     ).toBeTruthy();
 

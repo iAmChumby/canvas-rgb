@@ -102,7 +102,8 @@ export function CountStep({
         <div className={s.panel}>
           <p className={s.panelText}>
             {said.charAt(0).toUpperCase() + said.slice(1)} 1-LED devices is unusual. If every device shows the
-            same lights, count the orange lights again.
+            same colours, one per LED, they share one signal. Count again, and count the orange lights on
+            every device together.
           </p>
           <div className={s.aside}>
             <Button size="sm" onClick={onCountAgain}>
