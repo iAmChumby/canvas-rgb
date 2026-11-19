@@ -314,6 +314,27 @@ describe("the frame strip", () => {
 });
 
 describe("transitions", () => {
+  it("Loop set to Fade 800 ms still says Fade 800 ms after a frame is added at the end (#468)", async () => {
+    show(framed([RED, GREEN]));
+    await settle();
+    await playAll();
+    fireEvent.click(screen.getByRole("button", { name: /^After frame 2:/ }));
+    fireEvent.click(screen.getByRole("radio", { name: "Fade" }));
+    const field = screen.getByRole("textbox", { name: "Frame 2 fade duration" });
+    fireEvent.focus(field);
+    fireEvent.change(field, { target: { value: "800" } });
+    fireEvent.blur(field);
+    await frames();
+    expect(screen.getByRole("button", { name: "After frame 2: loops to frame 1, fading 800 milliseconds" })).toBeTruthy();
+    fireEvent.click(key(2));
+    fireEvent.click(screen.getByRole("button", { name: "Add frame" }));
+    await frames();
+    expect(keys()).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "After frame 3: loops to frame 1, fading 800 milliseconds" })).toBeTruthy();
+    expect(sent().frames.at(-1)!.transition).toEqual({ kind: "fade", ms: 800, easing: "linear" });
+    expect(connector(2).getAttribute("aria-label")).toBe("Frame 2 to 3: cut");
+  });
+
   it("a connector starts as a cut and its panel makes it a fade of 400 ms, linear", async () => {
     show(framed([RED, GREEN]));
     await settle();

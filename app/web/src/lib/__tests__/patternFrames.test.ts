@@ -191,3 +191,76 @@ describe("the document", () => {
     expect("playback" in withDoc(saved, setLoop(doc, true))).toBe(false);
   });
 });
+
+// #468: the loop connector (last frame to frame 1) belongs to the last PLACE. The engine reads it
+// from the last frame's transition, so every edit that changes which frame is last must hand it on.
+describe("the loop connector stays on the last place (#468)", () => {
+  const LOOP = { kind: "fade", ms: 800, easing: "ease_in_out" } as const;
+  const MID = { kind: "fade", ms: 250, easing: "ease_out" } as const;
+  /** red -MID-> green -cut-> blue -LOOP-> frame 1. */
+  const looped = (): FrameDoc => ({
+    frames: [
+      { ...frame("#ff0000", 100), transition: MID },
+      frame("#00ff00", 200),
+      { ...frame("#0000ff", 300), transition: LOOP },
+    ],
+  });
+  const loopOf = (doc: FrameDoc) => doc.frames.at(-1)!.transition;
+  const heads = (doc: FrameDoc) => doc.frames.map((f) => f.colors[0]);
+
+  it("add at the end: the new last frame takes the loop, the old one passes to it as a cut", () => {
+    const made = addFrame(looped(), 2)!;
+    expect(heads(made.doc)).toEqual(["#ff0000", "#00ff00", "#0000ff", "#000000"]);
+    expect(loopOf(made.doc)).toEqual(LOOP);
+    expect(made.doc.frames[2]!.transition).toBeUndefined();
+  });
+
+  it("add in the middle: the loop and every connector stay as they were", () => {
+    const made = addFrame(looped(), 0)!;
+    expect(loopOf(made.doc)).toEqual(LOOP);
+    expect(made.doc.frames[0]!.transition).toEqual(MID);
+    expect(made.doc.frames[1]!.transition).toBeUndefined();
+  });
+
+  it("duplicate the last frame: the copy is last and keeps the loop, the original cuts to it", () => {
+    const made = duplicateFrame(looped(), 2)!;
+    expect(heads(made.doc)).toEqual(["#ff0000", "#00ff00", "#0000ff", "#0000ff"]);
+    expect(loopOf(made.doc)).toEqual(LOOP);
+    expect(made.doc.frames[2]!.transition).toBeUndefined();
+  });
+
+  it("delete the last frame: the one before it is last now and takes the loop", () => {
+    const made = deleteFrame(looped(), 2)!;
+    expect(heads(made.doc)).toEqual(["#ff0000", "#00ff00"]);
+    expect(loopOf(made.doc)).toEqual(LOOP);
+    expect(made.doc.frames[0]!.transition).toEqual(MID);
+  });
+
+  it("delete a middle frame: the loop and the other connectors stay as they were", () => {
+    const made = deleteFrame(looped(), 1)!;
+    expect(heads(made.doc)).toEqual(["#ff0000", "#0000ff"]);
+    expect(loopOf(made.doc)).toEqual(LOOP);
+    expect(made.doc.frames[0]!.transition).toEqual(MID);
+  });
+
+  it("move the last frame to first: the frame now last takes the loop, the moved one cuts", () => {
+    const next = moveFrame(looped(), 2, 0)!;
+    expect(heads(next)).toEqual(["#0000ff", "#ff0000", "#00ff00"]);
+    expect(loopOf(next)).toEqual(LOOP);
+    expect(next.frames[0]!.transition).toBeUndefined();
+    expect(next.frames[1]!.transition).toEqual(MID);
+  });
+
+  it("move a frame to last: it takes the loop, the frame that was last cuts", () => {
+    const next = moveFrame(looped(), 0, 2)!;
+    expect(heads(next)).toEqual(["#00ff00", "#0000ff", "#ff0000"]);
+    expect(loopOf(next)).toEqual(LOOP);
+    expect(next.frames[1]!.transition).toBeUndefined();
+  });
+
+  it("a loop that cuts stays a cut: no transition on the last frame survives every edit", () => {
+    const doc = three();
+    expect(loopOf(addFrame(doc, 2)!.doc)).toBeUndefined();
+    expect(loopOf(moveFrame({ frames: [{ ...doc.frames[0]!, transition: MID }, ...doc.frames.slice(1)] }, 0, 2)!)).toBeUndefined();
+  });
+});

@@ -38,6 +38,27 @@ export function canAdd(doc: FrameDoc): boolean {
   return doc.frames.length < PATTERN_FRAMES_MAX;
 }
 
+/** `frame` with `transition` as its connector; undefined is a cut, written as no transition at all. */
+function withConnector(frame: Frame, transition: Transition | undefined): Frame {
+  if (JSON.stringify(frame.transition) === JSON.stringify(transition)) return frame;
+  const next: Frame = { ...frame };
+  if (transition === undefined) delete next.transition;
+  else next.transition = transition;
+  return next;
+}
+
+/**
+ * The loop connector (last frame to frame 1, or Stop) belongs to the last PLACE, not to a frame
+ * (#468). The engine reads it from the last frame's `transition`, so every edit that changes which
+ * frame is last hands it over: the new last frame takes `loop`, and the frame that stops being last
+ * (`demoted`, an index in `frames`) becomes a middle connector, a cut like any new one. Middle
+ * connectors stay with their frames.
+ */
+function carryLoop(frames: Frame[], loop: Transition | undefined, demoted: number | null): Frame[] {
+  const last = frames.length - 1;
+  return frames.map((f, i) => (i === last ? withConnector(f, loop) : i === demoted ? withConnector(f, undefined) : f));
+}
+
 /** A new frame after `at`: every LED off, holding as long as the frame it follows, passing to the next as a cut. */
 export function addFrame(doc: FrameDoc, at: number): { doc: FrameDoc; selected: number } | null {
   if (!canAdd(doc)) return null;
@@ -49,7 +70,10 @@ export function addFrame(doc: FrameDoc, at: number): { doc: FrameDoc; selected: 
   // still pattern plays both frames instead of only the new blank one.
   const kept = here && here.hold === 0 ? { ...here, hold: NEW_HOLD_MS } : here;
   const before = kept ? [...doc.frames.slice(0, at), kept] : doc.frames.slice(0, at + 1);
-  const frames = [...before, fresh, ...doc.frames.slice(at + 1)];
+  const added = [...before, fresh, ...doc.frames.slice(at + 1)];
+  // Added at the end: the loop connector goes to the new last frame; the old one now passes to it as a cut.
+  const atEnd = at === doc.frames.length - 1;
+  const frames = atEnd ? carryLoop(added, here?.transition, at) : added;
   return { doc: { ...doc, frames }, selected: at + 1 };
 }
 
@@ -58,14 +82,18 @@ export function duplicateFrame(doc: FrameDoc, at: number): { doc: FrameDoc; sele
   const here = doc.frames[at];
   if (!here || !canAdd(doc)) return null;
   const copy: Frame = { ...here, colors: [...here.colors] };
-  const frames = [...doc.frames.slice(0, at + 1), copy, ...doc.frames.slice(at + 1)];
+  const copied = [...doc.frames.slice(0, at + 1), copy, ...doc.frames.slice(at + 1)];
+  // Copied at the end: the copy is last and keeps the loop; the original now passes to it as a cut.
+  const frames = at === doc.frames.length - 1 ? carryLoop(copied, here.transition, at) : copied;
   return { doc: { ...doc, frames }, selected: at + 1 };
 }
 
 /** Frame `at` removed. A pattern always keeps one frame. The selection moves to the frame that took its place. */
 export function deleteFrame(doc: FrameDoc, at: number): { doc: FrameDoc; selected: number } | null {
   if (doc.frames.length <= 1 || at < 0 || at >= doc.frames.length) return null;
-  const frames = doc.frames.filter((_, i) => i !== at);
+  const left = doc.frames.filter((_, i) => i !== at);
+  // The last frame deleted: the one before it is last now and takes the loop connector.
+  const frames = at === doc.frames.length - 1 ? carryLoop(left, doc.frames[at]?.transition, null) : left;
   return { doc: { ...doc, frames }, selected: Math.min(at, frames.length - 1) };
 }
 
@@ -76,7 +104,11 @@ export function moveFrame(doc: FrameDoc, from: number, to: number): FrameDoc | n
   const frames = [...doc.frames];
   const [moved] = frames.splice(from, 1);
   frames.splice(to, 0, moved as Frame);
-  return { ...doc, frames };
+  // Into or out of the last place: the loop connector stays with the place, and the frame that left it passes on as a cut.
+  const last = n - 1;
+  if (from !== last && to !== last) return { ...doc, frames };
+  const demoted = from === last ? to : frames.indexOf(doc.frames[last] as Frame);
+  return { ...doc, frames: carryLoop(frames, doc.frames[last]?.transition, demoted) };
 }
 
 /** The frame order after `from` goes to place `to`, as the indices each place now holds (for the selection to follow). */
