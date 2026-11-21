@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-21
+
 ### Fixed
 
 - Devices: a USB light that drops off and comes back, like the HyperX QuadCast mic, lights up again instead of staying dark until canvas-rgb reconnects to OpenRGB or you rescan. (#534)
@@ -459,7 +461,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.1...v0.16.0
