@@ -333,8 +333,8 @@ struct Session {
     /// connection. Only the rescan's "did not start" answer uses it (`may_be_mid_detection`).
     quiet_read: bool,
     /// Protocol 6: how many 101 and detection 102 (see [`note_progress`]) this connection has heard. A
-    /// detection that began before the connect sends no 101 here, only its 102s below 100 %, and one that
-    /// sends no progress is not heard at all; a count that grew says a detection is running.
+    /// detection that began before the connect sends no 101 here: its 102s count from the first one below
+    /// 100 % on, and one that sends no progress is not heard at all; a count that grew says a detection is running.
     detection_signals: u64,
     /// Protocol 6: how many ACKs of packet 140 this session has seen. The server sends the ACK after
     /// the packet is handled, on the same thread and socket as the 101 it caused (`NetworkServer.cpp:1725-1730`,
@@ -2759,7 +2759,7 @@ mod progress_tests {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
-    /// A link on session 1 with its reader on one end of a socket, and the other end.
+    /// A link on session 1, the task reading the client end of a socket for it, and the server end.
     async fn reader() -> (Arc<Link>, tokio::task::JoinHandle<()>, TcpStream) {
         let adapter = OpenRgbAdapter::new("127.0.0.1", 1);
         let link = Arc::clone(&adapter.link);
@@ -2801,9 +2801,15 @@ mod progress_tests {
     async fn a_102_at_100_or_too_short_is_no_detection_and_one_at_99_is() {
         let (link, _reader, mut server) = reader().await;
 
-        // A hotplug's 102 at 100 %, then a 102 whose payload is too short to hold a percent.
+        // A hotplug's 102 at 100 %, then two 102s too short to hold a percent (4 and 7 bytes; 7 would
+        // eat a byte of the next header if it were read as 8).
+        let short = |len: usize| {
+            let payload = vec![99_u8; len];
+            encode_packet(0, DETECTION_PROGRESS_CHANGED, &payload).expect("packet")
+        };
         let mut bytes = progress(100);
-        bytes.extend_from_slice(&encode_packet(0, DETECTION_PROGRESS_CHANGED, &[1, 2, 3, 4]).expect("packet"));
+        bytes.extend_from_slice(&short(4));
+        bytes.extend_from_slice(&short(7));
         send_then_sync(&link, &mut server, &bytes).await;
         {
             let session = guard(&link.session);
@@ -2812,12 +2818,17 @@ mod progress_tests {
             assert_eq!(session.detection_signals, 0);
         }
 
-        // 99 % is a detection that began before this connection.
-        send_then_sync(&link, &mut server, &progress(99)).await;
+        // 99 % in the shortest payload that holds a percent (8 bytes: the size, then the percent) is a
+        // detection that began before this connection, and the list is final no longer.
+        guard(&link.session).list_final = true;
+        let mut eight = 8_u32.to_le_bytes().to_vec();
+        eight.extend_from_slice(&99_u32.to_le_bytes());
+        let eight = encode_packet(0, DETECTION_PROGRESS_CHANGED, &eight).expect("packet");
+        send_then_sync(&link, &mut server, &eight).await;
         let session = guard(&link.session);
         assert!(session.detecting, "a 102 at 99 % was not taken for a running detection");
         assert_eq!(session.detections_started, 1);
         assert_eq!(session.detection_signals, 1);
-        assert!(!session.list_final);
+        assert!(!session.list_final, "a detection that began left the list final");
     }
 }
