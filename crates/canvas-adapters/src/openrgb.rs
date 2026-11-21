@@ -312,8 +312,8 @@ struct Session {
     settle_failed_at: Option<u64>,
     /// A settle read is running, so no second one starts.
     settling: bool,
-    /// Protocol 6: a detection is running (101 seen, 103 not yet; or 102 progress, which says one is
-    /// running that began before this connection).
+    /// Protocol 6: a detection is running (101 seen, 103 not yet; or a 102 below 100 %, which says one is
+    /// running that began before this connection; a 102 at 100 % is a hotplug, see [`note_progress`]).
     detecting: bool,
     /// Protocol 6: how many detections this session has seen start, and how many end.
     detections_started: u64,
@@ -1829,6 +1829,7 @@ async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
             Reply,
             Drop,
             Ack,
+            Progress,
         }
         let next = {
             let mut session = guard(&link.session);
@@ -1855,17 +1856,8 @@ async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
                         session.list_final = false;
                         Next::Drop
                     }
-                    DETECTION_PROGRESS_CHANGED => {
-                        session.detection_signals += 1;
-                        // Progress says a detection is running. One that began before this connection
-                        // never sent this client a 101.
-                        if !session.detecting {
-                            session.detecting = true;
-                            session.detections_started += 1;
-                            session.list_final = false;
-                        }
-                        Next::Drop
-                    }
+                    // What it says depends on its percent, read below (#534).
+                    DETECTION_PROGRESS_CHANGED => Next::Progress,
                     DETECTION_COMPLETE => {
                         session.detecting = false;
                         session.detections_completed += 1;
@@ -1909,6 +1901,13 @@ async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
                 }
                 Err(error) => Err(error),
             },
+            Next::Progress => match read_progress_percent(&mut read, size, &mut scratch).await {
+                Ok(percent) => {
+                    note_progress(&link, epoch, percent);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            },
             Next::Drop => discard(&mut read, size, &mut scratch).await,
         };
         if read_on.is_err() {
@@ -1932,6 +1931,44 @@ async fn read_ack(read: &mut OwnedReadHalf, size: usize, scratch: &mut [u8]) -> 
     let mut payload = [0_u8; 8];
     read.read_exact(&mut payload).await?;
     Ok(Some(u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]])))
+}
+
+/// Reads a progress report's (102) payload and returns its percent: a `u32` size, then the percent
+/// (`NetworkServer.cpp:3963-3999`). A payload too short to hold one is dropped and says nothing.
+async fn read_progress_percent(read: &mut OwnedReadHalf, size: usize, scratch: &mut [u8]) -> std::io::Result<Option<u32>> {
+    if size < 8 {
+        discard(read, size, scratch).await?;
+        return Ok(None);
+    }
+    let mut head = [0_u8; 8];
+    read.read_exact(&mut head).await?;
+    discard(read, size - 8, scratch).await?;
+    Ok(Some(u32::from_le_bytes([head[4], head[5], head[6], head[7]])))
+}
+
+/// A progress report (102) at `percent` arrived (#534).
+///
+/// Inside a detection this connection saw start (101) it is one more step of it. Outside one, its percent
+/// says what it is: release_1.1 holds the percent at 100 whenever no detection runs (`DetectionManager.cpp:159`,
+/// `:532`, `:861`) and sets it to 0 when one begins (`:717`). A 102 below 100 is a detection that began before
+/// this connection and never sent it a 101. A 102 at 100 is the hotplug callback running the HID detectors on
+/// a device that just arrived (`:2061-2078`, `:1461`): no 103 will follow it, so taking it for a detection
+/// held the list for good and a replugged device's frames went to its dead id.
+fn note_progress(link: &Link, epoch: u64, percent: Option<u32>) {
+    let mut session = guard(&link.session);
+    if session.epoch != epoch {
+        return;
+    }
+    if session.detecting {
+        session.detection_signals += 1;
+        return;
+    }
+    if percent.is_some_and(|percent| percent < 100) {
+        session.detection_signals += 1;
+        session.detecting = true;
+        session.detections_started += 1;
+        session.list_final = false;
+    }
 }
 
 /// An ACK of packet `acked` for controller `device` arrived.
