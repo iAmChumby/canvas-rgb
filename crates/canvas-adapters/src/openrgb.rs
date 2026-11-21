@@ -332,9 +332,10 @@ struct Session {
     /// Protocol 6: a read of the list found no detection running and no list change heard on this
     /// connection. Only the rescan's "did not start" answer uses it (`may_be_mid_detection`).
     quiet_read: bool,
-    /// Protocol 6: how many 101 and detection 102 (see [`note_progress`]) this connection has heard. A
-    /// detection that began before the connect sends no 101 here: its 102s count from the first one below
-    /// 100 % on, and one that sends no progress is not heard at all; a count that grew says a detection is running.
+    /// Protocol 6: how many 101 and detection 102 (see [`note_progress`]) this connection has heard.
+    /// A detection that began before the connect sends no 101 here: its 102s count from the first one
+    /// below 100 % on, and one that sends no progress is not heard at all. A count that grew says a
+    /// detection is running.
     detection_signals: u64,
     /// Protocol 6: how many ACKs of packet 140 this session has seen. The server sends the ACK after
     /// the packet is handled, on the same thread and socket as the 101 it caused (`NetworkServer.cpp:1725-1730`,
@@ -2540,6 +2541,22 @@ mod rescan_signal_tests {
         assert!(!changes.has_changed().expect("alive"), "an overtaken reader counted a list change");
         assert!(!guard(&link.session).unsettled, "an overtaken reader made the new session's list unsettled");
     }
+
+    /// An overtaken reader takes no 102 for a detection of the new session either (#537).
+    #[tokio::test]
+    async fn an_overtaken_reader_takes_no_102_for_a_detection() {
+        let (link, reader, mut server) = reader_on(2, 1).await;
+        let mut payload = 8_u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&50_u32.to_le_bytes());
+        server.write_all(&encode_packet(0, DETECTION_PROGRESS_CHANGED, &payload).expect("packet")).await.expect("write");
+        tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("the overtaken reader ends")
+            .expect("its task ends");
+        let session = guard(&link.session);
+        assert!(!session.detecting, "an overtaken reader marked the new session as detecting");
+        assert_eq!(session.detection_signals, 0);
+    }
 }
 
 // ---- the link-break rule: a request or a write that is given up on
@@ -2807,6 +2824,8 @@ mod progress_tests {
             let payload = vec![99_u8; len];
             encode_packet(0, DETECTION_PROGRESS_CHANGED, &payload).expect("packet")
         };
+        // The list is final going in, so a 102 that wrongly ends that shows (#537).
+        guard(&link.session).list_final = true;
         let mut bytes = progress(100);
         bytes.extend_from_slice(&short(4));
         bytes.extend_from_slice(&short(7));
@@ -2816,11 +2835,11 @@ mod progress_tests {
             assert!(!session.detecting, "a 102 at 100 % or a short one was taken for a detection");
             assert_eq!(session.detections_started, 0);
             assert_eq!(session.detection_signals, 0);
+            assert!(session.list_final, "a 102 at 100 % or a short one ended a final list");
         }
 
         // 99 % in the shortest payload that holds a percent (8 bytes: the size, then the percent) is a
-        // detection that began before this connection, and the list is final no longer.
-        guard(&link.session).list_final = true;
+        // detection that began before this connection, and the list (still final from above) is final no longer.
         let mut eight = 8_u32.to_le_bytes().to_vec();
         eight.extend_from_slice(&99_u32.to_le_bytes());
         let eight = encode_packet(0, DETECTION_PROGRESS_CHANGED, &eight).expect("packet");
