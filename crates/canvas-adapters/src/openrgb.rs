@@ -332,10 +332,10 @@ struct Session {
     /// Protocol 6: a read of the list found no detection running and no list change heard on this
     /// connection. Only the rescan's "did not start" answer uses it (`may_be_mid_detection`).
     quiet_read: bool,
-    /// Protocol 6: how many 101 and detection 102 (see [`note_progress`]) this connection has heard.
-    /// A detection that began before the connect sends no 101 here: its 102s count from the first one
-    /// below 100 % on, and one that sends no progress is not heard at all. A count that grew says a
-    /// detection is running.
+    /// Protocol 6: how many 101 and detection 102 (see [`note_progress`]) this connection
+    /// has heard. A detection that began before the connect sends no 101 here: its 102s
+    /// count from the first one below 100 % on, and one that sends no progress is not heard
+    /// at all. A count that grew says a detection is running.
     detection_signals: u64,
     /// Protocol 6: how many ACKs of packet 140 this session has seen. The server sends the ACK after
     /// the packet is handled, on the same thread and socket as the 101 it caused (`NetworkServer.cpp:1725-1730`,
@@ -2839,7 +2839,8 @@ mod progress_tests {
         }
 
         // 99 % in the shortest payload that holds a percent (8 bytes: the size, then the percent) is a
-        // detection that began before this connection, and the list (still final from above) is final no longer.
+        // detection that began before this connection. The list is still final from above, so the clear
+        // that a detection makes can be seen.
         let mut eight = 8_u32.to_le_bytes().to_vec();
         eight.extend_from_slice(&99_u32.to_le_bytes());
         let eight = encode_packet(0, DETECTION_PROGRESS_CHANGED, &eight).expect("packet");
@@ -2849,5 +2850,19 @@ mod progress_tests {
         assert_eq!(session.detections_started, 1);
         assert_eq!(session.detection_signals, 1);
         assert!(!session.list_final, "a detection that began left the list final");
+    }
+
+    /// `note_progress`'s own epoch check: a 102 whose payload was read for a session that a reconnect has
+    /// since replaced (the reader decided on the header, then the epoch moved) changes nothing (#537).
+    /// The reader's header-level check (`rescan_signal_tests`) cannot reach this one.
+    #[test]
+    fn a_102_read_for_a_replaced_session_changes_nothing() {
+        let adapter = OpenRgbAdapter::new("127.0.0.1", 1);
+        guard(&adapter.link.session).epoch = 2;
+        note_progress(&adapter.link, 1, Some(50));
+        let session = guard(&adapter.link.session);
+        assert!(!session.detecting, "a 102 for a replaced session marked the new one as detecting");
+        assert_eq!(session.detections_started, 0);
+        assert_eq!(session.detection_signals, 0);
     }
 }
