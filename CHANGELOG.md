@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Devices: a USB light that drops off and comes back, like the HyperX QuadCast mic, lights up again instead of staying dark until canvas-rgb reconnects to OpenRGB. (#534)
+
 ## [0.18.0] - 2026-11-18
 
 ### Added
