@@ -12,12 +12,16 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - Patterns: the editor's controls are tidied. Every word in the frame strip is 14 px or more, the Loop key sits beside Add and Play so it is always on screen, and the frame strip is two rows at every width. "Find LED 1" and "Reverse" are worded keys at the top of the device instead of two bare corner icons, and the notch has room above it. The device's well has the same corner as the strip, the title lines up with the other pages at 1920 px, a connector's panel labels its Cut or Fade row, and on a phone the header is two rows instead of four, the tools take two rows instead of three, the Spin speed one instead of two, and the page no longer scrolls at 390 px. (#468)
+### Fixed
+
+- Patterns: adding, copying, deleting or moving a frame no longer loses the transition you set for the loop (the last frame back to frame 1); the loop connector stays on whichever frame is last, and a frame that stops being last passes to the next as a cut. (#468)
+- Light setup: the orange-light question now asks for the whole case ("in total, adding up every fan and strip") and shows both answers as pictures (one orange light in all means a row; one on every device means a shared signal), and the "Eight 1-LED devices" warning names what it means (every device shows the same colours, one per LED) and what to do, so a header whose fans and strip share one signal is easier to answer correctly. (#470)
+
+## [0.18.1] - 2026-11-21
 
 ### Fixed
 
 - Devices: a USB light that drops off and comes back, like the HyperX QuadCast mic, lights up again instead of staying dark until canvas-rgb reconnects to OpenRGB or you rescan. (#534)
-- Patterns: adding, copying, deleting or moving a frame no longer loses the transition you set for the loop (the last frame back to frame 1); the loop connector stays on whichever frame is last, and a frame that stops being last passes to the next as a cut. (#468)
-- Light setup: the orange-light question now asks for the whole case ("in total, adding up every fan and strip") and shows both answers as pictures (one orange light in all means a row; one on every device means a shared signal), and the "Eight 1-LED devices" warning names what it means (every device shows the same colours, one per LED) and what to do, so a header whose fans and strip share one signal is easier to answer correctly. (#470)
 
 ## [0.18.0] - 2026-11-18
 
@@ -468,7 +472,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.1...v0.16.0
