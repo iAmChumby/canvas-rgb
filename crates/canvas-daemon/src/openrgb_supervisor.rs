@@ -390,7 +390,7 @@ struct Seen {
 /// 1. a list that keeps every held device applies at once, final or not (growing is always safe);
 /// 2. a list that drops a held device applies only when OpenRGB's list is final (a 103 was heard and no list
 ///    change since), when it is the answer to the owner's own rescan, or when the same list has been read
-///    for [`UNPLUG_QUIET`] with no 101 or 102 heard in that time;
+///    for [`UNPLUG_QUIET`] with no 101 or detection 102 heard in that time;
 /// 3. an empty list replaces a held one only by the first two of those, never by waiting.
 ///
 /// With nothing held, anything applies.
@@ -400,7 +400,7 @@ struct Shrinks {
 }
 
 impl Shrinks {
-    /// A new connection counts its own 101 and 102 from zero: what was seen on the last one means nothing.
+    /// A new connection counts its own 101 and detection 102 from zero: what was seen on the last one means nothing.
     fn reset(&mut self) {
         self.seen = None;
     }
