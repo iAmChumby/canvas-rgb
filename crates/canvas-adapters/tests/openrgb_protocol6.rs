@@ -484,6 +484,66 @@ async fn a_hot_plug_after_a_final_list_makes_it_not_final_and_no_103_follows() {
     assert!(!adapter.detection_end_unread(), "the hot plug left a read owed for ever");
 }
 
+/// #534: a device that drops off USB and comes back (the QuadCast mic) is registered again with a new id. On
+/// the way, release_1.1's hotplug callback sends a 102 at 100 % (`DetectionManager.cpp:2061-2078`, `:1461`)
+/// with no 101 before it and no 103 after it. That 102 is not a detection: the next read of the list must pick
+/// up the new id, so the device's frames and its readback reach it again. Before the fix the 102 set
+/// `detecting` for good, every read answered with the held list, and the mic's frames went to its dead id.
+#[tokio::test(start_paused = true)]
+async fn a_device_replugged_outside_a_detection_gets_its_frames_on_its_new_id() {
+    let server = server(vec![stick("one"), stick("mic")]).await;
+    server.rescan_timing(Duration::from_millis(100), Duration::from_millis(100));
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    adapter.rescan_shared().await.expect("a rescan");
+    assert_eq!(adapter.discover().await.expect("a read after 103").len(), 2);
+    let mic = DeviceId("openrgb:mic".into());
+
+    // Unplugged: the controller is unregistered and the list changes.
+    server.unplug_device(1);
+    server.list_changed();
+    until("the unplug's 100 arrived", || !adapter.list_is_final()).await;
+    // Plugged back in: the hotplug's 102 at 100 %, then the controller registers with a new id.
+    let signals = adapter.detection_signals();
+    server.hid_arrived();
+    server.announce(stick("mic"));
+    server.list_changed();
+
+    // The read's reply comes after the hotplug's packets on the same socket, so they were all handled first.
+    assert_eq!(adapter.discover().await.expect("the refresh after the replug").len(), 2, "the replug was read");
+    assert_eq!(adapter.detection_signals(), signals, "a hotplug's 102 at 100 % was counted as a detection");
+    let gone_before = server.frames_to_unregistered();
+    let landed_before = server.landings().len();
+    adapter.write_frame(&mic, &[RED; 8]).await.expect("a frame to the replugged mic");
+    until("the mic's frame landed", || server.landings().len() > landed_before).await;
+    assert_eq!(server.landings().last().expect("landing").serial, "mic");
+    assert_eq!(server.frames_to_unregistered(), gone_before, "a frame went to the mic's dead id");
+    assert_eq!(adapter.read_back(&mic).await.expect("the replugged mic reads back"), vec![RED; 8]);
+}
+
+/// #534, the other side of the rule: a connection that joined a running detection never saw its 101, and the
+/// detection's 102s say below 100 % (`DetectionManager.cpp:717` sets 0 when one begins). Those still mark a
+/// detection, so the list read first is held while the rest of the controllers register, and the whole list
+/// applies after the 103.
+#[tokio::test(start_paused = true)]
+async fn a_joined_detection_whose_progress_is_below_100_still_holds_the_list_until_its_103() {
+    let server = server(vec![stick("one"), stick("two"), stick("three")]).await;
+    server.rescan_timing(Duration::from_millis(100), Duration::from_secs(3));
+    server.start_detection();
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    until("the first registration's 102 (33 %) arrived", || adapter.detection_signals() >= 1).await;
+
+    assert_eq!(adapter.discover().await.expect("a read mid-detection").len(), 1, "the read is OpenRGB's part list");
+    assert!(!adapter.list_is_final(), "a part list from a joined detection was called final");
+    until("the second registration's 102 (66 %) arrived", || adapter.detection_signals() >= 2).await;
+    assert_eq!(adapter.discover().await.expect("a read while the detection runs").len(), 1, "the list was not held");
+
+    until("the detection's 103 arrived", || adapter.detection_end_unread()).await;
+    assert_eq!(adapter.discover().await.expect("a read after 103").len(), 3, "the list after 103 is whole");
+    assert!(adapter.list_is_final(), "the list read after 103 was not final");
+}
+
 /// Review 6, gap 2: a client that joined mid-detection never saw the 101, so its packet 140 is dropped by
 /// the server (`DetectionManager.cpp:1753-1756`) and answered by an ACK alone. A detection IS running: the
 /// call waits for its 103 and then succeeds, as it does for a client that saw the 101.

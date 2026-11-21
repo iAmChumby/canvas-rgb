@@ -580,6 +580,20 @@ impl FakeOpenRgbServer {
         self.changes.send_modify(|n| *n += 1);
     }
 
+    /// A HID device arrived, outside any detection: release_1.1's hotplug callback runs the HID
+    /// detectors on it (`DetectionManager.cpp:2061-2078`), and each run sends every protocol 6 client a
+    /// progress report (102, `:1461`, `:1540`, `:1577`; this sends one, which is all the adapter reads)
+    /// at the detection percent, which is 100 when no detection runs (`:159`, `:532`, `:861`;
+    /// `NetworkServer.cpp:884-894`). No 101 comes before it and no 103 after it. Every HID arrival
+    /// sends it, an RGB device or not; pair it with [`announce`](Self::announce) and
+    /// [`list_changed`](Self::list_changed) for one that registers a controller (#534).
+    pub fn hid_arrived(&self) {
+        guard(&self.state).broadcast(|version| {
+            if version >= PROTOCOL_WITH_EVENTS { detection_progress(100) } else { Vec::new() }
+        });
+        self.kick.send_modify(|n| *n += 1);
+    }
+
     /// Every frame that reached a controller, in order, with the device that received it.
     pub fn landings(&self) -> Vec<Landing> {
         guard(&self.state).landings.clone()
