@@ -355,7 +355,8 @@ pub const UNPLUG_QUIET: Duration = Duration::from_secs(30);
 struct ListView {
     /// A read after a 103 found the list, and no list change was heard since (`OpenRgbAdapter::list_is_final`).
     final_list: bool,
-    /// The 101 and 102 heard on this connection (`OpenRgbAdapter::detection_signals`).
+    /// The 101 and detection 102 heard on this connection (`OpenRgbAdapter::detection_signals`; a hotplug's
+    /// 102 at 100 % is not counted, so an unrelated USB plug does not restart the quiet period, #534).
     signals: u64,
 }
 

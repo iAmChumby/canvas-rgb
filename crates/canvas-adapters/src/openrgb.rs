@@ -332,7 +332,7 @@ struct Session {
     /// Protocol 6: a read of the list found no detection running and no list change heard on this
     /// connection. Only the rescan's "did not start" answer uses it (`may_be_mid_detection`).
     quiet_read: bool,
-    /// Protocol 6: how many 101 and 102 this connection has heard. Neither is heard of a detection that
+    /// Protocol 6: how many 101 and detection 102 (see [`note_progress`]) this connection has heard. Neither is heard of a detection that
     /// began before the connect and sends no progress; a count that grew says a detection is running.
     detection_signals: u64,
     /// Protocol 6: how many ACKs of packet 140 this session has seen. The server sends the ACK after
@@ -729,8 +729,8 @@ impl OpenRgbAdapter {
         session.end_unread && !session.detecting
     }
 
-    /// Protocol 6 and later: how many detection starts (101) and progress reports (102) this connection has
-    /// heard. A count that did not move between two reads says no detection began or progressed between them.
+    /// Protocol 6 and later: how many detection starts (101) and detection progress reports (102 inside a
+    /// detection, or below 100 %; a hotplug's 102 at 100 % is not one, #534) this connection has heard. A count that did not move between two reads says no detection began or progressed between them.
     pub fn detection_signals(&self) -> u64 {
         guard(&self.link.session).detection_signals
     }
@@ -1952,8 +1952,9 @@ async fn read_progress_percent(read: &mut OwnedReadHalf, size: usize, scratch: &
 /// says what it is: release_1.1 holds the percent at 100 whenever no detection runs (`DetectionManager.cpp:159`,
 /// `:532`, `:861`) and sets it to 0 when one begins (`:717`). A 102 below 100 is a detection that began before
 /// this connection and never sent it a 101. A 102 at 100 is the hotplug callback running the HID detectors on
-/// a device that just arrived (`:2061-2078`, `:1461`): no 103 will follow it, so taking it for a detection
-/// held the list for good and a replugged device's frames went to its dead id.
+/// a device that just arrived, with no detection running (`:2061-2078`, `:1461`, `:1540`, `:1577`): no 103
+/// follows it, so taking it for a detection held the list for good and a replugged device's frames went to
+/// its dead id. (A detection's own last 102 is at 100 too, `:861-862`, but its 103 follows at once, `:867`.)
 fn note_progress(link: &Link, epoch: u64, percent: Option<u32>) {
     let mut session = guard(&link.session);
     if session.epoch != epoch {
