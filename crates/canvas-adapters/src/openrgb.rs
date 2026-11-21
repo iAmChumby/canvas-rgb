@@ -332,8 +332,9 @@ struct Session {
     /// Protocol 6: a read of the list found no detection running and no list change heard on this
     /// connection. Only the rescan's "did not start" answer uses it (`may_be_mid_detection`).
     quiet_read: bool,
-    /// Protocol 6: how many 101 and detection 102 (see [`note_progress`]) this connection has heard. Neither is heard of a detection that
-    /// began before the connect and sends no progress; a count that grew says a detection is running.
+    /// Protocol 6: how many 101 and detection 102 (see [`note_progress`]) this connection has heard. A
+    /// detection that began before the connect sends no 101 here, only its 102s below 100 %, and one that
+    /// sends no progress is not heard at all; a count that grew says a detection is running.
     detection_signals: u64,
     /// Protocol 6: how many ACKs of packet 140 this session has seen. The server sends the ACK after
     /// the packet is handled, on the same thread and socket as the 101 it caused (`NetworkServer.cpp:1725-1730`,
@@ -730,7 +731,8 @@ impl OpenRgbAdapter {
     }
 
     /// Protocol 6 and later: how many detection starts (101) and detection progress reports (102 inside a
-    /// detection, or below 100 %; a hotplug's 102 at 100 % is not one, #534) this connection has heard. A count that did not move between two reads says no detection began or progressed between them.
+    /// detection, or below 100 %; a hotplug's 102 at 100 % is not one, #534) this connection has heard. A
+    /// count that did not move between two reads says no detection began or progressed between them.
     pub fn detection_signals(&self) -> u64 {
         guard(&self.link.session).detection_signals
     }
@@ -2746,5 +2748,76 @@ mod link_break_tests {
             !adapter.is_connected(),
             "the link stayed up after a write that was given up on"
         );
+    }
+}
+
+// ---- #534: a 102 marks a detection only below 100 %, and a short one keeps the stream framed
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    /// A link on session 1 with its reader on one end of a socket, and the other end.
+    async fn reader() -> (Arc<Link>, tokio::task::JoinHandle<()>, TcpStream) {
+        let adapter = OpenRgbAdapter::new("127.0.0.1", 1);
+        let link = Arc::clone(&adapter.link);
+        guard(&link.session).epoch = 1;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let connecting = tokio::spawn(TcpStream::connect(("127.0.0.1", port)));
+        let (server, _) = listener.accept().await.expect("accept");
+        let (read, _write) = connecting.await.expect("task").expect("connect").into_split();
+        let reader = tokio::spawn(read_loop(read, Arc::clone(&link), 1));
+        (link, reader, server)
+    }
+
+    /// A 102 as release_1.1 sends it: a size that counts itself, the percent, then a text
+    /// (`NetworkServer.cpp:3963-3999`).
+    fn progress(percent: u32) -> Vec<u8> {
+        let text = b"\0";
+        let mut payload = (4 + 4 + 2 + text.len() as u32).to_le_bytes().to_vec();
+        payload.extend_from_slice(&percent.to_le_bytes());
+        payload.extend_from_slice(&(text.len() as u16).to_le_bytes());
+        payload.extend_from_slice(text);
+        encode_packet(0, DETECTION_PROGRESS_CHANGED, &payload).expect("packet")
+    }
+
+    /// Writes `bytes`, then a list change, and waits until the reader has counted that change: every
+    /// packet before it was read by then.
+    async fn send_then_sync(link: &Link, server: &mut TcpStream, bytes: &[u8]) {
+        let mut changes = link.list_changed.subscribe();
+        let _ = changes.borrow_and_update();
+        server.write_all(bytes).await.expect("write");
+        server.write_all(&encode_packet(0, DEVICE_LIST_UPDATED, &[]).expect("packet")).await.expect("write");
+        tokio::time::timeout(Duration::from_secs(5), changes.changed())
+            .await
+            .expect("the list change after the 102s was never read: the stream lost its framing")
+            .expect("the signal is alive");
+    }
+
+    #[tokio::test]
+    async fn a_102_at_100_or_too_short_is_no_detection_and_one_at_99_is() {
+        let (link, _reader, mut server) = reader().await;
+
+        // A hotplug's 102 at 100 %, then a 102 whose payload is too short to hold a percent.
+        let mut bytes = progress(100);
+        bytes.extend_from_slice(&encode_packet(0, DETECTION_PROGRESS_CHANGED, &[1, 2, 3, 4]).expect("packet"));
+        send_then_sync(&link, &mut server, &bytes).await;
+        {
+            let session = guard(&link.session);
+            assert!(!session.detecting, "a 102 at 100 % or a short one was taken for a detection");
+            assert_eq!(session.detections_started, 0);
+            assert_eq!(session.detection_signals, 0);
+        }
+
+        // 99 % is a detection that began before this connection.
+        send_then_sync(&link, &mut server, &progress(99)).await;
+        let session = guard(&link.session);
+        assert!(session.detecting, "a 102 at 99 % was not taken for a running detection");
+        assert_eq!(session.detections_started, 1);
+        assert_eq!(session.detection_signals, 1);
+        assert!(!session.list_final);
     }
 }
