@@ -1,0 +1,1853 @@
+/*
+ * The developer docs, in the AC direction: C's card home and C's hardware boards, A's three-pane
+ * reference frame for the API and the CLI, and A's reading layout for the guides. This file is the
+ * site's own layer: every colour, radius, space and motion value comes from the editor's tokens.
+ */
+
+.docs-root {
+  min-height: 100vh;
+}
+
+/* The docs' light mute reads at 4.94:1 on sunk (#d9dde4), 6.73:1 on panel (#ffffff) and
+   6.00:1 on raised (#f0f2f5). The editor keeps its own token; this override is site-only. */
+:root[data-theme="light"] .docs-root {
+  --mute: #565c67;
+}
+
+/* ---------- shared type and links ---------- */
+
+.docs-root h1,
+.docs-root h2,
+.docs-root h3,
+.docs-root h4 {
+  margin: 0;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.docs-root a {
+  color: var(--a1);
+  text-decoration: none;
+}
+
+/* The header's own link style (site.css) is the one to use: neutral ink, with the active
+   item carrying the background and the dot. The docs' accent links are for body copy. */
+.docs-root .site-nav-link {
+  color: var(--dim);
+}
+
+.docs-root .site-nav-link:hover {
+  color: var(--ink);
+}
+
+.docs-root .site-nav-link[aria-current="page"],
+.docs-root .site-nav-link[aria-current="page"]:hover {
+  color: var(--ink);
+}
+
+.docs-root a:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.docs-root :focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: var(--r-sm);
+}
+
+.docs-root .mono {
+  font-family: var(--fm);
+}
+
+.docs-root .eyebrow {
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.docs-root .led {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--led-off);
+}
+
+.docs-root .led[data-on="ok"] {
+  background: var(--ok);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok) 20%, transparent);
+}
+
+.docs-root .led[data-on="a1"],
+.docs-root .led[data-on="a2"],
+.docs-root .led[data-on="a3"],
+.docs-root .led[data-on="a4"],
+.docs-root .led[data-on="a5"] {
+  background: var(--a1);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--a1) 20%, transparent);
+}
+
+.docs-root .led[data-on="a2"] {
+  background: var(--a2);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--a2) 20%, transparent);
+}
+
+.docs-root .led[data-on="a3"] {
+  background: var(--a3);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--a3) 20%, transparent);
+}
+
+.docs-root .led[data-on="a4"] {
+  background: var(--a4);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--a4) 20%, transparent);
+}
+
+.docs-root .led[data-on="a5"] {
+  background: var(--a5);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--a5) 20%, transparent);
+}
+
+/* ---------- the header ---------- */
+
+.docs-root .site-header-inner {
+  max-width: 1500px;
+  padding: 0 20px;
+}
+
+.docs-root .site-nav-link[aria-current="page"] {
+  background: color-mix(in srgb, var(--a1) 12%, transparent);
+  color: var(--ink);
+}
+
+.docs-root .site-nav-link[aria-current="page"]::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--a1);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--a1) 22%, transparent);
+}
+
+.docs-root .site-search {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 32px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--sunk);
+  box-shadow: var(--well);
+  color: var(--mute);
+  font-size: var(--t14);
+  cursor: pointer;
+}
+
+.docs-root .site-search:hover {
+  background: var(--hover);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.docs-root .site-search-label {
+  white-space: nowrap;
+}
+
+.docs-root .site-search .kbd {
+  margin-left: var(--s4);
+}
+
+.docs-root .kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  text-align: center;
+  border: 1px solid var(--line-2);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--raised);
+  color: var(--dim);
+  font-family: var(--fm);
+  font-size: 11px;
+}
+
+/* ---------- opencode-style page actions ---------- */
+
+.docs-root .page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+/* In the right pane the two actions share the pane's width; one line of text each. */
+.docs-root .a-aside .page-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.docs-root .page-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background-color: var(--raised);
+  box-shadow: 0 2px 0 var(--skirt);
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.docs-root .page-action:hover {
+  background-color: color-mix(in oklab, var(--raised) 90%, var(--ink));
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.docs-root .page-action .swap {
+  white-space: nowrap;
+}
+
+.docs-root .a-aside .page-actions {
+  margin-bottom: var(--s5);
+}
+
+.docs-root .page-actions--phone {
+  display: none;
+}
+
+.docs-root .a-doc .page-actions--phone,
+.docs-root .ac-fx-title .page-actions--phone {
+  margin-top: var(--s5);
+}
+
+/* ---------- C's card home ---------- */
+
+.docs-root .c-wrap {
+  width: 100%;
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 0 20px var(--s8);
+}
+
+.docs-root .c-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr);
+  gap: clamp(24px, 5vw, 64px);
+  align-items: center;
+  padding: clamp(40px, 6vw, 72px) 0 var(--s8);
+}
+
+.docs-root .c-kicker {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.docs-root .c-kicker .led {
+  background: var(--a1);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--a1) 22%, transparent);
+}
+
+.docs-root .c-title {
+  max-width: 14em;
+  margin-top: var(--s4);
+  font-size: clamp(34px, 5vw, 56px);
+  line-height: 1.04;
+}
+
+.docs-root .c-lead {
+  max-width: 50ch;
+  margin-top: var(--s4);
+  color: var(--dim);
+  font-size: var(--t16);
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.docs-root .c-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin-top: var(--s6);
+}
+
+.docs-root .c-actions .btn {
+  height: 36px;
+}
+
+/* The site's link colour would otherwise win over the primary button's own ink. */
+.docs-root a.btn-primary,
+.docs-root a.btn-primary:hover {
+  color: var(--on-accent);
+}
+
+.docs-root .c-hero .page-actions {
+  margin-top: var(--s3);
+}
+
+.docs-root .agent-note {
+  max-width: 68ch;
+  margin-top: var(--s3);
+  color: var(--mute);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.docs-root .agent-note strong {
+  color: var(--dim);
+  font-weight: 650;
+}
+
+.docs-root .agent-note a {
+  color: var(--dim);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--line-2);
+}
+
+.docs-root .c-board {
+  padding: var(--s4);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  box-shadow: 0 3px 0 var(--skirt);
+}
+
+.docs-root .c-board-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--s4);
+}
+
+.docs-root .c-board-title {
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.docs-root .c-board-lights {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.docs-root .c-board-screen {
+  padding: var(--s4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  box-shadow: var(--well);
+}
+
+.docs-root .c-board-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: 5px 0;
+}
+
+.docs-root .c-board-row + .c-board-row {
+  border-top: 1px solid var(--line);
+}
+
+.docs-root .c-board-row span {
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.docs-root .c-board-row b {
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.docs-root .c-board-row b[data-tone="ok"] {
+  color: var(--ok);
+}
+
+.docs-root .c-board-row b[data-tone="a3"] {
+  color: var(--a3);
+}
+
+.docs-root .c-board-keys {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--s2);
+  margin-top: var(--s4);
+}
+
+.docs-root .c-key {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 46px;
+  padding: 6px 2px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background-color: var(--raised);
+  box-shadow: 0 2px 0 var(--skirt);
+  color: var(--dim);
+  font-family: var(--fm);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-align: center;
+  text-transform: uppercase;
+  text-decoration: none;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.docs-root .c-key:hover {
+  background-color: color-mix(in oklab, var(--raised) 90%, var(--ink));
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.docs-root .c-key[data-latched="true"] {
+  background-color: color-mix(in oklab, var(--raised) 92%, black);
+  box-shadow: 0 0 0 var(--skirt);
+  color: var(--ink);
+}
+
+.docs-root .c-key[data-latched="true"] .led {
+  background: var(--a1);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--a1) 22%, transparent);
+}
+
+.docs-root .c-section {
+  margin-top: var(--s8);
+  padding-top: var(--s6);
+  border-top: 1px solid var(--line);
+}
+
+.docs-root .c-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s4);
+  margin-bottom: var(--s4);
+}
+
+.docs-root .c-section-head h2 {
+  font-size: var(--t22);
+}
+
+.docs-root .c-section-head p {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.docs-root .c-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s4);
+}
+
+.docs-root .c-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 150px;
+  padding: var(--s4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  color: var(--ink);
+  text-decoration: none;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.docs-root .c-card:hover {
+  background: var(--raised);
+  border-color: var(--line-2);
+  color: var(--ink);
+  text-decoration: none;
+  transform: translateY(-2px);
+}
+
+.docs-root .c-card-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  color: var(--a1);
+}
+
+.docs-root .c-card-icon[data-c="a2"] { color: var(--a2); }
+.docs-root .c-card-icon[data-c="a3"] { color: var(--a3); }
+.docs-root .c-card-icon[data-c="a5"] { color: var(--a5); }
+.docs-root .c-card-icon[data-c="warn"] { color: var(--warn); }
+
+.docs-root .c-card b {
+  display: block;
+  margin-top: var(--s3);
+  font-size: var(--t15);
+  font-weight: 650;
+}
+
+.docs-root .c-card small {
+  display: block;
+  margin-top: var(--s2);
+  color: var(--mute);
+  font-size: 13px;
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+.docs-root .c-card > svg:last-child {
+  margin-top: auto;
+  align-self: flex-end;
+  color: var(--mute);
+}
+
+.docs-root .c-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(260px, 0.7fr);
+  gap: var(--s4);
+  align-items: start;
+}
+
+.docs-root .c-pane {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.docs-root .c-pane-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.docs-root .c-pane-head .hair {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.docs-root .c-pane-body {
+  padding: var(--s4);
+}
+
+.docs-root .c-pane-body > p {
+  margin-top: var(--s4);
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.6;
+}
+
+/* Boxes belong to inline code only. A fenced sample's <code> lives inside <pre> and must
+   inherit the well's typography instead of being drawn as one giant (or per-line) chip. */
+.docs-root .c-pane-body :not(pre) > code,
+.docs-root .prose :not(pre) > code,
+.docs-root td :not(pre) > code,
+.docs-root li :not(pre) > code {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--sunk);
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: 0.88em;
+}
+
+.docs-root pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+}
+
+.docs-root .c-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: 7px 0;
+  font-size: var(--t14);
+}
+
+.docs-root .c-kv + .c-kv {
+  border-top: 1px solid var(--line);
+}
+
+.docs-root .c-kv span {
+  color: var(--mute);
+}
+
+.docs-root .c-kv b {
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: right;
+}
+
+/* ---------- A's three-pane frame ---------- */
+
+.docs-root .docs-shell {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr) 258px;
+  width: 100%;
+  max-width: 1500px;
+  margin: 0 auto;
+  align-items: start;
+}
+
+.docs-root .a-tree {
+  position: sticky;
+  top: 59px;
+  height: calc(100vh - 59px);
+  overflow-y: auto;
+  padding: var(--s5) var(--s3) var(--s8) var(--s5);
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+}
+
+.docs-root .a-tree-summary {
+  display: none;
+}
+
+.docs-root .a-tree-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--s3);
+  padding-right: var(--s2);
+}
+
+.docs-root .a-tree-filter {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 32px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--sunk);
+  box-shadow: var(--well);
+  color: var(--mute);
+}
+
+.docs-root .a-tree-filter input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t14);
+}
+
+.docs-root .a-tree-filter input::placeholder {
+  color: var(--mute);
+}
+
+.docs-root .a-tree-filter .kbd {
+  margin-left: auto;
+}
+
+.docs-root .a-tree-group {
+  margin-top: var(--s5);
+  scroll-margin-top: 72px;
+}
+
+.docs-root .a-tree-group-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 0 var(--s2) var(--s2);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.docs-root .a-tree-group-title::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.docs-root .a-tree-list {
+  position: relative;
+  margin: 0;
+  padding: 0 0 0 10px;
+  list-style: none;
+}
+
+.docs-root .a-tree-list::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  background: var(--line-2);
+}
+
+.docs-root .a-tree-link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 28px;
+  padding: 4px var(--s2);
+  border-radius: var(--r-sm);
+  color: var(--dim);
+  font-size: 13px;
+  text-decoration: none;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+/* Route paths are unbroken tokens of punctuation. DocsTree inserts a <wbr> after every
+   slash, so the browser can wrap at a path boundary instead of clipping at the gutter. */
+.docs-root .a-tree-link > span:last-child {
+  min-width: 0;
+  overflow-wrap: normal;
+  word-break: normal;
+  white-space: normal;
+}
+
+.docs-root .a-tree-link::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  margin-top: -2px;
+  border-radius: 50%;
+  background: var(--sunk);
+  box-shadow: 0 0 0 1px var(--line-2);
+}
+
+.docs-root .a-tree-link:hover {
+  background: var(--hover);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.docs-root .a-tree-link[aria-current="page"] {
+  background: color-mix(in srgb, var(--a1) 13%, transparent);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.docs-root .a-tree-link[aria-current="page"]::before {
+  background: var(--a1);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--a1) 25%, transparent);
+}
+
+.docs-root .a-method-mini,
+.docs-root .a-cmd-chip {
+  min-width: 40px;
+  font-family: var(--fm);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--mute);
+}
+
+.docs-root .a-method-mini[data-m="GET"] { color: var(--a1); }
+.docs-root .a-method-mini[data-m="POST"] { color: var(--ok); }
+.docs-root .a-method-mini[data-m="PUT"] { color: var(--a3); }
+.docs-root .a-method-mini[data-m="PATCH"] { color: var(--a2); }
+.docs-root .a-method-mini[data-m="DELETE"] { color: var(--a4); }
+.docs-root .a-cmd-chip { color: var(--a5); }
+
+.docs-root .a-tree-note {
+  margin-top: var(--s6);
+  padding: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--mute);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.docs-root .a-tree-note strong {
+  color: var(--dim);
+  font-weight: 600;
+}
+
+.docs-root .ac-areas {
+  margin-top: var(--s5);
+  padding-bottom: var(--s2);
+}
+
+.docs-root .ac-area-keys {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 0;
+}
+
+.docs-root .ac-area-keys .c-key {
+  min-height: 34px;
+  padding: 4px 1px;
+  gap: 2px;
+  font-size: 9px;
+  letter-spacing: 0.02em;
+}
+
+/* ---------- the reading column ---------- */
+
+.docs-root .a-doc {
+  min-width: 0;
+  padding: var(--s8) clamp(20px, 3.4vw, 44px) var(--s10, 64px);
+}
+
+.docs-root .a-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  margin-bottom: var(--s5);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 12px;
+}
+
+.docs-root .a-breadcrumb .sep {
+  color: var(--line-2);
+}
+
+.docs-root .a-breadcrumb strong {
+  color: var(--dim);
+  font-weight: 500;
+}
+
+.docs-root .a-route {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding-bottom: var(--s5);
+  border-bottom: 1px solid var(--line);
+}
+
+.docs-root .a-path {
+  font-family: var(--fm);
+  font-size: clamp(15px, 1.9vw, 19px);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  /* ReferencePage inserts <wbr> after each slash. A segment stays whole: it may be a file name
+     or a flag, and neither may break in the middle of a word. */
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.docs-root .a-route-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-left: auto;
+}
+
+.docs-root .a-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--dim);
+  font-family: var(--fm);
+  font-size: 11px;
+}
+
+.docs-root .method {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 52px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--mc) 45%, transparent);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--mc) 12%, transparent);
+  color: var(--mc);
+  font-family: var(--fm);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.docs-root .method[data-m="GET"] { --mc: var(--a1); }
+.docs-root .method[data-m="POST"] { --mc: var(--ok); }
+.docs-root .method[data-m="PUT"] { --mc: var(--a3); }
+.docs-root .method[data-m="PATCH"] { --mc: var(--a2); }
+.docs-root .method[data-m="DELETE"] { --mc: var(--a4); }
+.docs-root .method[data-m="WS"] { --mc: var(--a5); }
+.docs-root .method[data-m="REST"] { --mc: var(--a1); }
+.docs-root .method[data-m="CLI"] { --mc: var(--a5); }
+
+.docs-root .a-h1 {
+  margin-top: var(--s5);
+  font-size: clamp(26px, 3vw, 34px);
+  line-height: 1.15;
+  /* NoBreakText wraps a command name in a nowrap span. A page title still breaks at spaces;
+     word-break: break-word split `dump-frames` into `dump-` and `frames`. */
+  overflow-wrap: normal;
+}
+
+.docs-root .a-lead {
+  max-width: 72ch;
+  margin-top: var(--s3);
+  margin-bottom: var(--s4);
+  color: var(--dim);
+  font-size: var(--t16);
+  line-height: 1.55;
+  text-wrap: pretty;
+  overflow-wrap: normal;
+}
+
+/* Flags, ids and file names are one token: `llms-full.txt` and `--png` never split at a hyphen.
+   Prose still wraps at spaces; the code well wraps long lines after a slash or a question mark. */
+.docs-root p code,
+.docs-root li code,
+.docs-root .a-lead code {
+  white-space: nowrap;
+}
+
+/* A long inline code span in a table cell wraps at spaces, never inside a token. InlineText
+   marks each token with <wbr> only at a path slash or a PascalCase boundary, and the token
+   columns keep their own width, so a meaning cannot squeeze a token into a mid-word break. */
+.docs-root td :not(pre) > code {
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+/* Flags and their values are one token each. width:1% makes each column as wide as its longest
+   token; only the meaning column takes the remaining width and wraps. */
+.docs-root .a-flags-table {
+  table-layout: auto;
+}
+
+.docs-root .a-flags-table th:first-child,
+.docs-root .a-flags-table td:first-child,
+.docs-root .a-flags-table th:nth-child(2),
+.docs-root .a-flags-table td.a-flag-value {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* NoBreakText uses this for a flag with its argument (`[--width <n>]`), a hyphenated command
+   name and every other token that may not break in the middle. */
+.docs-root .token-nowrap {
+  white-space: nowrap;
+}
+
+.docs-root .a-section {
+  margin-top: var(--s8);
+  scroll-margin-top: 72px;
+}
+
+.docs-root .a-section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-bottom: var(--s4);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.docs-root .a-section-head .hair {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.docs-root .a-section-head .seq {
+  color: var(--a1);
+}
+
+.docs-root .docs-method-block + .docs-method-block {
+  margin-top: var(--s6);
+  padding-top: var(--s5);
+  border-top: 1px solid var(--line);
+}
+
+.docs-root .docs-method-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+.docs-root .docs-example + .docs-example {
+  margin-top: var(--s5);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--line);
+}
+
+.docs-root .docs-example .prose {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+}
+
+.docs-root .docs-note {
+  margin-top: var(--s3);
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.docs-root .docs-area {
+  margin-top: var(--s5);
+  scroll-margin-top: 72px;
+}
+
+.docs-root .docs-area h3 {
+  margin-bottom: var(--s2);
+  font-family: var(--fm);
+  font-size: var(--t15);
+  font-weight: 600;
+}
+
+.docs-root .docs-params {
+  margin-top: var(--s4);
+}
+
+.docs-root .docs-params .a-shape-title {
+  margin-bottom: var(--s2);
+}
+
+.docs-root .docs-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* ---------- tables, shapes and code ---------- */
+
+.docs-root .a-param-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t14);
+}
+
+.docs-root .a-param-table th {
+  padding: 0 var(--s3) var(--s2) 0;
+  text-align: left;
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.docs-root .a-param-table td {
+  padding: var(--s3) var(--s3) var(--s3) 0;
+  vertical-align: top;
+  border-top: 1px solid var(--line);
+  color: var(--dim);
+  /* Type names and flags carry their own <wbr> break opportunities in BreakableTypes; an
+     anywhere fallback would break them in the middle of a word. */
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.docs-root .a-param-table td:first-child {
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: 13px;
+}
+
+.docs-root .a-param-table td.doc-type {
+  color: var(--a2);
+  font-family: var(--fm);
+  font-size: 12px;
+}
+
+.docs-root .field-optional {
+  margin-left: var(--s2);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Field and parameter names keep their own column, so long meanings cannot squeeze a name
+   into a mid-word break. The meaning column keeps the rest of the width at every size. */
+.docs-root .docs-fields .a-param-table,
+.docs-root .docs-params .a-param-table {
+  table-layout: fixed;
+}
+
+.docs-root .docs-fields .a-param-table th:first-child,
+.docs-root .docs-fields .a-param-table td:first-child,
+.docs-root .docs-params .a-param-table th:first-child,
+.docs-root .docs-params .a-param-table td:first-child {
+  width: 30%;
+}
+
+.docs-root .docs-fields .a-param-table th:nth-child(2),
+.docs-root .docs-fields .a-param-table td.doc-type,
+.docs-root .docs-params .a-param-table th:nth-child(2),
+.docs-root .docs-params .a-param-table td.doc-type {
+  width: 20%;
+}
+
+.docs-root .a-two {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s4);
+  align-items: start;
+}
+
+.docs-root .a-shape {
+  min-width: 0;
+  padding: var(--s4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--panel);
+}
+
+.docs-root .a-shape-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.docs-root .a-shape-type {
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: var(--t16);
+  font-weight: 600;
+  /* BreakableTypes inserts <wbr> at PascalCase boundaries; no mid-word fallback. */
+  overflow-wrap: normal;
+}
+
+.docs-root .a-shape p {
+  margin-top: var(--s3);
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
+.docs-root .a-shape + .a-param-table {
+  margin-top: var(--s3);
+}
+
+.docs-root .docs-fields {
+  margin-top: var(--s5);
+}
+
+.docs-root .docs-fields .a-shape-title {
+  margin-bottom: var(--s2);
+}
+
+.docs-root .code-block {
+  min-width: 0;
+}
+
+.docs-root .code-label {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.docs-root .code-label .hair {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.docs-root .code-well {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--sunk);
+  box-shadow: var(--well);
+}
+
+.docs-root .code-well pre {
+  margin: 0;
+  padding: var(--s4);
+  overflow-x: auto;
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  /* HighlightedCode inserts a <wbr> after every visible separator and at each PascalCase word,
+     so a line wraps at a boundary and never in the middle of a token. */
+  overflow-wrap: normal;
+  word-break: normal;
+  tab-size: 2;
+}
+
+.docs-root .code-well code {
+  font: inherit;
+}
+
+.docs-root .code-well .c-com {
+  color: var(--mute);
+}
+
+.docs-root .code-well .c-str {
+  color: var(--a3);
+}
+
+.docs-root .code-well .c-fn {
+  color: var(--a1);
+}
+
+.docs-root .code-well .c-flag {
+  color: var(--a4);
+}
+
+.docs-root .code-well .syn-tag {
+  color: var(--a2);
+}
+
+.docs-root .code-well-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding: 6px var(--s4);
+  border-top: 1px solid var(--line);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.docs-root .code-well-foot .btn {
+  height: 24px;
+  font-family: var(--fm);
+  font-size: 11px;
+}
+
+.docs-root .callout {
+  display: flex;
+  gap: var(--s3);
+  margin-top: var(--s4);
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--cc, var(--a1));
+  border-radius: var(--r-sm);
+  background: var(--panel);
+}
+
+.docs-root .callout[data-kind="note"] { --cc: var(--a1); }
+.docs-root .callout[data-kind="tip"] { --cc: var(--a3); }
+.docs-root .callout[data-kind="warning"] { --cc: var(--warn); background: var(--warn-wash); }
+
+.docs-root .callout-icon {
+  color: var(--cc);
+  margin-top: 2px;
+  flex: none;
+}
+
+.docs-root .callout-label {
+  color: var(--cc);
+  font-family: var(--fm);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.docs-root .callout p {
+  margin-top: 2px;
+  color: var(--dim);
+  font-size: var(--t14);
+  text-wrap: pretty;
+}
+
+/* ---------- the right pane ---------- */
+
+.docs-root .a-aside {
+  position: sticky;
+  top: 59px;
+  height: calc(100vh - 59px);
+  overflow-y: auto;
+  padding: var(--s5) var(--s5) var(--s8) var(--s4);
+}
+
+.docs-root .a-aside-title {
+  margin-bottom: var(--s3);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.docs-root .docs-aside-title {
+  margin-top: var(--s6);
+}
+
+.docs-root .a-toc {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.docs-root .a-toc li {
+  border-left: 1px solid var(--line-2);
+}
+
+.docs-root .a-toc a {
+  display: block;
+  padding: 5px 0 5px 12px;
+  color: var(--dim);
+  font-size: 13px;
+  text-decoration: none;
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.docs-root .a-toc a:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.docs-root .a-toc a.is-active {
+  color: var(--ink);
+  border-left: 2px solid var(--a1);
+  margin-left: -1px;
+}
+
+.docs-root .a-aside .seg {
+  margin-bottom: var(--s5);
+}
+
+.docs-root .a-aside-callout {
+  margin-top: var(--s6);
+  padding: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+}
+
+.docs-root .a-aside-callout .eyebrow {
+  font-size: 10px;
+}
+
+.docs-root .a-aside-callout p {
+  margin-top: var(--s2);
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: normal;
+}
+
+/* ---------- the guides' reading layout ---------- */
+
+.docs-root .a-hero {
+  padding-bottom: var(--s6);
+  border-bottom: 1px solid var(--line);
+}
+
+.docs-root .ac-fx-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.8fr);
+  gap: var(--s6);
+  align-items: start;
+  border: 0;
+}
+
+.docs-root .ac-fx-hero .c-board {
+  grid-column: 2;
+  grid-row: 1;
+  width: 100%;
+}
+
+.docs-root .ac-fx-title {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.docs-root .ac-fx-title .a-lead {
+  margin-top: var(--s3);
+}
+
+.docs-root .prose {
+  color: var(--dim);
+  font-size: var(--t15);
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+
+.docs-root .docs-prose {
+  max-width: 76ch;
+}
+
+.docs-root .docs-prose > p + p {
+  margin-top: var(--s3);
+}
+
+.docs-root .docs-prose strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.docs-root .docs-prose ul,
+.docs-root .docs-prose ol {
+  margin: var(--s3) 0 0;
+  padding-left: 1.2em;
+}
+
+.docs-root .docs-prose li {
+  margin-top: var(--s2);
+}
+
+.docs-root .docs-prose li::marker {
+  color: var(--mute);
+}
+
+.docs-root .docs-prose > h2,
+.docs-root .docs-h2 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  margin-top: var(--s8);
+  margin-bottom: var(--s4);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  scroll-margin-top: 72px;
+}
+
+.docs-root .docs-h2 > span:nth-child(2) {
+  color: var(--dim);
+}
+
+.docs-root .docs-h2 .seq {
+  color: var(--a1);
+}
+
+.docs-root .docs-h2 .hair,
+.docs-root .docs-prose > h2 .hair {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.docs-root .docs-prose > h3 {
+  margin-top: var(--s6);
+  margin-bottom: var(--s2);
+  font-size: var(--t20);
+  scroll-margin-top: 72px;
+}
+
+.docs-root .docs-prose > .code-block {
+  margin-top: var(--s4);
+}
+
+.docs-root .docs-prose > .docs-table-wrap {
+  margin-top: var(--s4);
+}
+
+/* ---------- responsive collapse ---------- */
+
+@media (max-width: 1180px) {
+  .docs-root .docs-shell {
+    grid-template-columns: 232px minmax(0, 1fr);
+  }
+
+  .docs-root .a-aside {
+    position: static;
+    height: auto;
+    overflow: visible;
+    grid-column: 2;
+    border-top: 1px solid var(--line);
+    padding: var(--s6) var(--s5);
+  }
+
+  .docs-root .a-doc {
+    max-width: 920px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .docs-root .c-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .docs-root .c-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .docs-root .site-search-label {
+    display: none;
+  }
+
+  .docs-root .site-search .kbd {
+    margin-left: var(--s2);
+  }
+
+  .docs-root .docs-shell {
+    display: block;
+  }
+
+  .docs-root .a-tree {
+    position: static;
+    height: auto;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding: var(--s4) 20px;
+  }
+
+  .docs-root .a-tree-summary {
+    display: inline-flex;
+    min-height: 44px;
+    color: var(--ink);
+    font-family: var(--fm);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .docs-root .a-tree-summary .icon {
+    transition: transform var(--dur-fast) var(--ease);
+  }
+
+  .docs-root .a-tree-summary .icon.is-open {
+    transform: rotate(180deg);
+  }
+
+  .docs-root .a-tree-body {
+    display: none;
+    padding-top: var(--s5);
+  }
+
+  .docs-root .a-tree-body.is-open {
+    display: block;
+  }
+
+  .docs-root .a-tree-filter {
+    display: none;
+  }
+
+  .docs-root .ac-area-keys .c-key {
+    min-height: 44px;
+    font-size: 10px;
+  }
+
+  .docs-root .a-doc {
+    max-width: none;
+    padding: var(--s6) 20px var(--s8);
+  }
+
+  .docs-root .a-aside {
+    padding: var(--s6) 20px;
+  }
+
+  .docs-root .a-two {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .docs-root .ac-fx-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .docs-root .ac-fx-hero .c-board,
+  .docs-root .ac-fx-title {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .docs-root .ac-fx-hero .c-board {
+    order: -1;
+    max-width: 560px;
+  }
+}
+
+@media (max-width: 820px) {
+  .docs-root .c-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .docs-root .c-hero .c-board {
+    max-width: 560px;
+  }
+}
+
+@media (max-width: 720px) {
+  .docs-root .site-header-inner {
+    padding: var(--s2) var(--s4) 0;
+  }
+
+  .docs-root .site-nav {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 22px), transparent 100%);
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 22px), transparent 100%);
+  }
+
+  .docs-root .site-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .docs-root .site-search {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    justify-content: center;
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .docs-root .site-search .kbd {
+    display: none;
+  }
+
+  .docs-root .site-header-actions {
+    gap: 2px;
+  }
+
+  .docs-root .site-header-actions .ibtn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .docs-root .c-wrap {
+    padding: 0 var(--s4) var(--s8);
+  }
+
+  .docs-root .c-hero {
+    padding-top: var(--s6);
+  }
+
+  .docs-root .c-title {
+    font-size: clamp(30px, 9vw, 38px);
+  }
+
+  .docs-root .c-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .docs-root .c-card {
+    min-height: 0;
+  }
+
+  .docs-root .c-section-head {
+    display: block;
+  }
+
+  .docs-root .c-section-head p {
+    margin-top: 4px;
+  }
+
+  .docs-root .a-tree,
+  .docs-root .a-doc {
+    padding-left: var(--s4);
+    padding-right: var(--s4);
+  }
+
+  .docs-root .a-tree-summary {
+    margin: 0;
+  }
+
+  .docs-root .a-breadcrumb {
+    display: none;
+  }
+
+  .docs-root .a-route-badges {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .docs-root .a-doc .page-actions--phone,
+  .docs-root .ac-fx-title .page-actions--phone {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .docs-root .a-aside .page-actions {
+    display: none;
+  }
+
+  .docs-root .page-action {
+    min-height: 44px;
+  }
+
+  .docs-root .a-param-table,
+  .docs-root .a-param-table th,
+  .docs-root .a-param-table td {
+    font-size: 13px;
+    white-space: normal;
+  }
+
+  .docs-root .a-param-table {
+    table-layout: fixed;
+  }
+
+  /* The flag columns' width:1% means "as wide as the longest token" under auto layout. Fixed
+     layout would turn 1% into a four-pixel column and push every flag past its cell. */
+  .docs-root .a-flags-table {
+    table-layout: auto;
+  }
+
+  /* A single-word type label such as Arrangement has no separator to break at; a slightly
+     smaller label keeps it inside the card and the type column on a phone. */
+  .docs-root .a-shape-type {
+    font-size: 14px;
+  }
+
+  .docs-root .a-param-table td.doc-type {
+    font-size: 11px;
+  }
+
+  .docs-root .a-param-table th,
+  .docs-root .a-param-table td {
+    padding-right: var(--s2);
+    /* Type names break only where BreakableTypes puts a <wbr> (a path slash or a PascalCase
+       boundary); an anywhere fallback would split SetupPartial into SetupPar and t. */
+    overflow-wrap: normal;
+  }
+
+  /* A route index row has three independent facts. On a phone each one spans the full column:
+     method and path on one line, body below it, answer below that. No cell can enter another. */
+  .docs-root .a-stack-table,
+  .docs-root .a-stack-table tbody,
+  .docs-root .a-stack-table tr,
+  .docs-root .a-stack-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .docs-root .a-stack-table thead {
+    display: none;
+  }
+
+  .docs-root .a-stack-table td {
+    padding: 7px 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .docs-root .a-stack-table td:first-child {
+    border-top: 0;
+  }
+
+  /* A stacked row is a route; a 2px rule between routes is stronger than the 1px hair between
+     a route's own cells, so the three values never read as one long cell. */
+  .docs-root .a-stack-table tbody tr + tr {
+    border-top: 2px solid var(--line-2);
+    margin-top: var(--s2);
+  }
+
+  .docs-root .a-stack-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    color: var(--mute);
+    font-family: var(--fm);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .docs-root .code-well pre {
+    padding: var(--s3);
+    font-size: 12px;
+  }
+
+  .docs-root .a-aside {
+    padding: var(--s6) var(--s4);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .docs-root *,
+  .docs-root *::before,
+  .docs-root *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

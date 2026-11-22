@@ -86,6 +86,9 @@ jobs:
               - '.claude/skills/**'
               - 'AGENTS.md'
               - 'tools/tests/SkillDoc.Tests.ps1'
+              # The in-router example test reads the published reference; the generator writes it.
+              - 'site/content/docs/api-reference.json'
+              - 'site/scripts/gen-api-reference.mjs'
             rust-release:
               # What the release-mode tests build: canvas-daemon (the tile quality test) depends on
               # every crate except canvas-svc, so any crate change can move a frame time. The
@@ -417,6 +420,11 @@ jobs:
       - name: Tool tests
         shell: pwsh
         run: pwsh -NoProfile -File tools/tests/run-all.ps1
+
+      # The site's generated API reference must still match the spine and the daemon router.
+      # This is a plain Node test: the site has no build step here.
+      - name: API reference drift
+        run: node --test site/tests/api-reference.test.mjs
 
   changelog:
     # PRs only: a new CHANGELOG.md line must land under ## [Unreleased] (#149).

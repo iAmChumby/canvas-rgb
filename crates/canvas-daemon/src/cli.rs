@@ -267,9 +267,9 @@ pub fn split_groups(args: &[String]) -> (Vec<String>, Vec<String>) {
 pub enum ScenesCommand {
     /// List the scenes: the active one is marked.
     List,
-    /// Set the scene by name. Names match case-insensitively.
+    /// Set the scene by name or id. Names match case-insensitively.
     Set {
-        /// The scene's name.
+        /// The scene's name or id.
         name: String,
     },
     /// Make a scene from a file of groups (#377).
@@ -993,7 +993,7 @@ pub fn write_tile_gif(path: &std::path::Path, body: &[u8]) -> Result<(), String>
     for frame in frames {
         let rgb = scale_up(frame, w, h, PREVIEW_GIF_SCALE);
         let mut f = gif::Frame::from_rgb_speed(gw as u16, gh as u16, &rgb, 10);
-        // Hundredths of a second: 12 frames a second is 8.
+        // Hundredths of a second: 12.5 frames a second is 8, so 24 frames play in 1.92 seconds.
         f.delay = 8;
         encoder
             .write_frame(&f)

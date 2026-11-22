@@ -2,7 +2,7 @@
 
 An effect is one HTML file. canvas-rgb reads the file's head for the effect's name and
 its properties, runs the scripts in an embedded JavaScript engine, and draws with a
-Canvas 2D context written in Rust. No browser is involved.
+Canvas 2D context. No browser is involved.
 
 The same file format works for effects you write yourself and for SignalRGB effects you
 download. A SignalRGB effect that only uses the supported calls runs as it is.
@@ -97,9 +97,9 @@ good one, but that depends on how busy the machine is, and a tile has to be the 
 every machine. A tile frame runs to its end, held only to the time the render has left (a script
 that never returns is stopped there, and the tile is retried later). A frame that fails any other
 way fails the tile render for good, so a tile is never a quietly different picture. Whether a
-render finishes in time depends on the load; the picture does not. The library plays every tile at 12 frames a second,
-24 frames in 2 seconds, so `loop` is simulated time: a 16 s loop plays 8 times faster than the
-effect runs.
+render finishes in time depends on the load; the picture does not. The library plays every tile at 12.5 frames a second,
+so 24 frames take 1.92 seconds. `loop` is simulated time: a 16 s loop plays about 8.3 times faster
+than the effect runs.
 
 A tile is rendered with a fixed seed, so the same effect always draws the same tile: an
 effect that draws from the clock (Fire, Rain) would draw a different picture every time the
@@ -116,18 +116,19 @@ lightness, the CIE L\* of its colour, is at least 12 of 100: a near-black or dim
 not lit and a vivid blue or violet is):
 
 - at least 60 % of the pixels lit on average (unless `dark_on_purpose` is set);
-- every row and every column lit at some point over the loop (the union of the frames): at
-  least 25 % of the row's or the column's pixels lit in one of the frames;
+- every row and every column lit at some point over the loop: a pixel counts for its row and
+  column when any frame lights it, and at least 25 % of the row's or the column's pixels must be
+  lit;
 - the loop seam, the last frame against the first, differs by at most 10 % (mean absolute
   difference over all channels), unless `loop_jump_on_purpose` is set;
-- no two frames of the loop differ by more than 10 %: the tile may not cut hard inside its
-  loop;
+- the largest step between consecutive frames is at most 10 % mean absolute difference. The last
+  frame is compared with the first only by the seam bar;
 - at the top or the bottom of a frame, at most 3 rows may be completely unlit: a band of
   black across a tile is a broken tile. The rows are counted per frame, so a band that only
   some other frame of the loop lit still fails.
 
 `effects check` prints the tile's scores and fails a tile under the bar. The thresholds
-are the `BAR_*` constants in `crates/canvas-daemon/src/thumbnail.rs`.
+are the tile quality constants the daemon uses.
 
 ## The globals rule
 
@@ -202,7 +203,7 @@ This is what stops `while (true) {}` from freezing the lights.
 
 ## What the runtime supports
 
-This list comes from the runtime's own source, `crates/canvas-html`.
+This list comes from the runtime's own source.
 
 ### JavaScript
 
@@ -220,7 +221,7 @@ The host adds these:
 | `canvas.id`, `canvas.width`, `canvas.height` | The canvas' own values. |
 | `requestAnimationFrame(fn)` | Stores the callback and returns an id. |
 | `cancelAnimationFrame(id)` | Clears the pending callback. |
-| `setTimeout(fn, delay)` | Queues the callback. The delay is ignored: the queue is drained at the end of each frame. |
+| `setTimeout(fn, delay)` | Queues the callback with a due time on the effect clock. It runs on the first frame at or after that time. A missing, negative or NaN delay counts as zero. |
 | `Math.random()` | A seeded generator. A run is reproducible. |
 | `performance.now()` | The effect's clock in milliseconds. |
 | `Date.now()` | The effect's clock in milliseconds. |
@@ -303,8 +304,8 @@ nothing, and it writes a line to the log.
 - Images: `drawImage`, `createPattern`.
 - Filters: `filter`.
 - Smoothing: `imageSmoothingEnabled`.
-- Timers: `setInterval` and `clearTimeout` are not there. `setTimeout` runs at the end of
-  the next frame whatever delay it is given.
+- Timers: `setInterval` and `clearTimeout` are not there. `setTimeout` runs a callback on the
+  first frame at or after its due time on the effect clock.
 - The DOM: there is no `document.createElement`, no `addEventListener`, no
   `document.body`, no `window.innerWidth`, no `localStorage`.
 - The network: no `fetch`, no `XMLHttpRequest`, no `WebSocket`.
@@ -314,7 +315,7 @@ nothing, and it writes a line to the log.
 ## Check the effect
 
 ```
-canvas-rgb effects check my-effect.html
+canvas-rgb effects check sample-effect.html
 ```
 
 The check needs no daemon. It parses the file with the same runtime the daemon uses and
@@ -325,28 +326,28 @@ It also renders the effect's library tile (see [The library tile](#the-library-t
 prints how lit it is, whether every row and column is lit, and how much the loop jumps
 where it restarts, next to the bar.
 
-The command exits non-zero when the file does not parse, when every frame is the same or
-the picture is one flat colour (both mean the effect is probably broken), and when the
-tile is under the bar.
+The command exits non-zero when the file does not parse, when a load warning is reported,
+when every frame is the same or the picture is one flat colour (both mean the effect is
+probably broken), and when the tile is under the bar.
 
 ```
-canvas-rgb effects check my-effect.html --png frame.png
+canvas-rgb effects check sample-effect.html --png frame.png
 ```
 
 writes frame 60 as a PNG.
 
 ```
-canvas-rgb effects check my-effect.html --preview tile-preview
+canvas-rgb effects check sample-effect.html --preview tile-preview
 ```
 
-writes the tile into the folder as `my-effect.gif` (the loop at the library's 12 frames a
-second) and `my-effect-sheet.png` (all 24 frames in a grid), so the picture can be looked
+writes the tile into the folder as `sample-effect.gif` (the loop at the library's 12.5 frames a
+second) and `sample-effect-sheet.png` (all 24 frames in a grid), so the picture can be looked
 at, not only measured.
 
 In a checkout of this repository, the binary has to be built first:
 
 ```
-cargo run -p canvas-daemon --bin canvas-rgb-cli -- effects check my-effect.html
+cargo run -p canvas-daemon --bin canvas-rgb-cli -- effects check sample-effect.html
 ```
 
 ## Install the effect
@@ -356,23 +357,23 @@ Two ways.
 Copy the file into the effects folder:
 
 ```
-%APPDATA%\canvas-rgb\effects\my-effect.html
+%APPDATA%\canvas-rgb\effects\sample-effect.html
 ```
 
 The daemon picks it up within five seconds. The effect's id is `html:` plus the file's
-name without the extension, so `my-effect.html` becomes `html:my-effect`.
+name without the extension, so `sample-effect.html` becomes `html:sample-effect`.
 
 Or let the daemon write the file:
 
 ```
-canvas-rgb effects import my-effect.html
+canvas-rgb effects import sample-effect.html
 ```
 
 The import checks the file name, parses the file before it writes anything, and writes
 it atomically. A file of the same name is only overwritten with `--replace`:
 
 ```
-canvas-rgb effects import my-effect.html --replace
+canvas-rgb effects import sample-effect.html --replace
 ```
 
 A file name may hold letters, digits, spaces, `-`, `_` and `.`, and it must end in
@@ -382,7 +383,7 @@ built-in effect's id (`solid.html` is refused).
 To take an effect out again, call the API. It needs the token, like every other route:
 
 ```
-DELETE /api/v1/effects/html:my-effect
+DELETE /api/v1/effects/html:sample-effect
 ```
 
 ## Edit an effect's code in the app
@@ -553,8 +554,10 @@ The file holds every pattern:
   the device in, and `hold` in milliseconds. 0.16.0 writes one frame with `hold` 0, and plays
   it.
 - `motion` is `{ "type": "none" }` in 0.16.0.
+- A frame may carry `transition`, the way its colours pass to the next frame: `{"kind":"cut","ms":0,"easing":"linear"}` replaces them when the hold ends, and `{"kind":"fade","ms":300,"easing":"ease_in_out"}` blends them over 300 ms. An unknown transition kind reads as `cut` and an unknown easing reads as `linear`, so a file from a later version still plays.
+- `playback` is optional. Its `loop` value defaults to true: after the last frame the pattern goes back to the first. Set it to false to leave the last frame on the lights.
 - Fields this version does not know are kept as they are, in a pattern and in the file, so a
-  file a later version wrote loses nothing when this version saves it again.
+  file a later version wrote keeps every field when this version saves it again.
 
 ### The fit
 

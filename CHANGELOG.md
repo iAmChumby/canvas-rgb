@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Docs: the website has developer documentation at /docs: a getting-started guide for the local API (the token, the guards and how to check the listener before sending it), a page for each of the 66 API routes with its request, answer, fields and a tested example, a page for each CLI command with its flags and exit codes, and a guide to writing effects. Agents can read every page as Markdown, with `llms.txt` and `llms-full.txt` at the site root. `canvas-rgb scenes set --help` now says it takes a scene's name or id. (#540)
 - Devices: the 8BitDo Ultimate 2's two stick rings can join the lighting engine as one device of two rings of 12 LEDs that takes one still colour set per scene. A scene change writes that set to the pad's stored profile only while you are away from the keyboard and mouse, only when the pad's reads and writes are on, at most once in 10 seconds, 4 an hour and 24 a day, and the profile is read back and restored if it does not match. The two rings are named Left stick and Right stick and start as rings drawn from the top, clockwise; their colour and LED order were checked on the pad with `ring_s3`. `ring_probe` (a canvas-adapters example) reads the pad's stored profile, writing nothing, and `ring_s3` writes pure red, or one marker colour per LED, to the rings once and puts the saved profile back. (#376)
 ### Changed
 

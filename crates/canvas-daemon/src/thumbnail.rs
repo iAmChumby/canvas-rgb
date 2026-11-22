@@ -54,9 +54,9 @@ pub const BAR_LIT_AVG: f64 = 0.60;
 /// The quality bar: the last frame differs from the first by at most this share of full
 /// scale (mean absolute difference over every channel of every pixel).
 pub const BAR_SEAM: f64 = 0.10;
-/// The quality bar: no two frames of the loop differ by more than this share of full
-/// scale. A tile that jumps hard inside its loop reads as a broken tile: the picture
-/// blinks rather than moves.
+/// The quality bar: the largest step between two neighbouring frames, as a share of full scale
+/// (mean absolute difference over every channel of every pixel). The last frame is compared with
+/// the first only by the seam bar. A large step between neighbours reads as a broken tile.
 pub const BAR_MAX_STEP: f64 = 0.10;
 /// The quality bar: every row and every column is lit, over the whole loop, in at least this
 /// share of its pixels (a single lit pixel does not make a row lit).
