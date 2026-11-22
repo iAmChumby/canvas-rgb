@@ -92,14 +92,38 @@ try {
         Assert-Equal ([System.IO.File]::ReadAllText($p)) $first
     }
 
-    Test-Case 'token file ACL is protected and names only the current user' {
+    Test-Case 'token file ACL is protected and names only the current user and SYSTEM' {
         $p = Join-Path $dir 'cfg\api-token'
         $acl = Get-Acl -LiteralPath $p
         Assert-True $acl.AreAccessRulesProtected 'inheritance must be blocked'
         $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         $sids = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value })
-        Assert-Equal $sids.Count 1
-        Assert-Equal $sids[0] $me
+        Assert-Equal (($sids | Sort-Object) -join ',') ((@($me, 'S-1-5-18') | Sort-Object) -join ',')
+    }
+
+    Test-Case 'a token file with a wider ACL is locked down again and the token is kept (#542)' {
+        $p = Join-Path $dir 'wider\api-token'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $p) -Force | Out-Null
+        $token = 'a' * 64
+        [System.IO.File]::WriteAllText($p, $token)
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        # Make the file readable by everyone, the way a copied-in or restored file can be.
+        $acl = Get-Acl -LiteralPath $p
+        $acl.SetAccessRuleProtection($true, $false)
+        [void]$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule('Everyone', 'Read', 'Allow')))
+        [void]$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))
+        Set-Acl -LiteralPath $p -AclObject $acl
+        $before = @((Get-Acl -LiteralPath $p).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        $beforeSids = @($before | ForEach-Object { $_.IdentityReference.Value })
+        Assert-True ($beforeSids -contains 'S-1-1-0') "the file starts readable by Everyone: $($beforeSids -join ',')"
+
+        Assert-True (-not (Initialize-ApiToken -Path $p)) 'the file was not created again'
+
+        $after = Get-Acl -LiteralPath $p
+        Assert-True $after.AreAccessRulesProtected 'inheritance must be blocked'
+        $sids = @($after.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value })
+        Assert-Equal (($sids | Sort-Object) -join ',') ((@($me.Value, 'S-1-5-18') | Sort-Object) -join ',')
+        Assert-Equal ([System.IO.File]::ReadAllText($p)) $token 'the token is not changed'
     }
 
     Test-Case 'service create and recovery arguments match the brief' {

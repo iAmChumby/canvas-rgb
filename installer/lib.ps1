@@ -268,20 +268,51 @@ function New-ApiTokenString {
     return (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
 }
 
-# Creates the token file only when it is missing. The ACL (current user only, no inheritance)
-# is set on the empty file before the secret is written. Returns $true when created.
-function Initialize-ApiToken {
+# Puts the locked-down ACL on the token file: the current user and SYSTEM with full control, no
+# inheritance. It is the same DACL the daemon checks and puts back on every start (#542), so an
+# install never leaves a file the daemon then has to fix.
+#
+# Set-Acl cannot write a protected DACL over one that is already protected: it asks for
+# SeSecurityPrivilege, which a plain user does not hold (measured on Windows PowerShell 5.1).
+# The .NET setter writes the DACL on its own and can, so it is the one used here.
+function Set-TokenFileAcl {
     param([string]$Path)
-    if (Test-Path -LiteralPath $Path) { return $false }
-    $dir = Split-Path -Parent $Path
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    [System.IO.File]::WriteAllBytes($Path, [byte[]]@())
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $sec = New-Object System.Security.AccessControl.FileSecurity
     $sec.SetAccessRuleProtection($true, $false)
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')
     $sec.AddAccessRule($rule)
-    Set-Acl -LiteralPath $Path -AclObject $sec
+    $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+    $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($system, 'FullControl', 'Allow')))
+    $item = Get-Item -LiteralPath $Path
+    if ($item.PSObject.Methods.Name -contains 'SetAccessControl') {
+        $item.SetAccessControl($sec)
+    } elseif ($null -ne ([System.Management.Automation.PSTypeName]'System.IO.FileSystemAclExtensions').Type) {
+        [System.IO.FileSystemAclExtensions]::SetAccessControl($item, $sec)
+    } else {
+        Set-Acl -LiteralPath $Path -AclObject $sec
+    }
+}
+
+# Creates the token file only when it is missing. The ACL (current user and SYSTEM, no inheritance)
+# is set on the empty file before the secret is written. Returns $true when created.
+#
+# A file that is already there keeps its token, and its ACL is put back to the locked-down one
+# (#542): a token file that was copied in, restored from a backup or made by an older build must
+# not stay readable by anyone else. The token is never rewritten.
+function Initialize-ApiToken {
+    param([string]$Path)
+    if (Test-Path -LiteralPath $Path) {
+        try { Set-TokenFileAcl -Path $Path }
+        catch {
+            throw "the API token file $Path is there, but its permissions could not be locked down to the current user and SYSTEM ($($_.Exception.Message)). Fix its permissions by hand, or delete the file so a new token is made. The token was not changed."
+        }
+        return $false
+    }
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllBytes($Path, [byte[]]@())
+    Set-TokenFileAcl -Path $Path
     [System.IO.File]::WriteAllText($Path, (New-ApiTokenString), (New-Object System.Text.ASCIIEncoding))
     return $true
 }
@@ -440,7 +471,7 @@ function Get-SetupPlan {
     $L.Add("  11b. Installed apps entry $($c.UninstallKey) (name, version, publisher, icon, size; Uninstall runs $($E.InstallDir)\$($c.UninstallerDir)\uninstall.ps1); Start menu shortcut $($c.StartMenuShortcut)")
     $L.Add('')
     $L.Add('Unelevated, after the UAC child returns:')
-    $L.Add("  12. create $($E.AppDataDir)\$($c.TokenFile) only if missing (64 lowercase hex from 32 random bytes, current user only)")
+    $L.Add("  12. create $($E.AppDataDir)\$($c.TokenFile) only if missing (64 lowercase hex from 32 random bytes, current user and SYSTEM; an existing file keeps its token and gets that ACL back)")
     $L.Add("  13. HKCU Run: $($c.RunKeyTray) = ""$($E.InstallDir)\$($c.TrayExe)""; delete any stale $($c.RunKeyDaemon) value (only the service starts the daemon)")
     if ($E.SignalRgb -eq 'Y') {
         $L.Add("  14. record SignalRGB's HKCU Run value and Startup shortcut in $($E.AppDataDir)\$($c.RestoreFile), then remove them")

@@ -40,7 +40,7 @@ The editor drives the lights through this API, and so do the CLI and the tray. T
 
 The daemon creates a 256-bit token on first start. It stores 64 lowercase hex characters in a file named `api-token` under the config folder, at `%APPDATA%\canvas-rgb\api-token`. The file is readable only by the calling user and SYSTEM. A client reads that file and sends the value as `Authorization: Bearer <token>`.
 
-That restriction is applied when the daemon creates the file. An `api-token` file that already exists is used as it is. Check its permissions if the file was placed there by another process.
+The daemon checks the file's permissions on every start, not only when it first creates it. A file that was copied in, restored from a backup or made by an older build is locked down to the calling user and SYSTEM before the token is handed out, and the token value is never changed. If the permissions cannot be put right, the daemon refuses to start and names the file in its log.
 
 The CLI and the daemon honour `CANVAS_RGB_HOME`. The editor uses the default config folder. With the override set, the CLI and the daemon read the token from the folder it names, and a client that uses the override should look in the same folder.
 
