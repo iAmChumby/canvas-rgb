@@ -278,6 +278,8 @@ pub mod error_codes {
     pub const SERVICE_UNAVAILABLE: &str = "service_unavailable";
     /// 409, e.g. deleting the active fan profile
     pub const CONFLICT: &str = "conflict";
+    /// 410, e.g. an audio test lease that is unknown or expired
+    pub const GONE: &str = "gone";
     /// 500
     pub const INTERNAL: &str = "internal";
 }
