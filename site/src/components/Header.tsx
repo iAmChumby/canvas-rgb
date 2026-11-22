@@ -10,6 +10,7 @@ const LINKS = [
   { href: "#editor", label: "Editor" },
   { href: "#install", label: "Install" },
   { href: "#thanks", label: "Thanks" },
+  { href: `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/docs`, label: "Docs" },
 ];
 
 export function Header() {

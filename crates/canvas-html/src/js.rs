@@ -9,7 +9,8 @@
 //! - `Math.random` (seedable, so a run is reproducible)
 //! - `performance.now()` / `Date.now()` — driven by the effect's clock
 //! - `console.log` — forwarded to `tracing`
-//! - `setTimeout(fn, 0)` — a zero-delay queue drained at the end of each frame
+//! - `setTimeout(fn, delay)` — queued with a due time on the effect clock, run on the first
+//!   frame at or after that time
 //!
 //! The canvas' 2D context is a plain JS object whose methods call back into the Rust
 //! raster context.
@@ -310,8 +311,8 @@ pub fn setup<'js>(
     })?;
     date.set("now", date_now)?;
 
-    // `setTimeout(fn, 0)` queues the callback in a JavaScript array; the host drains
-    // the queue each frame.
+    // `setTimeout(fn, delay)` queues the callback with a due time in a JavaScript array;
+    // the host runs the entries whose due time has arrived each frame.
     let timer_host = host.clone();
     let set_timeout = Function::new(ctx.clone(), move |this: rquickjs::function::This<Value<'js>>, cb: Function<'js>, delay: Opt<f64>| -> rquickjs::Result<()> {
         let c = this.0.ctx().clone();

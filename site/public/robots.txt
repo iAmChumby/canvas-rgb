@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+
+# Documentation for agents:
+# https://iamchumby.github.io/canvas-rgb/llms.txt
+# https://iamchumby.github.io/canvas-rgb/llms-full.txt

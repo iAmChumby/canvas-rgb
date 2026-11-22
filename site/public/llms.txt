@@ -1,0 +1,120 @@
+# canvas-rgb developer docs
+
+The local HTTP API, the command line client and the HTML effect format. Every page has a
+Markdown twin at the same URL with `.md` appended.
+
+## Pages
+
+- [Developer docs](https://iamchumby.github.io/canvas-rgb/docs.md): The local API, the command line client and the effect file format.
+- [API getting started](https://iamchumby.github.io/canvas-rgb/docs/getting-started.md): The token, the guards and two short requests to the loopback API.
+- [API reference](https://iamchumby.github.io/canvas-rgb/docs/api.md): Every local API route, grouped by area, with its body and answer shapes.
+- [Output](https://iamchumby.github.io/canvas-rgb/docs/api/output.md): Reports the current power state, brightness and warmth of the lighting output.
+- [Quit](https://iamchumby.github.io/canvas-rgb/docs/api/quit.md): Stops the daemon after applying its exit lighting setting and telling the fan and update service the stop was deliberate.
+- [Status](https://iamchumby.github.io/canvas-rgb/docs/api/status.md): Reports the daemon's version, power state, brightness, frame rate, connected devices, active scene and the links to OpenRGB and to the fan and update service.
+- [Devices](https://iamchumby.github.io/canvas-rgb/docs/api/devices.md): Lists the devices the daemon knows, with their zones and LED counts.
+- [Identify device](https://iamchumby.github.io/canvas-rgb/docs/api/devices-id-identify.md): Flashes one target LED so the device holding it can be found in the room. An unknown zone or an LED past the end of the zone answers 422.
+- [Device white balance](https://iamchumby.github.io/canvas-rgb/docs/api/devices-id-white-balance.md): Sets the red, green and blue gains of one device. Every gain must be a number from 0 to 1; any gain outside that range answers 422.
+- [Device zone](https://iamchumby.github.io/canvas-rgb/docs/api/devices-id-zones-zone.md): Changes the LED count of one zone on a device. An LED count outside the zone's range or a zone that cannot be resized answers 422.
+- [Lights](https://iamchumby.github.io/canvas-rgb/docs/api/lights.md): Lists every light with its id, LED count and connection state.
+- [Light](https://iamchumby.github.io/canvas-rgb/docs/api/lights-id.md): Changes one light's name, arrangement or other saved settings. A name that is empty or longer than the group name limit answers 422; clear a name with null instead.
+- [Flash lights](https://iamchumby.github.io/canvas-rgb/docs/api/lights-flash.md): Flashes the named lights white and leaves every other LED dark.
+- [White balance](https://iamchumby.github.io/canvas-rgb/docs/api/white-balance.md): Lists each device's current colour gains.
+- [Effects](https://iamchumby.github.io/canvas-rgb/docs/api/effects.md): Lists the effects and saved patterns in the library.
+- [Effect](https://iamchumby.github.io/canvas-rgb/docs/api/effects-id.md): Returns one effect's details, including its properties and presets.
+- [Activate effect](https://iamchumby.github.io/canvas-rgb/docs/api/effects-id-activate.md): Plays an effect on the groups of the active scene, using saved values or a named preset.
+- [Effect defaults](https://iamchumby.github.io/canvas-rgb/docs/api/effects-id-defaults.md): Changes the starting property values of an effect.
+- [Effect favourite](https://iamchumby.github.io/canvas-rgb/docs/api/effects-id-favorite.md): Marks an effect as a favourite or clears the mark.
+- [Effect presets](https://iamchumby.github.io/canvas-rgb/docs/api/effects-id-presets.md): Saves a named preset of an effect's property values.
+- [Effect preset](https://iamchumby.github.io/canvas-rgb/docs/api/effects-id-presets-name.md): Replaces or renames one saved preset.
+- [Effect source](https://iamchumby.github.io/canvas-rgb/docs/api/effects-id-source.md): Returns the HTML source of one effect and the file name a save would use.
+- [Effect thumbnail](https://iamchumby.github.io/canvas-rgb/docs/api/effects-id-thumbnail.md): Returns the effect's thumbnail as bytes: three 16-bit little-endian counts (width, height, frame count) followed by raw RGB frames, rendered without touching the devices. The answer is sent as application/octet-stream.
+- [Effect draft](https://iamchumby.github.io/canvas-rgb/docs/api/effects-draft.md): Reports the effect draft playing on the lights and its remaining lease.
+- [Import effect](https://iamchumby.github.io/canvas-rgb/docs/api/effects-import.md): Validates an effect file and installs it in the library.
+- [Effect preview](https://iamchumby.github.io/canvas-rgb/docs/api/effects-preview.md): Renders a draft HTML effect with the given property values.
+- [Patterns](https://iamchumby.github.io/canvas-rgb/docs/api/patterns.md): Lists the saved patterns.
+- [Pattern](https://iamchumby.github.io/canvas-rgb/docs/api/patterns-id.md): Returns one pattern's frames and transitions.
+- [Stacks](https://iamchumby.github.io/canvas-rgb/docs/api/stacks.md): Lists the saved stacks.
+- [Stack](https://iamchumby.github.io/canvas-rgb/docs/api/stacks-id.md): Returns one stack and the state of each of its layers.
+- [Stack preview](https://iamchumby.github.io/canvas-rgb/docs/api/stacks-preview.md): Starts or updates the stack used by the preview engine, for a group id the active scene has.
+- [Fans](https://iamchumby.github.io/canvas-rgb/docs/api/fans.md): Reports the fan headers, the temperatures and the active profile.
+- [Fan header](https://iamchumby.github.io/canvas-rgb/docs/api/fans-headers-h.md): Changes the mode and settings of one fan header. A percent below the configured floor answers 422: the floor is 20 percent, or 30 for the CPU and GPU headers, and a higher value can be configured. `fixed` needs `percent`, `source` needs its fields, and `curve` needs 2 to 8 `points` sorted by temperature.
+- [Fan header availability](https://iamchumby.github.io/canvas-rgb/docs/api/fans-headers-h-availability.md): Chooses whether the fan service shows one fan header; null leaves the choice to the board's own table.
+- [Fan hot temperatures](https://iamchumby.github.io/canvas-rgb/docs/api/fans-hot.md): Sets the temperatures at which fans are driven at full duty.
+- [Fan profile](https://iamchumby.github.io/canvas-rgb/docs/api/fans-profile.md): Returns the name of the active fan profile.
+- [Fan profiles](https://iamchumby.github.io/canvas-rgb/docs/api/fans-profiles-name.md): Creates or replaces a named fan profile. A name in the body that differs from the path, or a value below the configured fan floor, answers 422.
+- [Chains](https://iamchumby.github.io/canvas-rgb/docs/api/chains.md): Lists the resizable headers and how their zones are set up.
+- [Header setup](https://iamchumby.github.io/canvas-rgb/docs/api/chains-device-zone-setup.md): Starts a setup session for one header.
+- [Setup commit](https://iamchumby.github.io/canvas-rgb/docs/api/chains-device-zone-setup-commit.md): Applies the chosen zone sizes to a header and saves them.
+- [Empty header](https://iamchumby.github.io/canvas-rgb/docs/api/chains-device-zone-setup-empty.md): Records that nothing is plugged into the header.
+- [Setup light runs](https://iamchumby.github.io/canvas-rgb/docs/api/chains-device-zone-setup-light.md): Shows the coloured runs used to measure a header.
+- [Scenes](https://iamchumby.github.io/canvas-rgb/docs/api/scenes.md): Lists the scenes and marks the active one.
+- [Scene](https://iamchumby.github.io/canvas-rgb/docs/api/scenes-id.md): Replaces one scene and its groups.
+- [Group brightness](https://iamchumby.github.io/canvas-rgb/docs/api/scenes-id-groups-group-brightness.md): Sets the brightness of one group of a scene.
+- [Move group](https://iamchumby.github.io/canvas-rgb/docs/api/scenes-id-groups-group-move.md): Moves or copies one group between two scenes in one save.
+- [Group properties](https://iamchumby.github.io/canvas-rgb/docs/api/scenes-id-groups-group-props.md): Changes the property values of one group's effect.
+- [Active scene](https://iamchumby.github.io/canvas-rgb/docs/api/scenes-active.md): Makes a scene active, with a fade.
+- [Audio source](https://iamchumby.github.io/canvas-rgb/docs/api/audio-source.md): Chooses the audio source.
+- [Audio sources](https://iamchumby.github.io/canvas-rgb/docs/api/audio-sources.md): Lists the audio endpoints available as sources and the resolved current choice.
+- [Audio test](https://iamchumby.github.io/canvas-rgb/docs/api/audio-test.md): Reads and renews an audio test lease with the id the PUT returned; an unknown or expired lease answers 410.
+- [Preview](https://iamchumby.github.io/canvas-rgb/docs/api/preview.md): Streams the whole rendered picture. Each binary frame holds a 16-bit little-endian width, a 16-bit little-endian height, then width times height RGB triples. With stack=true it streams the stack preview; without it, the running effect.
+- [Group preview](https://iamchumby.github.io/canvas-rgb/docs/api/preview-group.md): Streams the picture one group draws at the group's brightness. Each binary frame holds a 16-bit little-endian width, a 16-bit little-endian height, then width times height RGB triples.
+- [Light preview](https://iamchumby.github.io/canvas-rgb/docs/api/preview-lights.md): The opening message is JSON mapping each light index to its id, repeated when the lights change. Each later binary frame holds a 16-bit little-endian light index, a 16-bit little-endian LED count, then that many RGB triples.
+- [Displays](https://iamchumby.github.io/canvas-rgb/docs/api/displays.md): Lists the numeric displays with their settings and current values.
+- [Display](https://iamchumby.github.io/canvas-rgb/docs/api/displays-id.md): Changes the settings of one display.
+- [Display value](https://iamchumby.github.io/canvas-rgb/docs/api/displays-id-value.md): Sets the number shown on a display whose value comes from this API. A display whose saved source is not the API answers 422.
+- [Peripherals](https://iamchumby.github.io/canvas-rgb/docs/api/peripherals.md): Lists the peripherals the adapters see.
+- [Peripheral](https://iamchumby.github.io/canvas-rgb/docs/api/peripherals-id.md): Reports one peripheral's schema and last-read values; ?fresh=true reads the device now.
+- [Peripheral access](https://iamchumby.github.io/canvas-rgb/docs/api/peripherals-id-access.md): Turns reads and configuration writes on or off for one peripheral. `writes` without `reads` answers 422, because a write patches what the device last reported.
+- [Peripheral read](https://iamchumby.github.io/canvas-rgb/docs/api/peripherals-id-read.md): Reports the progress of the read running on one peripheral.
+- [Config export](https://iamchumby.github.io/canvas-rgb/docs/api/config-export.md): Exports the configuration as one JSON bundle.
+- [Config import](https://iamchumby.github.io/canvas-rgb/docs/api/config-import.md): Validates and imports a configuration bundle. The bundle replaces every saved setting, scene, light, fan, display, stack and pattern with the one it carries, so export the current configuration first.
+- [Dismiss zone panel](https://iamchumby.github.io/canvas-rgb/docs/api/first-run-dismiss-zone-panel.md): Dismisses the first-run prompt to size the ARGB headers.
+- [Complete onboarding](https://iamchumby.github.io/canvas-rgb/docs/api/onboarding-complete.md): Records that first-run onboarding has finished.
+- [Settings](https://iamchumby.github.io/canvas-rgb/docs/api/settings.md): Returns the current settings.
+- [Install update](https://iamchumby.github.io/canvas-rgb/docs/api/update-install.md): Installs a signed update package.
+- [Fail sensor](https://iamchumby.github.io/canvas-rgb/docs/api/diag-fail-sensor.md): Makes a temperature source report a failure, for a safety test. The source is `cpu`, `gpu` or `board:<name>`; any other value answers 422.
+- [Readback](https://iamchumby.github.io/canvas-rgb/docs/api/diag-readback.md): Reads the colours the hardware reports back from the devices.
+- [CLI reference](https://iamchumby.github.io/canvas-rgb/docs/cli.md): Every canvas-rgb command and flag, taken from the CLI's own definitions.
+- [Read daemon status](https://iamchumby.github.io/canvas-rgb/docs/cli/status.md): Prints the daemon's status: version, power, brightness, frame rate and the scene playing. With `--json`, the answer is the raw status object.
+- [List devices](https://iamchumby.github.io/canvas-rgb/docs/cli/devices-list.md): Lists the devices OpenRGB found, with their zones and LED counts.
+- [List lights](https://iamchumby.github.io/canvas-rgb/docs/cli/lights-list.md): Lists every light with its id, LED count and whether it is connected.
+- [List effects](https://iamchumby.github.io/canvas-rgb/docs/cli/effects-list.md): Lists the built-in effects and the HTML effects in the effects folder.
+- [Activate an effect](https://iamchumby.github.io/canvas-rgb/docs/cli/effects-activate.md): Activates an effect. Names ignore case. Properties are `--color #ff0000` style pairs and form a trailing list, so a `--group` works before or after them. `--group` names a group of the active scene and can be repeated. With no `--group`, every group of the active scene plays the effect.
+- [Import an effect](https://iamchumby.github.io/canvas-rgb/docs/cli/effects-import.md): Imports a SignalRGB-format HTML effect. The file name is checked and the file is parsed before anything is written. `--replace` overwrites an effect of the same name. With `--run`, a run may replace only an effect that same run imported, and the effect's whole content is copied into the run's folder before the import is sent, so the old file is kept. Without `--run` the overwrite is plain: nothing is recorded and no copy is made. A run is the name this invocation gives to the changes it makes; a later delete or preset save must name the same run to change what this one saved.
+- [Check an effect](https://iamchumby.github.io/canvas-rgb/docs/cli/effects-check.md): Checks an effect with the same parser the daemon uses and renders 120 frames. No daemon needed. `--png` writes frame 60. `--preview` writes the library tile as a GIF and a contact sheet into the folder. `--prop` repeats to set a property for the 120 frames and the PNG. The library tile is always drawn at the effect's own defaults.
+- [Read effect source](https://iamchumby.github.io/canvas-rgb/docs/cli/effects-source.md): Prints an effect's HTML source, or writes it to a new file. An existing `--out` file is refused with an "already exists" error.
+- [Delete an effect](https://iamchumby.github.io/canvas-rgb/docs/cli/effects-delete.md): Deletes an effect this run imported. `--run` is the run that imported it. `--keep-presets` leaves its presets in the library. `--dry-run` runs the checks and saves nothing.
+- [List presets](https://iamchumby.github.io/canvas-rgb/docs/cli/effects-preset-list.md): Lists an effect's presets, built-in and saved.
+- [Save a preset](https://iamchumby.github.io/canvas-rgb/docs/cli/effects-preset-save.md): Saves a preset. The name is at most 40 characters. `--prop` repeats; `--run` records the run the save belongs to.
+- [Delete a preset](https://iamchumby.github.io/canvas-rgb/docs/cli/effects-preset-delete.md): Deletes a preset this run saved. `--run` is the run that saved it. `--dry-run` runs the checks and saves nothing.
+- [List scenes](https://iamchumby.github.io/canvas-rgb/docs/cli/scenes-list.md): Lists the scenes, with the active one marked.
+- [Set the active scene](https://iamchumby.github.io/canvas-rgb/docs/cli/scenes-set.md): Sets a scene by name or id. Names ignore case. A name that matches nothing prints the list and fails. A name that matches several scenes is refused and the matches are listed.
+- [Create a scene](https://iamchumby.github.io/canvas-rgb/docs/cli/scenes-create.md): Creates a scene. `--from` reads a JSON file of groups. `--run` records the run. `--dry-run` runs the checks and saves nothing.
+- [Edit a scene](https://iamchumby.github.io/canvas-rgb/docs/cli/scenes-edit.md): Replaces a scene's groups from the JSON file. `--run` is the run that made the scene. `--dry-run` runs the checks and saves nothing.
+- [Delete a scene](https://iamchumby.github.io/canvas-rgb/docs/cli/scenes-delete.md): Deletes a scene this run made. `--force` deletes it even when it changed since the run made it. `--run` is required. `--dry-run` runs the checks and saves nothing.
+- [Order scenes](https://iamchumby.github.io/canvas-rgb/docs/cli/scenes-order.md): Puts every scene in a new order. Name each scene once, by id or name. `--dry-run` checks the order and prints it without saving.
+- [Move a group](https://iamchumby.github.io/canvas-rgb/docs/cli/scenes-group-move.md): Moves one group to another scene in one save. `--copy` leaves the group in the source scene. Both scene flags are required. `--dry-run` runs the checks and saves nothing.
+- [Pause the lighting](https://iamchumby.github.io/canvas-rgb/docs/cli/output-pause.md): Pauses the lighting: black once, then the render loop stops.
+- [Resume the lighting](https://iamchumby.github.io/canvas-rgb/docs/cli/output-resume.md): Resumes the lighting.
+- [Read fan status](https://iamchumby.github.io/canvas-rgb/docs/cli/fans-status.md): Shows the fan headers, the temperatures and the active profile.
+- [Switch fan profile](https://iamchumby.github.io/canvas-rgb/docs/cli/fans-profile.md): Switches to a fan profile.
+- [List peripherals](https://iamchumby.github.io/canvas-rgb/docs/cli/peripherals-list.md): Lists the peripherals the adapters see. An adapter is the part of canvas-rgb that talks to one kind of hardware.
+- [Show a peripheral](https://iamchumby.github.io/canvas-rgb/docs/cli/peripherals-show.md): Shows one peripheral: what it has, what it holds and what the daemon may do with it.
+- [Set peripheral access](https://iamchumby.github.io/canvas-rgb/docs/cli/peripherals-access.md): Turns reads and config writes on or off for one device. At least one of `--reads` or `--writes` is required; a call with neither is refused. `--reads` off means the daemon never opens it. `--writes` needs reads on.
+- [Read colours back](https://iamchumby.github.io/canvas-rgb/docs/cli/diag-readback.md): Dumps the colours as the hardware reports them.
+- [Render effect frames](https://iamchumby.github.io/canvas-rgb/docs/cli/diag-dump-frames.md): Renders frames locally, without the daemon. `--effect` takes a built-in effect id, such as `rainbow_wave`. An `html:` id answers `no effect with the id` because no daemon is there to read the effect file. `--frames` defaults to 60, `--fps` to 60, `--width` to 320 and `--height` to 200. `--prop` repeats to set a property.
+- [Bundle logs and config](https://iamchumby.github.io/canvas-rgb/docs/cli/diag-bundle.md): Zips the logs and the config. `--out` names the zip, or a folder: when it names a folder, the zip gets a timestamped name inside it. With no `--out`, the zip goes into the current folder as `canvas-rgb-diag-<timestamp>.zip`.
+- [Fail a sensor](https://iamchumby.github.io/canvas-rgb/docs/cli/diag-fail-sensor.md): Makes a temperature source look failed, as a safety test. The source is `cpu`, `gpu` or `board:<name>`. `--clear` removes a failure that was set earlier.
+- [Export the config](https://iamchumby.github.io/canvas-rgb/docs/cli/config-export.md): Exports the configuration as one JSON file.
+- [Import the config](https://iamchumby.github.io/canvas-rgb/docs/cli/config-import.md): Imports a file that `config export` wrote. It replaces every saved setting, scene, light, fan, display, stack and pattern with the one the file carries. Export the current configuration first to keep a copy.
+- [Install an update](https://iamchumby.github.io/canvas-rgb/docs/cli/update.md): Asks the fan and update service, which runs as SYSTEM, to install a signed build with no permission prompt. Both flags are required. The command prints the signed version it started.
+- [Writing an effect](https://iamchumby.github.io/canvas-rgb/docs/effects.md): The HTML effect format, the runtime and how to check a file before you install it.
+
+## Machine-readable data
+
+- [API reference](https://iamchumby.github.io/canvas-rgb/docs/api-reference.json): all 66 routes, their methods, bodies, answers, parameters and tested examples.
+- [Search index](https://iamchumby.github.io/canvas-rgb/docs/search-index.json): titles and URLs for the docs search.
+
+## Full text
+
+- [llms-full.txt](https://iamchumby.github.io/canvas-rgb/llms-full.txt): every page in one file.

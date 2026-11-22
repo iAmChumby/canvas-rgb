@@ -1,0 +1,626 @@
+[
+  {
+    "title": "Developer docs",
+    "hint": "Overview",
+    "href": "/docs",
+    "keywords": "developer docs overview the local api, the command line client and the effect file format. /docs"
+  },
+  {
+    "title": "API getting started",
+    "hint": "Guides",
+    "href": "/docs/getting-started",
+    "keywords": "api getting started guides the token, the guards and two short requests to the loopback api. /docs/getting-started"
+  },
+  {
+    "title": "API reference",
+    "hint": "Reference",
+    "href": "/docs/api",
+    "keywords": "api reference reference every local api route, grouped by area, with its body and answer shapes. /docs/api"
+  },
+  {
+    "title": "Output",
+    "hint": "Status and output",
+    "href": "/docs/api/output",
+    "keywords": "output status and output reports the current power state, brightness and warmth of the lighting output. /docs/api/output"
+  },
+  {
+    "title": "Quit",
+    "hint": "Status and output",
+    "href": "/docs/api/quit",
+    "keywords": "quit status and output stops the daemon after applying its exit lighting setting and telling the fan and update service the stop was deliberate. /docs/api/quit"
+  },
+  {
+    "title": "Status",
+    "hint": "Status and output",
+    "href": "/docs/api/status",
+    "keywords": "status status and output reports the daemon's version, power state, brightness, frame rate, connected devices, active scene and the links to openrgb and to the fan and update service. /docs/api/status"
+  },
+  {
+    "title": "Devices",
+    "hint": "Devices and lights",
+    "href": "/docs/api/devices",
+    "keywords": "devices devices and lights lists the devices the daemon knows, with their zones and led counts. /docs/api/devices"
+  },
+  {
+    "title": "Identify device",
+    "hint": "Devices and lights",
+    "href": "/docs/api/devices-id-identify",
+    "keywords": "identify device devices and lights flashes one target led so the device holding it can be found in the room. an unknown zone or an led past the end of the zone answers 422. /docs/api/devices-id-identify"
+  },
+  {
+    "title": "Device white balance",
+    "hint": "Devices and lights",
+    "href": "/docs/api/devices-id-white-balance",
+    "keywords": "device white balance devices and lights sets the red, green and blue gains of one device. every gain must be a number from 0 to 1; any gain outside that range answers 422. /docs/api/devices-id-white-balance"
+  },
+  {
+    "title": "Device zone",
+    "hint": "Devices and lights",
+    "href": "/docs/api/devices-id-zones-zone",
+    "keywords": "device zone devices and lights changes the led count of one zone on a device. an led count outside the zone's range or a zone that cannot be resized answers 422. /docs/api/devices-id-zones-zone"
+  },
+  {
+    "title": "Lights",
+    "hint": "Devices and lights",
+    "href": "/docs/api/lights",
+    "keywords": "lights devices and lights lists every light with its id, led count and connection state. /docs/api/lights"
+  },
+  {
+    "title": "Light",
+    "hint": "Devices and lights",
+    "href": "/docs/api/lights-id",
+    "keywords": "light devices and lights changes one light's name, arrangement or other saved settings. a name that is empty or longer than the group name limit answers 422; clear a name with null instead. /docs/api/lights-id"
+  },
+  {
+    "title": "Flash lights",
+    "hint": "Devices and lights",
+    "href": "/docs/api/lights-flash",
+    "keywords": "flash lights devices and lights flashes the named lights white and leaves every other led dark. /docs/api/lights-flash"
+  },
+  {
+    "title": "White balance",
+    "hint": "Devices and lights",
+    "href": "/docs/api/white-balance",
+    "keywords": "white balance devices and lights lists each device's current colour gains. /docs/api/white-balance"
+  },
+  {
+    "title": "Effects",
+    "hint": "Effects",
+    "href": "/docs/api/effects",
+    "keywords": "effects effects lists the effects and saved patterns in the library. /docs/api/effects"
+  },
+  {
+    "title": "Effect",
+    "hint": "Effects",
+    "href": "/docs/api/effects-id",
+    "keywords": "effect effects returns one effect's details, including its properties and presets. /docs/api/effects-id"
+  },
+  {
+    "title": "Activate effect",
+    "hint": "Effects",
+    "href": "/docs/api/effects-id-activate",
+    "keywords": "activate effect effects plays an effect on the groups of the active scene, using saved values or a named preset. /docs/api/effects-id-activate"
+  },
+  {
+    "title": "Effect defaults",
+    "hint": "Effects",
+    "href": "/docs/api/effects-id-defaults",
+    "keywords": "effect defaults effects changes the starting property values of an effect. /docs/api/effects-id-defaults"
+  },
+  {
+    "title": "Effect favourite",
+    "hint": "Effects",
+    "href": "/docs/api/effects-id-favorite",
+    "keywords": "effect favourite effects marks an effect as a favourite or clears the mark. /docs/api/effects-id-favorite"
+  },
+  {
+    "title": "Effect presets",
+    "hint": "Effects",
+    "href": "/docs/api/effects-id-presets",
+    "keywords": "effect presets effects saves a named preset of an effect's property values. /docs/api/effects-id-presets"
+  },
+  {
+    "title": "Effect preset",
+    "hint": "Effects",
+    "href": "/docs/api/effects-id-presets-name",
+    "keywords": "effect preset effects replaces or renames one saved preset. /docs/api/effects-id-presets-name"
+  },
+  {
+    "title": "Effect source",
+    "hint": "Effects",
+    "href": "/docs/api/effects-id-source",
+    "keywords": "effect source effects returns the html source of one effect and the file name a save would use. /docs/api/effects-id-source"
+  },
+  {
+    "title": "Effect thumbnail",
+    "hint": "Effects",
+    "href": "/docs/api/effects-id-thumbnail",
+    "keywords": "effect thumbnail effects returns the effect's thumbnail as bytes: three 16-bit little-endian counts (width, height, frame count) followed by raw rgb frames, rendered without touching the devices. the answer is sent as application/octet-stream. /docs/api/effects-id-thumbnail"
+  },
+  {
+    "title": "Effect draft",
+    "hint": "Effects",
+    "href": "/docs/api/effects-draft",
+    "keywords": "effect draft effects reports the effect draft playing on the lights and its remaining lease. /docs/api/effects-draft"
+  },
+  {
+    "title": "Import effect",
+    "hint": "Effects",
+    "href": "/docs/api/effects-import",
+    "keywords": "import effect effects validates an effect file and installs it in the library. /docs/api/effects-import"
+  },
+  {
+    "title": "Effect preview",
+    "hint": "Effects",
+    "href": "/docs/api/effects-preview",
+    "keywords": "effect preview effects renders a draft html effect with the given property values. /docs/api/effects-preview"
+  },
+  {
+    "title": "Patterns",
+    "hint": "Stacks and patterns",
+    "href": "/docs/api/patterns",
+    "keywords": "patterns stacks and patterns lists the saved patterns. /docs/api/patterns"
+  },
+  {
+    "title": "Pattern",
+    "hint": "Stacks and patterns",
+    "href": "/docs/api/patterns-id",
+    "keywords": "pattern stacks and patterns returns one pattern's frames and transitions. /docs/api/patterns-id"
+  },
+  {
+    "title": "Stacks",
+    "hint": "Stacks and patterns",
+    "href": "/docs/api/stacks",
+    "keywords": "stacks stacks and patterns lists the saved stacks. /docs/api/stacks"
+  },
+  {
+    "title": "Stack",
+    "hint": "Stacks and patterns",
+    "href": "/docs/api/stacks-id",
+    "keywords": "stack stacks and patterns returns one stack and the state of each of its layers. /docs/api/stacks-id"
+  },
+  {
+    "title": "Stack preview",
+    "hint": "Stacks and patterns",
+    "href": "/docs/api/stacks-preview",
+    "keywords": "stack preview stacks and patterns starts or updates the stack used by the preview engine, for a group id the active scene has. /docs/api/stacks-preview"
+  },
+  {
+    "title": "Fans",
+    "hint": "Fans",
+    "href": "/docs/api/fans",
+    "keywords": "fans fans reports the fan headers, the temperatures and the active profile. /docs/api/fans"
+  },
+  {
+    "title": "Fan header",
+    "hint": "Fans",
+    "href": "/docs/api/fans-headers-h",
+    "keywords": "fan header fans changes the mode and settings of one fan header. a percent below the configured floor answers 422: the floor is 20 percent, or 30 for the cpu and gpu headers, and a higher value can be configured. `fixed` needs `percent`, `source` needs its fields, and `curve` needs 2 to 8 `points` sorted by temperature. /docs/api/fans-headers-h"
+  },
+  {
+    "title": "Fan header availability",
+    "hint": "Fans",
+    "href": "/docs/api/fans-headers-h-availability",
+    "keywords": "fan header availability fans chooses whether the fan service shows one fan header; null leaves the choice to the board's own table. /docs/api/fans-headers-h-availability"
+  },
+  {
+    "title": "Fan hot temperatures",
+    "hint": "Fans",
+    "href": "/docs/api/fans-hot",
+    "keywords": "fan hot temperatures fans sets the temperatures at which fans are driven at full duty. /docs/api/fans-hot"
+  },
+  {
+    "title": "Fan profile",
+    "hint": "Fans",
+    "href": "/docs/api/fans-profile",
+    "keywords": "fan profile fans returns the name of the active fan profile. /docs/api/fans-profile"
+  },
+  {
+    "title": "Fan profiles",
+    "hint": "Fans",
+    "href": "/docs/api/fans-profiles-name",
+    "keywords": "fan profiles fans creates or replaces a named fan profile. a name in the body that differs from the path, or a value below the configured fan floor, answers 422. /docs/api/fans-profiles-name"
+  },
+  {
+    "title": "Chains",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/chains",
+    "keywords": "chains scenes and chains lists the resizable headers and how their zones are set up. /docs/api/chains"
+  },
+  {
+    "title": "Header setup",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/chains-device-zone-setup",
+    "keywords": "header setup scenes and chains starts a setup session for one header. /docs/api/chains-device-zone-setup"
+  },
+  {
+    "title": "Setup commit",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/chains-device-zone-setup-commit",
+    "keywords": "setup commit scenes and chains applies the chosen zone sizes to a header and saves them. /docs/api/chains-device-zone-setup-commit"
+  },
+  {
+    "title": "Empty header",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/chains-device-zone-setup-empty",
+    "keywords": "empty header scenes and chains records that nothing is plugged into the header. /docs/api/chains-device-zone-setup-empty"
+  },
+  {
+    "title": "Setup light runs",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/chains-device-zone-setup-light",
+    "keywords": "setup light runs scenes and chains shows the coloured runs used to measure a header. /docs/api/chains-device-zone-setup-light"
+  },
+  {
+    "title": "Scenes",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/scenes",
+    "keywords": "scenes scenes and chains lists the scenes and marks the active one. /docs/api/scenes"
+  },
+  {
+    "title": "Scene",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/scenes-id",
+    "keywords": "scene scenes and chains replaces one scene and its groups. /docs/api/scenes-id"
+  },
+  {
+    "title": "Group brightness",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/scenes-id-groups-group-brightness",
+    "keywords": "group brightness scenes and chains sets the brightness of one group of a scene. /docs/api/scenes-id-groups-group-brightness"
+  },
+  {
+    "title": "Move group",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/scenes-id-groups-group-move",
+    "keywords": "move group scenes and chains moves or copies one group between two scenes in one save. /docs/api/scenes-id-groups-group-move"
+  },
+  {
+    "title": "Group properties",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/scenes-id-groups-group-props",
+    "keywords": "group properties scenes and chains changes the property values of one group's effect. /docs/api/scenes-id-groups-group-props"
+  },
+  {
+    "title": "Active scene",
+    "hint": "Scenes and chains",
+    "href": "/docs/api/scenes-active",
+    "keywords": "active scene scenes and chains makes a scene active, with a fade. /docs/api/scenes-active"
+  },
+  {
+    "title": "Audio source",
+    "hint": "Audio",
+    "href": "/docs/api/audio-source",
+    "keywords": "audio source audio chooses the audio source. /docs/api/audio-source"
+  },
+  {
+    "title": "Audio sources",
+    "hint": "Audio",
+    "href": "/docs/api/audio-sources",
+    "keywords": "audio sources audio lists the audio endpoints available as sources and the resolved current choice. /docs/api/audio-sources"
+  },
+  {
+    "title": "Audio test",
+    "hint": "Audio",
+    "href": "/docs/api/audio-test",
+    "keywords": "audio test audio reads and renews an audio test lease with the id the put returned; an unknown or expired lease answers 410. /docs/api/audio-test"
+  },
+  {
+    "title": "Preview",
+    "hint": "Preview",
+    "href": "/docs/api/preview",
+    "keywords": "preview preview streams the whole rendered picture. each binary frame holds a 16-bit little-endian width, a 16-bit little-endian height, then width times height rgb triples. with stack=true it streams the stack preview; without it, the running effect. /docs/api/preview"
+  },
+  {
+    "title": "Group preview",
+    "hint": "Preview",
+    "href": "/docs/api/preview-group",
+    "keywords": "group preview preview streams the picture one group draws at the group's brightness. each binary frame holds a 16-bit little-endian width, a 16-bit little-endian height, then width times height rgb triples. /docs/api/preview-group"
+  },
+  {
+    "title": "Light preview",
+    "hint": "Preview",
+    "href": "/docs/api/preview-lights",
+    "keywords": "light preview preview the opening message is json mapping each light index to its id, repeated when the lights change. each later binary frame holds a 16-bit little-endian light index, a 16-bit little-endian led count, then that many rgb triples. /docs/api/preview-lights"
+  },
+  {
+    "title": "Displays",
+    "hint": "Displays and peripherals",
+    "href": "/docs/api/displays",
+    "keywords": "displays displays and peripherals lists the numeric displays with their settings and current values. /docs/api/displays"
+  },
+  {
+    "title": "Display",
+    "hint": "Displays and peripherals",
+    "href": "/docs/api/displays-id",
+    "keywords": "display displays and peripherals changes the settings of one display. /docs/api/displays-id"
+  },
+  {
+    "title": "Display value",
+    "hint": "Displays and peripherals",
+    "href": "/docs/api/displays-id-value",
+    "keywords": "display value displays and peripherals sets the number shown on a display whose value comes from this api. a display whose saved source is not the api answers 422. /docs/api/displays-id-value"
+  },
+  {
+    "title": "Peripherals",
+    "hint": "Displays and peripherals",
+    "href": "/docs/api/peripherals",
+    "keywords": "peripherals displays and peripherals lists the peripherals the adapters see. /docs/api/peripherals"
+  },
+  {
+    "title": "Peripheral",
+    "hint": "Displays and peripherals",
+    "href": "/docs/api/peripherals-id",
+    "keywords": "peripheral displays and peripherals reports one peripheral's schema and last-read values; ?fresh=true reads the device now. /docs/api/peripherals-id"
+  },
+  {
+    "title": "Peripheral access",
+    "hint": "Displays and peripherals",
+    "href": "/docs/api/peripherals-id-access",
+    "keywords": "peripheral access displays and peripherals turns reads and configuration writes on or off for one peripheral. `writes` without `reads` answers 422, because a write patches what the device last reported. /docs/api/peripherals-id-access"
+  },
+  {
+    "title": "Peripheral read",
+    "hint": "Displays and peripherals",
+    "href": "/docs/api/peripherals-id-read",
+    "keywords": "peripheral read displays and peripherals reports the progress of the read running on one peripheral. /docs/api/peripherals-id-read"
+  },
+  {
+    "title": "Config export",
+    "hint": "Settings and update",
+    "href": "/docs/api/config-export",
+    "keywords": "config export settings and update exports the configuration as one json bundle. /docs/api/config-export"
+  },
+  {
+    "title": "Config import",
+    "hint": "Settings and update",
+    "href": "/docs/api/config-import",
+    "keywords": "config import settings and update validates and imports a configuration bundle. the bundle replaces every saved setting, scene, light, fan, display, stack and pattern with the one it carries, so export the current configuration first. /docs/api/config-import"
+  },
+  {
+    "title": "Dismiss zone panel",
+    "hint": "Settings and update",
+    "href": "/docs/api/first-run-dismiss-zone-panel",
+    "keywords": "dismiss zone panel settings and update dismisses the first-run prompt to size the argb headers. /docs/api/first-run-dismiss-zone-panel"
+  },
+  {
+    "title": "Complete onboarding",
+    "hint": "Settings and update",
+    "href": "/docs/api/onboarding-complete",
+    "keywords": "complete onboarding settings and update records that first-run onboarding has finished. /docs/api/onboarding-complete"
+  },
+  {
+    "title": "Settings",
+    "hint": "Settings and update",
+    "href": "/docs/api/settings",
+    "keywords": "settings settings and update returns the current settings. /docs/api/settings"
+  },
+  {
+    "title": "Install update",
+    "hint": "Settings and update",
+    "href": "/docs/api/update-install",
+    "keywords": "install update settings and update installs a signed update package. /docs/api/update-install"
+  },
+  {
+    "title": "Fail sensor",
+    "hint": "Diagnostics",
+    "href": "/docs/api/diag-fail-sensor",
+    "keywords": "fail sensor diagnostics makes a temperature source report a failure, for a safety test. the source is `cpu`, `gpu` or `board:<name>`; any other value answers 422. /docs/api/diag-fail-sensor"
+  },
+  {
+    "title": "Readback",
+    "hint": "Diagnostics",
+    "href": "/docs/api/diag-readback",
+    "keywords": "readback diagnostics reads the colours the hardware reports back from the devices. /docs/api/diag-readback"
+  },
+  {
+    "title": "CLI reference",
+    "hint": "Reference",
+    "href": "/docs/cli",
+    "keywords": "cli reference reference every canvas-rgb command and flag, taken from the cli's own definitions. /docs/cli"
+  },
+  {
+    "title": "Read daemon status",
+    "hint": "status",
+    "href": "/docs/cli/status",
+    "keywords": "read daemon status status prints the daemon's status: version, power, brightness, frame rate and the scene playing. with `--json`, the answer is the raw status object. /docs/cli/status"
+  },
+  {
+    "title": "List devices",
+    "hint": "devices",
+    "href": "/docs/cli/devices-list",
+    "keywords": "list devices devices lists the devices openrgb found, with their zones and led counts. /docs/cli/devices-list"
+  },
+  {
+    "title": "List lights",
+    "hint": "lights",
+    "href": "/docs/cli/lights-list",
+    "keywords": "list lights lights lists every light with its id, led count and whether it is connected. /docs/cli/lights-list"
+  },
+  {
+    "title": "List effects",
+    "hint": "effects",
+    "href": "/docs/cli/effects-list",
+    "keywords": "list effects effects lists the built-in effects and the html effects in the effects folder. /docs/cli/effects-list"
+  },
+  {
+    "title": "Activate an effect",
+    "hint": "effects",
+    "href": "/docs/cli/effects-activate",
+    "keywords": "activate an effect effects activates an effect. names ignore case. properties are `--color #ff0000` style pairs and form a trailing list, so a `--group` works before or after them. `--group` names a group of the active scene and can be repeated. with no `--group`, every group of the active scene plays the effect. /docs/cli/effects-activate"
+  },
+  {
+    "title": "Import an effect",
+    "hint": "effects",
+    "href": "/docs/cli/effects-import",
+    "keywords": "import an effect effects imports a signalrgb-format html effect. the file name is checked and the file is parsed before anything is written. `--replace` overwrites an effect of the same name. with `--run`, a run may replace only an effect that same run imported, and the effect's whole content is copied into the run's folder before the import is sent, so the old file is kept. without `--run` the overwrite is plain: nothing is recorded and no copy is made. a run is the name this invocation gives to the changes it makes; a later delete or preset save must name the same run to change what this one saved. /docs/cli/effects-import"
+  },
+  {
+    "title": "Check an effect",
+    "hint": "effects",
+    "href": "/docs/cli/effects-check",
+    "keywords": "check an effect effects checks an effect with the same parser the daemon uses and renders 120 frames. no daemon needed. `--png` writes frame 60. `--preview` writes the library tile as a gif and a contact sheet into the folder. `--prop` repeats to set a property for the 120 frames and the png. the library tile is always drawn at the effect's own defaults. /docs/cli/effects-check"
+  },
+  {
+    "title": "Read effect source",
+    "hint": "effects",
+    "href": "/docs/cli/effects-source",
+    "keywords": "read effect source effects prints an effect's html source, or writes it to a new file. an existing `--out` file is refused with an \"already exists\" error. /docs/cli/effects-source"
+  },
+  {
+    "title": "Delete an effect",
+    "hint": "effects",
+    "href": "/docs/cli/effects-delete",
+    "keywords": "delete an effect effects deletes an effect this run imported. `--run` is the run that imported it. `--keep-presets` leaves its presets in the library. `--dry-run` runs the checks and saves nothing. /docs/cli/effects-delete"
+  },
+  {
+    "title": "List presets",
+    "hint": "effects",
+    "href": "/docs/cli/effects-preset-list",
+    "keywords": "list presets effects lists an effect's presets, built-in and saved. /docs/cli/effects-preset-list"
+  },
+  {
+    "title": "Save a preset",
+    "hint": "effects",
+    "href": "/docs/cli/effects-preset-save",
+    "keywords": "save a preset effects saves a preset. the name is at most 40 characters. `--prop` repeats; `--run` records the run the save belongs to. /docs/cli/effects-preset-save"
+  },
+  {
+    "title": "Delete a preset",
+    "hint": "effects",
+    "href": "/docs/cli/effects-preset-delete",
+    "keywords": "delete a preset effects deletes a preset this run saved. `--run` is the run that saved it. `--dry-run` runs the checks and saves nothing. /docs/cli/effects-preset-delete"
+  },
+  {
+    "title": "List scenes",
+    "hint": "scenes",
+    "href": "/docs/cli/scenes-list",
+    "keywords": "list scenes scenes lists the scenes, with the active one marked. /docs/cli/scenes-list"
+  },
+  {
+    "title": "Set the active scene",
+    "hint": "scenes",
+    "href": "/docs/cli/scenes-set",
+    "keywords": "set the active scene scenes sets a scene by name or id. names ignore case. a name that matches nothing prints the list and fails. a name that matches several scenes is refused and the matches are listed. /docs/cli/scenes-set"
+  },
+  {
+    "title": "Create a scene",
+    "hint": "scenes",
+    "href": "/docs/cli/scenes-create",
+    "keywords": "create a scene scenes creates a scene. `--from` reads a json file of groups. `--run` records the run. `--dry-run` runs the checks and saves nothing. /docs/cli/scenes-create"
+  },
+  {
+    "title": "Edit a scene",
+    "hint": "scenes",
+    "href": "/docs/cli/scenes-edit",
+    "keywords": "edit a scene scenes replaces a scene's groups from the json file. `--run` is the run that made the scene. `--dry-run` runs the checks and saves nothing. /docs/cli/scenes-edit"
+  },
+  {
+    "title": "Delete a scene",
+    "hint": "scenes",
+    "href": "/docs/cli/scenes-delete",
+    "keywords": "delete a scene scenes deletes a scene this run made. `--force` deletes it even when it changed since the run made it. `--run` is required. `--dry-run` runs the checks and saves nothing. /docs/cli/scenes-delete"
+  },
+  {
+    "title": "Order scenes",
+    "hint": "scenes",
+    "href": "/docs/cli/scenes-order",
+    "keywords": "order scenes scenes puts every scene in a new order. name each scene once, by id or name. `--dry-run` checks the order and prints it without saving. /docs/cli/scenes-order"
+  },
+  {
+    "title": "Move a group",
+    "hint": "scenes",
+    "href": "/docs/cli/scenes-group-move",
+    "keywords": "move a group scenes moves one group to another scene in one save. `--copy` leaves the group in the source scene. both scene flags are required. `--dry-run` runs the checks and saves nothing. /docs/cli/scenes-group-move"
+  },
+  {
+    "title": "Pause the lighting",
+    "hint": "output",
+    "href": "/docs/cli/output-pause",
+    "keywords": "pause the lighting output pauses the lighting: black once, then the render loop stops. /docs/cli/output-pause"
+  },
+  {
+    "title": "Resume the lighting",
+    "hint": "output",
+    "href": "/docs/cli/output-resume",
+    "keywords": "resume the lighting output resumes the lighting. /docs/cli/output-resume"
+  },
+  {
+    "title": "Read fan status",
+    "hint": "fans",
+    "href": "/docs/cli/fans-status",
+    "keywords": "read fan status fans shows the fan headers, the temperatures and the active profile. /docs/cli/fans-status"
+  },
+  {
+    "title": "Switch fan profile",
+    "hint": "fans",
+    "href": "/docs/cli/fans-profile",
+    "keywords": "switch fan profile fans switches to a fan profile. /docs/cli/fans-profile"
+  },
+  {
+    "title": "List peripherals",
+    "hint": "peripherals",
+    "href": "/docs/cli/peripherals-list",
+    "keywords": "list peripherals peripherals lists the peripherals the adapters see. an adapter is the part of canvas-rgb that talks to one kind of hardware. /docs/cli/peripherals-list"
+  },
+  {
+    "title": "Show a peripheral",
+    "hint": "peripherals",
+    "href": "/docs/cli/peripherals-show",
+    "keywords": "show a peripheral peripherals shows one peripheral: what it has, what it holds and what the daemon may do with it. /docs/cli/peripherals-show"
+  },
+  {
+    "title": "Set peripheral access",
+    "hint": "peripherals",
+    "href": "/docs/cli/peripherals-access",
+    "keywords": "set peripheral access peripherals turns reads and config writes on or off for one device. at least one of `--reads` or `--writes` is required; a call with neither is refused. `--reads` off means the daemon never opens it. `--writes` needs reads on. /docs/cli/peripherals-access"
+  },
+  {
+    "title": "Read colours back",
+    "hint": "diag",
+    "href": "/docs/cli/diag-readback",
+    "keywords": "read colours back diag dumps the colours as the hardware reports them. /docs/cli/diag-readback"
+  },
+  {
+    "title": "Render effect frames",
+    "hint": "diag",
+    "href": "/docs/cli/diag-dump-frames",
+    "keywords": "render effect frames diag renders frames locally, without the daemon. `--effect` takes a built-in effect id, such as `rainbow_wave`. an `html:` id answers `no effect with the id` because no daemon is there to read the effect file. `--frames` defaults to 60, `--fps` to 60, `--width` to 320 and `--height` to 200. `--prop` repeats to set a property. /docs/cli/diag-dump-frames"
+  },
+  {
+    "title": "Bundle logs and config",
+    "hint": "diag",
+    "href": "/docs/cli/diag-bundle",
+    "keywords": "bundle logs and config diag zips the logs and the config. `--out` names the zip, or a folder: when it names a folder, the zip gets a timestamped name inside it. with no `--out`, the zip goes into the current folder as `canvas-rgb-diag-<timestamp>.zip`. /docs/cli/diag-bundle"
+  },
+  {
+    "title": "Fail a sensor",
+    "hint": "diag",
+    "href": "/docs/cli/diag-fail-sensor",
+    "keywords": "fail a sensor diag makes a temperature source look failed, as a safety test. the source is `cpu`, `gpu` or `board:<name>`. `--clear` removes a failure that was set earlier. /docs/cli/diag-fail-sensor"
+  },
+  {
+    "title": "Export the config",
+    "hint": "config",
+    "href": "/docs/cli/config-export",
+    "keywords": "export the config config exports the configuration as one json file. /docs/cli/config-export"
+  },
+  {
+    "title": "Import the config",
+    "hint": "config",
+    "href": "/docs/cli/config-import",
+    "keywords": "import the config config imports a file that `config export` wrote. it replaces every saved setting, scene, light, fan, display, stack and pattern with the one the file carries. export the current configuration first to keep a copy. /docs/cli/config-import"
+  },
+  {
+    "title": "Install an update",
+    "hint": "update",
+    "href": "/docs/cli/update",
+    "keywords": "install an update update asks the fan and update service, which runs as system, to install a signed build with no permission prompt. both flags are required. the command prints the signed version it started. /docs/cli/update"
+  },
+  {
+    "title": "Writing an effect",
+    "hint": "Guides",
+    "href": "/docs/effects",
+    "keywords": "writing an effect guides the html effect format, the runtime and how to check a file before you install it. /docs/effects"
+  }
+]

@@ -1,0 +1,857 @@
+{
+  "globalFlags": [
+    {
+      "flag": "--json",
+      "meaning": "Print the answer as JSON.",
+      "value": "—"
+    },
+    {
+      "flag": "--api",
+      "meaning": "The API's base URL. Defaults to `http://127.0.0.1:9430`.",
+      "value": "<url>"
+    }
+  ],
+  "commands": {
+    "status": {
+      "title": "Read daemon status",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "devices-list": {
+      "title": "List devices",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "lights-list": {
+      "title": "List lights",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "effects-list": {
+      "title": "List effects",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "effects-activate": {
+      "title": "Activate an effect",
+      "flags": [
+        {
+          "flag": "--group",
+          "meaning": "The groups of the active scene to play it on, by name. Repeatable. With no group, every group of the active scene plays it.",
+          "value": "<name>"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "effects-import": {
+      "title": "Import an effect",
+      "flags": [
+        {
+          "flag": "--replace",
+          "meaning": "Overwrite an effect of the same name. With `--run`, a run may replace only an effect that same run imported: any other is refused, and the effect's whole content is copied into the run's folder before the import is sent. Without `--run` this is the plain overwrite a person at the keyboard uses, with no record and no copy.",
+          "value": "—"
+        },
+        {
+          "flag": "--run",
+          "meaning": "The run this import belongs to: its record is `agent-runs/<run>.json`.",
+          "value": "<run>"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "effects-check": {
+      "title": "Check an effect",
+      "flags": [
+        {
+          "flag": "--png",
+          "meaning": "Write frame 60 as a PNG.",
+          "value": "<path>"
+        },
+        {
+          "flag": "--preview",
+          "meaning": "Write the library tile as a GIF and a contact sheet of its frames into this folder.",
+          "value": "<dir>"
+        },
+        {
+          "flag": "--prop",
+          "meaning": "A property to draw the 120 frames and the PNG with, as `key=value`. Repeatable. The library tile is always drawn at the defaults.",
+          "value": "<key=value>"
+        }
+      ],
+      "needsDaemon": false,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "A local check failed: a file could not be read or parsed, or an effect or property was unknown."
+        }
+      ]
+    },
+    "effects-source": {
+      "title": "Read effect source",
+      "flags": [
+        {
+          "flag": "--out",
+          "meaning": "Write the source to this new file instead of printing it. An existing file is not written over.",
+          "value": "<file>"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "effects-delete": {
+      "title": "Delete an effect",
+      "flags": [
+        {
+          "flag": "--keep-presets",
+          "meaning": "Keep the effect's presets in the library. Without it they go with the effect.",
+          "value": "—"
+        },
+        {
+          "flag": "--run",
+          "meaning": "The run that imported the effect: its record is `agent-runs/<run>.json`.",
+          "value": "<run>"
+        },
+        {
+          "flag": "--dry-run",
+          "meaning": "Run every check and print what would happen; delete nothing.",
+          "value": "—"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "effects-preset-list": {
+      "title": "List presets",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "effects-preset-save": {
+      "title": "Save a preset",
+      "flags": [
+        {
+          "flag": "--prop",
+          "meaning": "A property of the preset, as `key=value`. Repeatable.",
+          "value": "<key=value>"
+        },
+        {
+          "flag": "--run",
+          "meaning": "The run this save belongs to: its record is `agent-runs/<run>.json`.",
+          "value": "<run>"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "effects-preset-delete": {
+      "title": "Delete a preset",
+      "flags": [
+        {
+          "flag": "--run",
+          "meaning": "The run that saved the preset: its record is `agent-runs/<run>.json`.",
+          "value": "<run>"
+        },
+        {
+          "flag": "--dry-run",
+          "meaning": "Run every check and print what would happen; delete nothing.",
+          "value": "—"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "scenes-list": {
+      "title": "List scenes",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "scenes-set": {
+      "title": "Set the active scene",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "scenes-create": {
+      "title": "Create a scene",
+      "flags": [
+        {
+          "flag": "--from",
+          "meaning": "A JSON file holding the groups: an array of `NewGroup`, each with a `sequence` of `\"ring\"`, `\"line\"` or `\"each\"` when the group runs its effect as one.",
+          "value": "<file>"
+        },
+        {
+          "flag": "--run",
+          "meaning": "The run this create belongs to: its record is `agent-runs/<run>.json`.",
+          "value": "<run>"
+        },
+        {
+          "flag": "--dry-run",
+          "meaning": "Run every check and print what would happen; save nothing.",
+          "value": "—"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "scenes-edit": {
+      "title": "Edit a scene",
+      "flags": [
+        {
+          "flag": "--from",
+          "meaning": "A JSON file holding the groups: an array of `NewGroup`, each with a `sequence` of `\"ring\"`, `\"line\"` or `\"each\"` when the group runs its effect as one.",
+          "value": "<file>"
+        },
+        {
+          "flag": "--run",
+          "meaning": "The run that made the scene: its record is `agent-runs/<run>.json`.",
+          "value": "<run>"
+        },
+        {
+          "flag": "--dry-run",
+          "meaning": "Run every check and print what would happen; save nothing.",
+          "value": "—"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "scenes-delete": {
+      "title": "Delete a scene",
+      "flags": [
+        {
+          "flag": "--run",
+          "meaning": "The run that made the scene: its record is `agent-runs/<run>.json`.",
+          "value": "<run>"
+        },
+        {
+          "flag": "--force",
+          "meaning": "Delete it even though it changed since the run made it.",
+          "value": "—"
+        },
+        {
+          "flag": "--dry-run",
+          "meaning": "Run every check and print what would happen; save nothing.",
+          "value": "—"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "scenes-order": {
+      "title": "Order scenes",
+      "flags": [
+        {
+          "flag": "--dry-run",
+          "meaning": "Check the order and print it; save nothing.",
+          "value": "—"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "scenes-group-move": {
+      "title": "Move a group",
+      "flags": [
+        {
+          "flag": "--from",
+          "meaning": "The scene the group is in, by id or name.",
+          "value": "<scene>"
+        },
+        {
+          "flag": "--to",
+          "meaning": "The scene the group goes to, by id or name.",
+          "value": "<scene>"
+        },
+        {
+          "flag": "--copy",
+          "meaning": "Copy the group: the source scene keeps it.",
+          "value": "—"
+        },
+        {
+          "flag": "--dry-run",
+          "meaning": "Run every check and print what would happen; save nothing.",
+          "value": "—"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "output-pause": {
+      "title": "Pause the lighting",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "output-resume": {
+      "title": "Resume the lighting",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "fans-status": {
+      "title": "Read fan status",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "fans-profile": {
+      "title": "Switch fan profile",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "peripherals-list": {
+      "title": "List peripherals",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "peripherals-show": {
+      "title": "Show a peripheral",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "peripherals-access": {
+      "title": "Set peripheral access",
+      "flags": [
+        {
+          "flag": "--reads",
+          "meaning": "Read the device's settings. Off means the daemon never opens it.",
+          "value": "on|off"
+        },
+        {
+          "flag": "--writes",
+          "meaning": "Write config changes to the device. Needs reads.",
+          "value": "on|off"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "diag-readback": {
+      "title": "Read colours back",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "diag-dump-frames": {
+      "title": "Render effect frames",
+      "flags": [
+        {
+          "flag": "--effect",
+          "meaning": "The effect's id.",
+          "value": "<id>"
+        },
+        {
+          "flag": "--frames",
+          "meaning": "How many frames to render. Defaults to 60.",
+          "default": "60",
+          "value": "<n>"
+        },
+        {
+          "flag": "--fps",
+          "meaning": "The frame rate to render at. Defaults to 60.",
+          "default": "60",
+          "value": "<n>"
+        },
+        {
+          "flag": "--out",
+          "meaning": "Where to write the frames.",
+          "value": "<dir>"
+        },
+        {
+          "flag": "--width",
+          "meaning": "The frame width. Defaults to 320.",
+          "default": "320",
+          "value": "<n>"
+        },
+        {
+          "flag": "--height",
+          "meaning": "The frame height. Defaults to 200.",
+          "default": "200",
+          "value": "<n>"
+        },
+        {
+          "flag": "--prop",
+          "meaning": "The properties, as `--prop k=v` pairs.",
+          "value": "<key=value>"
+        }
+      ],
+      "needsDaemon": false,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "A local check failed: a file could not be read or parsed, or an effect or property was unknown."
+        }
+      ]
+    },
+    "diag-bundle": {
+      "title": "Bundle logs and config",
+      "flags": [
+        {
+          "flag": "--out",
+          "meaning": "Where to write the zip.",
+          "value": "<zip>"
+        }
+      ],
+      "needsDaemon": false,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "A local check failed: a file could not be read or parsed, or an effect or property was unknown."
+        }
+      ]
+    },
+    "diag-fail-sensor": {
+      "title": "Fail a sensor",
+      "flags": [
+        {
+          "flag": "--clear",
+          "meaning": "Clear the failure instead of setting it.",
+          "value": "—"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "config-export": {
+      "title": "Export the config",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "config-import": {
+      "title": "Import the config",
+      "flags": [],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    },
+    "update": {
+      "title": "Install an update",
+      "flags": [
+        {
+          "flag": "--file",
+          "meaning": "The installer (`canvas-rgb-<version>-setup.exe`).",
+          "value": "<installer>"
+        },
+        {
+          "flag": "--sig",
+          "meaning": "The installer's `.sig` file from the release.",
+          "value": "<installer.sig>"
+        }
+      ],
+      "needsDaemon": true,
+      "exitCodes": [
+        {
+          "code": "0",
+          "meaning": "The command succeeded."
+        },
+        {
+          "code": "1",
+          "meaning": "The API refused the request, or a local check failed."
+        },
+        {
+          "code": "2",
+          "meaning": "The API port has no listener, its listener is outside the client's trusted programs, or the daemon went past its request limit."
+        }
+      ]
+    }
+  }
+}
