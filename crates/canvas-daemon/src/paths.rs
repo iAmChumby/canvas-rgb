@@ -10,7 +10,7 @@ use canvas_proto::consts;
 use std::path::{Path, PathBuf};
 
 /// The environment variable that relocates every user file.
-pub const HOME_ENV: &str = "CANVAS_RGB_HOME";
+pub use canvas_proto::consts::HOME_ENV;
 
 /// The keyboard's still bookkeeping (#312), under [`home`].
 pub const ROYUAN_STILLS_FILE: &str = "royuan-stills.json";
@@ -77,11 +77,9 @@ pub fn fans_last_file() -> PathBuf {
     home().join("fans.last.toml")
 }
 
+/// The API token file. The spine's [`consts::token_path`] is the one rule every reader shares (#543).
 pub fn token_file() -> PathBuf {
-    match std::env::var_os(HOME_ENV) {
-        Some(v) if !v.is_empty() => PathBuf::from(v).join(consts::TOKEN_FILE),
-        _ => consts::token_path(),
-    }
+    consts::token_path()
 }
 
 pub fn backups_dir() -> PathBuf {
