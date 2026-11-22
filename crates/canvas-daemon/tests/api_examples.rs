@@ -52,13 +52,8 @@ const DEVICE_B: &str = "openrgb:6e7f8091";
 /// The reusable in-process service stand-in answers every fan, fail-sensor and quit request.
 /// This wrapper adds the one answer it does not carry: the update example needs `UpdateStarted`
 /// where the reusable fake would answer `Ok`. No request leaves the process.
+#[derive(Default)]
 struct ExamplePipe(canvas_daemon::fakes::FakePipeLink);
-
-impl Default for ExamplePipe {
-    fn default() -> Self {
-        Self(canvas_daemon::fakes::FakePipeLink::default())
-    }
-}
 
 #[async_trait::async_trait]
 impl canvas_daemon::pipe_client::PipeLink for ExamplePipe {
