@@ -268,20 +268,47 @@ function New-ApiTokenString {
     return (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
 }
 
-# Creates the token file only when it is missing. The ACL (current user only, no inheritance)
-# is set on the empty file before the secret is written. Returns $true when created.
-function Initialize-ApiToken {
+# Puts the locked-down ACL on a file: the current user only, no inheritance.
+#
+# Set-Acl cannot write a protected DACL over one that is already protected: it asks for
+# SeSecurityPrivilege, which a plain user does not hold (measured on Windows PowerShell 5.1).
+# The .NET setter writes the DACL on its own and can, so it is the one used here.
+function Set-UserOnlyAcl {
     param([string]$Path)
-    if (Test-Path -LiteralPath $Path) { return $false }
-    $dir = Split-Path -Parent $Path
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    [System.IO.File]::WriteAllBytes($Path, [byte[]]@())
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $sec = New-Object System.Security.AccessControl.FileSecurity
     $sec.SetAccessRuleProtection($true, $false)
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')
     $sec.AddAccessRule($rule)
-    Set-Acl -LiteralPath $Path -AclObject $sec
+    $item = Get-Item -LiteralPath $Path
+    if ($item.PSObject.Methods.Name -contains 'SetAccessControl') {
+        $item.SetAccessControl($sec)
+    } elseif ($null -ne ([System.Management.Automation.PSTypeName]'System.IO.FileSystemAclExtensions').Type) {
+        [System.IO.FileSystemAclExtensions]::SetAccessControl($item, $sec)
+    } else {
+        Set-Acl -LiteralPath $Path -AclObject $sec
+    }
+}
+
+# Creates the token file only when it is missing. The ACL (current user only, no inheritance)
+# is set on the empty file before the secret is written. Returns $true when created.
+#
+# A file that is already there keeps its token, and its ACL is put back to the locked-down one
+# (#542): a token file that was copied in, restored from a backup or made by an older build must
+# not stay readable by anyone else. The token is never rewritten.
+function Initialize-ApiToken {
+    param([string]$Path)
+    if (Test-Path -LiteralPath $Path) {
+        try { Set-UserOnlyAcl -Path $Path }
+        catch {
+            throw "the API token file $Path is there, but its permissions could not be locked down to the current user ($($_.Exception.Message)). Fix its permissions by hand, or delete the file so a new token is made. The token was not changed."
+        }
+        return $false
+    }
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllBytes($Path, [byte[]]@())
+    Set-UserOnlyAcl -Path $Path
     [System.IO.File]::WriteAllText($Path, (New-ApiTokenString), (New-Object System.Text.ASCIIEncoding))
     return $true
 }

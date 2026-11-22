@@ -123,8 +123,8 @@ async fn daemon_main(fakes: bool) -> Exit {
     let token = match canvas_daemon::token::load_or_create(&canvas_daemon::paths::token_file()) {
         Ok(token) => token,
         Err(e) => {
-            tracing::error!(error = %e, "could not create the API token");
-            return Exit::new(1, format!("could not create the API token: {e}; exiting"));
+            tracing::error!(error = %e, "could not load the API token");
+            return Exit::new(1, format!("could not load the API token: {e}; exiting"));
         }
     };
 

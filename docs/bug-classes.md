@@ -321,6 +321,49 @@ or acts as if a step worked without checking that it did.
   Fixed or Curve. The page's "no duty" can come from one failed poll (`fans.rs:1370` turns a read
   error into `None`), so a lockout must never take the way back with it. When adding a device value to the page, read it with `known()` and draw
   `UnreadValue` for `undefined`.
+- A third mechanism, same cause: a protection that is applied when a thing is created and never
+  checked again. The state the code trusts is "I made this, so it is safe", and that is only true on
+  the day it was made.
+  [#542](https://github.com/iAmChumby/canvas-rgb/issues/542): the daemon's API token file
+  (`%APPDATA%\canvas-rgb\api-token`) had its DACL (the calling user and SYSTEM only, protected) set
+  only when the file was first made (`crates/canvas-daemon/src/token.rs`, `load_or_create`). A token
+  file that was copied in, restored from a backup or made by an older build kept the wider ACL it
+  came with, and whoever its ACL allowed could hold the bearer token and drive the lights and the
+  fans with it.
+- **Class fix, third mechanism:** done (#542). The protection is checked every time the file is
+  loaded, not only when it is created: `token::load_or_create` reads the file's DACL
+  (`GetNamedSecurityInfoW`, then the ACEs one by one with `GetAce`), and when it is not the
+  locked-down one it puts it back and reads it back to be sure it took. The locked-down DACL is
+  written with `SetNamedSecurityInfoW` and `PROTECTED_DACL_SECURITY_INFORMATION`, so it is protected
+  and inherits nothing from the folder it is in; the owner is not changed. The token value is never
+  changed, and the file is never deleted, renamed or replaced. A DACL that cannot be put right is an
+  error that names the path: the daemon refuses to start rather than hand out a token that someone
+  else can read. Reading the ACEs one by one is what makes the check honest: it sees an extra
+  principal, a deny ACE, a narrower right and an unprotected DACL, not only a different owner. The
+  re-apply is logged at INFO when it happened. Tests (`crates/canvas-daemon/src/token.rs`): a token
+  file with a wider ACL (BUILTIN\Users may read it) is locked down on load, the DACL names only the
+  current user and SYSTEM, it is protected, and the token is unchanged; a file the daemon makes is
+  locked down; a file that is already locked down is left alone. The rule: **a protection that is
+  applied when something is created is checked every time it is used.** Making it protected is not
+  the same as keeping it protected.
+- **Sibling search (#542):** the API token is the only secret the daemon or the service writes with a
+  restricted ACL.
+  - The installer writes the same file (`installer/lib.ps1`, `Initialize-ApiToken`): it applied the
+    locked-down ACL only when the file was missing, so it had the same create-only shape. It now puts
+    the ACL back on a file that is already there and never rewrites the token
+    (`installer/tests/RestoreFile.Tests.ps1`: a token file that Everyone may read is locked down
+    again and keeps its token). `Set-Acl` cannot write a protected DACL over one that is already
+    protected (it asks for `SeSecurityPrivilege`, which a plain user does not hold, measured on
+    Windows PowerShell 5.1), so the installer writes the DACL through the .NET setter.
+  - The service's machine home (`%ProgramData%\canvas-rgb`, `crates/canvas-svc/src/secure.rs`): the
+    protected DACL is applied on every start (`secure_home` calls `apply_protected_dacl` on the home
+    whatever else it does), and an entry inside it that is not trusted fails the step closed. Not
+    create-only.
+  - The service's update staging folder (`<home>\updates`, `crates/canvas-svc/src/update_install.rs`):
+    it is created with the private DACL, and every use checks the owner, the reparse point and the
+    write access of anyone who is not an administrator, and fails closed. Not create-only.
+  - The daemon's other files (`config.toml`, `scenes.json`, the effects folder) are user data in the
+    user's own folder: no secret, and no restricted ACL to keep.
 
 ### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away
 
