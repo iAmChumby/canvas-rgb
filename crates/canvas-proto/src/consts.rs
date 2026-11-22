@@ -132,8 +132,22 @@ pub fn user_effects_dir() -> PathBuf {
     user_config_dir().join("effects")
 }
 
+/// Moves the user data folder (the token, the scenes, the effects) to the folder it names, for
+/// tests and portable setups. Every reader of the token honours it through [`token_path`].
+pub const HOME_ENV: &str = "CANVAS_RGB_HOME";
+
+/// The API token file: `api-token` under [`HOME_ENV`] when it is set and not empty, otherwise
+/// under [`user_config_dir`]. The daemon writes it here and every client reads it here.
 pub fn token_path() -> PathBuf {
-    user_config_dir().join(TOKEN_FILE)
+    token_path_with(std::env::var_os(HOME_ENV))
+}
+
+/// [`token_path`] with the override passed in, so tests need not touch the process environment.
+pub fn token_path_with(home: Option<std::ffi::OsString>) -> PathBuf {
+    match home {
+        Some(v) if !v.is_empty() => PathBuf::from(v).join(TOKEN_FILE),
+        _ => user_config_dir().join(TOKEN_FILE),
+    }
 }
 
 pub fn api_base_url() -> String {
@@ -255,5 +269,24 @@ mod api_port_tests {
         assert_eq!(api_port(), 9430);
         assert!(!api_host_allowed("127.0.0.1:19430"));
         std::env::remove_var(TEST_API_PORT_ENV);
+    }
+}
+
+#[cfg(test)]
+mod token_path_tests {
+    use super::*;
+
+    /// #543: the editor read the token from the default folder while the daemon wrote it under
+    /// `CANVAS_RGB_HOME`. Both now go through this one rule.
+    #[test]
+    fn the_home_override_moves_the_token_file() {
+        let home = std::env::temp_dir().join("canvas-rgb-home-test");
+        assert_eq!(token_path_with(Some(home.clone().into_os_string())), home.join(TOKEN_FILE));
+    }
+
+    #[test]
+    fn no_override_or_an_empty_one_keeps_the_default_folder() {
+        assert_eq!(token_path_with(None), user_config_dir().join(TOKEN_FILE));
+        assert_eq!(token_path_with(Some(std::ffi::OsString::new())), user_config_dir().join(TOKEN_FILE));
     }
 }

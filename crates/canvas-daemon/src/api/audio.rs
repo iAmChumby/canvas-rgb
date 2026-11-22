@@ -87,7 +87,7 @@ pub async fn get_test(
     if !app.inputs.renew_lease(&query.lease) {
         return Err(ApiFailure::new(
             axum::http::StatusCode::GONE,
-            "gone",
+            canvas_proto::api::error_codes::GONE,
             "the audio test lease is unknown or expired; take a new one",
         ));
     }
