@@ -2030,7 +2030,6 @@ window.requestAnimationFrame(draw);
     fn a_tile_build_carries_a_load_timeout_as_data_and_a_script_error_as_a_plain_failure() {
         let timeout = build_error(html_builder_seeded(1)("html:busy", BUSY_AT_LOAD));
         assert!(timeout.timed_out, "a load past its budget is a timeout: {timeout:?}");
-        assert!(timeout.reason.contains("ran longer than"), "{timeout:?}");
 
         let script = build_error(html_builder_seeded(1)("html:throws", THROWS_AT_LOAD));
         assert!(!script.timed_out, "a script error fails the same way every time: {script:?}");

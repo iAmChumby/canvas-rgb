@@ -1558,7 +1558,7 @@ async fn a_stack_is_listed_activated_and_tiled_with_the_seeded_builders() {
 /// layer (#58). The layer's build is the real loader, so its top-level script runs past
 /// `LOAD_BUDGET_MS` exactly as a busy machine's would.
 #[tokio::test]
-async fn a_stack_tile_whose_layer_ran_out_of_its_load_budget_is_tried_again_later() {
+async fn a_stack_tile_whose_layer_ran_out_of_its_load_budget_is_a_load_timeout() {
     const BUSY_AT_LOAD: &str = r##"<head><title>Busy</title></head>
 <body><canvas id="stage" width="8" height="8"></canvas></body>
 <script>while (true) {}</script>"##;
@@ -1576,7 +1576,11 @@ async fn a_stack_tile_whose_layer_ran_out_of_its_load_budget_is_tried_again_late
         tile_builder,
         &[],
     ));
-    let retry = Duration::from_secs(3);
+    // A long retry interval, so nothing here depends on the clock: the retry after the interval is
+    // the cache's own behaviour, tested for a user effect's tile in tests/api.rs
+    // (a_tile_whose_load_ran_out_of_time_is_tried_again_after_the_retry_interval). This test
+    // proves a stack tile reaches that same path: a load timeout, not a plain failure.
+    let retry = Duration::from_secs(600);
     let cache = canvas_daemon::thumbnail::ThumbnailCache::with_limits(Duration::from_secs(30), retry);
     let harness = build_with_cache("t8-load-timeout", Some(user), cache);
     // The layer is a loaded user effect; its tile build is the real loader on the busy source.
@@ -1612,15 +1616,6 @@ async fn a_stack_tile_whose_layer_ran_out_of_its_load_budget_is_tried_again_late
         builds.load(Ordering::SeqCst),
         after_the_first,
         "a stack tile's load timeout inside the retry interval was built again"
-    );
-
-    // After the interval the tile is tried again, like a user effect's tile that timed out: a
-    // timeout is not remembered for good.
-    tokio::time::sleep(retry * 2).await;
-    assert_eq!(ask().await.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(
-        builds.load(Ordering::SeqCst) > after_the_first,
-        "a stack tile's load timeout was remembered for good: the tile was never tried again"
     );
 }
 
