@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "gen:docs": "node scripts/gen-agent-docs.mjs",
     "build": "npm run gen:docs && npm run setup-sha && npm run typecheck && next build --webpack",
-    "test": "node --test tests/glow.test.mjs tests/source.test.mjs tests/api-reference.test.mjs tests/agent-docs.test.mjs tests/headings.test.mjs"
+    "test": "node --test tests/glow.test.mjs tests/source.test.mjs tests/api-reference.test.mjs tests/agent-docs.test.mjs tests/headings.test.mjs tests/install-hash.test.mjs"
   },
   "dependencies": {
     "@fontsource-variable/jetbrains-mono": "5.3.0",
