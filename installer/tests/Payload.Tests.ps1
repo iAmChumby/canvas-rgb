@@ -178,7 +178,8 @@ try {
         foreach ($id in ([regex]::Matches($expr, '[A-Za-z_][A-Za-z0-9_]*') | ForEach-Object { $_.Value })) {
             Assert-True (@('SilentRun', 'VerySilent', 'UpdateRun', 'ServiceUpdateRun', 'and', 'or', 'not') -contains $id) "the decision may use only its four inputs and and/or/not, not [$id]"
         }
-        # Pascal's and/or/not are PowerShell's -and/-or/-not with the same precedence; eval the real text.
+        # Pascal's and/or/not map to PowerShell's -and/-or/-not, but Pascal's 'and' binds tighter than 'or'
+        # while PowerShell gives -and and -or equal precedence: keep the .iss expression fully parenthesized.
         $ps = [regex]::Replace($expr, '\b(and|or|not)\b', { param($x) '-' + $x.Groups[1].Value }, 'IgnoreCase')
         $ps = [regex]::Replace($ps, '\b(SilentRun|VerySilent|UpdateRun|ServiceUpdateRun)\b', { param($x) '$' + $x.Groups[1].Value })
         $decide = [scriptblock]::Create("param(`$SilentRun, `$VerySilent, `$UpdateRun, `$ServiceUpdateRun) $ps")

@@ -343,7 +343,7 @@ them through the updater:
 (`app/src-tauri/tests/fixtures/update`); nothing in them touches GitHub or the real key.
 
 **Installing by hand.** Start the setup exe from a normal, non-elevated shell or by double-click:
-`.\canvas-rgb-setup-X.Y.Z.exe /SILENT /NORESTART /UPDATE`, the same switches the tray's own updater passes
+`.\canvas-rgb-setup-X.Y.Z.exe /SILENT /NORESTART /UPDATE` (Setup shows its progress window), the same switches the tray's own updater passes
 (`app/src-tauri/src/update/launch.rs`). Setup has `PrivilegesRequired=admin` and raises its
 own permission prompt. Never start it with `Start-Process -Verb RunAs` or from an administrator shell:
 Setup would then be elevated from its first instruction, `ExecAsOriginalUser` would have no
