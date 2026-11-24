@@ -951,7 +951,9 @@ impl AttackSharkX6 {
         }
     }
 
-    fn info(&self) -> PeripheralInfo {
+    /// The mouse as the hub sees it, from this adapter's own metadata. Public so the daemon's
+    /// fakes mode can report the same shape without opening anything (#243).
+    pub fn info(&self) -> PeripheralInfo {
         PeripheralInfo {
             id: self.device_id(),
             name: DISPLAY_NAME.into(),

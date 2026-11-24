@@ -1267,7 +1267,9 @@ impl EightBitDoUltimate2 {
         }
     }
 
-    fn info(&self) -> PeripheralInfo {
+    /// The pad as the hub sees it, from this adapter's own metadata. Public so the daemon's
+    /// fakes mode can report the same shape without opening anything (#243).
+    pub fn info(&self) -> PeripheralInfo {
         let personality = self.personality.unwrap_or(Personality::XInput);
         PeripheralInfo {
             id: self.device_id(),

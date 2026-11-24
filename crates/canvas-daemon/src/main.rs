@@ -190,7 +190,8 @@ async fn daemon_main(fakes: bool) -> Exit {
 
     // The peripherals: the mouse and the controller. They are enumerated, never opened, until
     // the owner says so in `peripherals.json` (see `canvas_daemon::peripherals`). Fakes mode
-    // has no peripherals at all.
+    // wires in one fake of each (#243), shaped by the real adapters, so the Peripherals view has
+    // something to show and drive without opening HID.
     let peripherals: Vec<Box<dyn canvas_daemon::peripherals::Peripheral>> =
         if canvas_daemon::fakes::real_peripherals_enabled(fakes) {
             vec![
@@ -200,7 +201,7 @@ async fn daemon_main(fakes: bool) -> Exit {
                 )),
             ]
         } else {
-            Vec::new()
+            canvas_daemon::fakes::fake_peripherals()
         };
 
     let (quit_tx, mut quit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -261,15 +262,13 @@ async fn daemon_main(fakes: bool) -> Exit {
     // first frame.
     app.set_input_source(Some(app.capture_source()));
 
-    // The peripherals the owner allowed are opened; the others stay closed.
-    // Fakes mode has no peripherals, so nothing is opened.
-    if canvas_daemon::fakes::real_peripherals_enabled(fakes) {
-        canvas_daemon::peripherals::apply_saved(&app).await;
-        // The values a device has are read only while the person is away (#127): a view open
-        // never triggers a read, so the refresh runs here in the background, gated on Windows'
-        // last-input time.
-        canvas_daemon::peripherals::start_idle_refresh(app.clone());
-    }
+    // The peripherals the owner allowed are opened; the others stay closed. In fakes mode this
+    // applies to the in-memory fakes, so a saved access is honoured there too (#243).
+    canvas_daemon::peripherals::apply_saved(&app).await;
+    // The values a device has are read only while the person is away (#127): a view open never
+    // triggers a read, so the refresh runs here in the background, gated on Windows' last-input
+    // time. In fakes mode it reads the in-memory fakes.
+    canvas_daemon::peripherals::start_idle_refresh(app.clone());
 
     // The zone sizes from disk.
     {

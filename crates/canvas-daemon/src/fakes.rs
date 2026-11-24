@@ -13,8 +13,8 @@
 //!   to the fake OpenRGB server on [`FAKE_OPENRGB_PORT`] (or
 //!   `CANVAS_RGB_FAKE_OPENRGB_PORT`);
 //! - never opens HID devices (mouse, controller, ROYUAN keyboard, CHIONE
-//!   display): the peripheral and display adapters are empty/`NoDisplays` and
-//!   the composite's keyboard is disabled;
+//!   display): the peripheral and display adapters are in-memory fakes and the
+//!   composite's keyboard is disabled;
 //! - never captures the screen or audio, never runs the power watcher, the
 //!   SignalRGB conflict check, or the first run's SignalRGB reads;
 //! - touches no path outside its home: every path already follows
@@ -361,6 +361,223 @@ impl canvas_proto::traits::NumericDisplayAdapter for FakeNumericDisplay {
 impl canvas_adapters::resume::ResumeBehavior for FakeNumericDisplay {
     fn on_resume(&self) -> canvas_adapters::resume::OnResume {
         // In memory: a sleep resets nothing.
+        canvas_adapters::resume::OnResume::NothingToRestore
+    }
+}
+
+// --- Fake peripherals -------------------------------------------------------
+
+/// A fake peripheral: the shape of a real adapter (`info` and `schema` come from the adapter
+/// itself), with its settings held in memory (#243).
+///
+/// The transport is fake; the shape is not. The daemon's own `AttackSharkX6` and
+/// `EightBitDoUltimate2` build the metadata and the property list, so the Peripherals view shows
+/// the same sections, ranges and read-only keys as the real devices, and cannot drift from them.
+/// A read answers with the values the fake holds and a write changes them: nothing is opened and
+/// no HID report is sent.
+///
+/// A write is checked against the schema as the real adapters check it: a known key, a writable
+/// key, and a value of the right kind inside its range, step or option list. The fake does not
+/// model the device's own order rules or side effects (the X6 refusing a DPI write before a read,
+/// a stage past the stage count, brightness off a static LED mode, the stage-count side effect;
+/// the 8BitDo refusing paddle keys of an inactive profile), so a write the fake accepts can still
+/// be refused by the real device. Modelling those would be a second copy of the device.
+pub struct FakePeripheral {
+    /// The adapter name the hub logs (`fake-attack-shark-x6`, ...).
+    name: &'static str,
+    info: canvas_proto::peripheral::PeripheralInfo,
+    schema: canvas_proto::peripheral::PeripheralSchema,
+    values: canvas_proto::props::Props,
+    connected: bool,
+    writes_enabled: bool,
+}
+
+impl FakePeripheral {
+    /// Builds the fake from a real adapter's own metadata and schema, with every property at the
+    /// default its kind declares.
+    fn from_adapter(
+        name: &'static str,
+        mut info: canvas_proto::peripheral::PeripheralInfo,
+        schema: canvas_proto::peripheral::PeripheralSchema,
+    ) -> Self {
+        // Marked like the fake display, so a screenshot is never mistaken for the real device.
+        info.name = format!("{} (fake)", info.name);
+        let values = schema.properties().map(|def| (def.key.clone(), def.kind.default_value())).collect();
+        Self { name, info, schema, values, connected: false, writes_enabled: false }
+    }
+
+    /// The fake mouse, shaped like the Attack Shark X6.
+    pub fn mouse() -> Self {
+        let adapter = canvas_adapters::attack_shark_x6::AttackSharkX6::new();
+        Self::from_adapter("fake-attack-shark-x6", adapter.info(), adapter.schema())
+    }
+
+    /// The fake controller, shaped like the 8BitDo Ultimate 2.
+    pub fn controller() -> Self {
+        let adapter = canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::new();
+        Self::from_adapter("fake-eightbitdo-ultimate-2", adapter.info(), adapter.schema())
+    }
+
+    fn check_id(&self, device: &canvas_proto::device::DeviceId) -> Result<(), canvas_proto::traits::AdapterError> {
+        if *device == self.info.id {
+            Ok(())
+        } else {
+            Err(canvas_proto::traits::AdapterError::UnknownDevice(device.clone()))
+        }
+    }
+}
+
+/// The peripherals a fakes-mode daemon wires in (#243): one mouse with DPI stages and one
+/// controller with its profiles, both held in memory.
+pub fn fake_peripherals() -> Vec<Box<dyn crate::peripherals::Peripheral>> {
+    vec![Box::new(FakePeripheral::mouse()), Box::new(FakePeripheral::controller())]
+}
+
+/// Checks one value against its kind, as the real adapters do: the right shape, inside the range,
+/// on the step, or in the option list.
+fn check_fake_value(
+    def: &canvas_proto::props::PropertyDef,
+    value: &canvas_proto::props::PropValue,
+) -> Result<(), canvas_proto::traits::AdapterError> {
+    use canvas_proto::props::{PropKind, PropValue};
+    use canvas_proto::traits::AdapterError;
+    let wrong = || {
+        AdapterError::Protocol(format!(
+            "the setting {} does not take that kind of value: {value:?}",
+            def.key
+        ))
+    };
+    match (&def.kind, value) {
+        (PropKind::Number { min, max, step, .. }, PropValue::Number(number)) => {
+            if *number < *min || *number > *max {
+                return Err(AdapterError::Protocol(format!(
+                    "{} is {number}; it takes {min} to {max}",
+                    def.key
+                )));
+            }
+            if *step > 0.0 && ((*number - *min) / *step).fract() != 0.0 {
+                return Err(AdapterError::Protocol(format!(
+                    "{} is {number}; it takes steps of {step}",
+                    def.key
+                )));
+            }
+            Ok(())
+        }
+        (PropKind::Number { .. }, _) => Err(wrong()),
+        (PropKind::Bool { .. }, PropValue::Bool(_)) => Ok(()),
+        (PropKind::Bool { .. }, _) => Err(wrong()),
+        (PropKind::Choice { options, .. }, PropValue::Choice(choice)) => {
+            if options.iter().any(|option| option == choice) {
+                Ok(())
+            } else {
+                Err(AdapterError::Protocol(format!("{} has no option {choice:?}", def.key)))
+            }
+        }
+        (PropKind::Choice { .. }, _) => Err(wrong()),
+        (PropKind::Color { .. }, PropValue::Color(_)) => Ok(()),
+        (PropKind::Color { .. }, _) => Err(wrong()),
+        // The real adapters put no bounds on a hue or an angle, so neither does the fake.
+        (PropKind::Hue { .. }, PropValue::Hue(_)) | (PropKind::Angle { .. }, PropValue::Angle(_)) => Ok(()),
+        (PropKind::Hue { .. }, _) | (PropKind::Angle { .. }, _) => Err(wrong()),
+    }
+}
+
+#[async_trait::async_trait]
+impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    async fn connect(&mut self) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.connected = true;
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.connected = false;
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    async fn discover(
+        &mut self,
+    ) -> Result<Vec<canvas_proto::peripheral::PeripheralInfo>, canvas_proto::traits::AdapterError> {
+        let mut info = self.info.clone();
+        info.connected = self.connected;
+        Ok(vec![info])
+    }
+
+    async fn describe(
+        &mut self,
+        device: &canvas_proto::device::DeviceId,
+    ) -> Result<canvas_proto::peripheral::PeripheralSchema, canvas_proto::traits::AdapterError> {
+        self.check_id(device)?;
+        Ok(self.schema.clone())
+    }
+
+    async fn read_settings(
+        &mut self,
+        device: &canvas_proto::device::DeviceId,
+    ) -> Result<canvas_proto::props::Props, canvas_proto::traits::AdapterError> {
+        self.check_id(device)?;
+        if !self.connected {
+            return Err(canvas_proto::traits::AdapterError::NotConnected);
+        }
+        Ok(self.values.clone())
+    }
+
+    async fn write_settings(
+        &mut self,
+        device: &canvas_proto::device::DeviceId,
+        props: &canvas_proto::props::Props,
+    ) -> Result<(), canvas_proto::traits::AdapterError> {
+        use canvas_proto::traits::AdapterError;
+        self.check_id(device)?;
+        if !self.connected {
+            return Err(AdapterError::NotConnected);
+        }
+        if !self.writes_enabled {
+            return Err(AdapterError::Unsupported(
+                "config writes are off: turn them on with set_writes_enabled(true) first",
+            ));
+        }
+        // Every key is checked before anything changes: a refused write changes nothing.
+        for (key, value) in props {
+            let Some(def) = self.schema.property(key) else {
+                return Err(AdapterError::Protocol(format!(
+                    "the peripheral has no setting called {key}"
+                )));
+            };
+            if !self.schema.is_writable(key) {
+                return Err(AdapterError::Protocol(format!("{key} is read-only")));
+            }
+            check_fake_value(def, value)?;
+        }
+        for (key, value) in props {
+            self.values.insert(key.clone(), value.clone());
+        }
+        Ok(())
+    }
+
+    fn writes_enabled(&self) -> bool {
+        self.writes_enabled
+    }
+}
+
+impl crate::peripherals::Peripheral for FakePeripheral {
+    fn set_config_writes(&mut self, on: bool) {
+        self.writes_enabled = on;
+    }
+}
+
+impl canvas_adapters::resume::ResumeBehavior for FakePeripheral {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // Nothing to restore, like the real X6 and 8BitDo: neither device sets a mode when it
+        // connects, and both store what the app writes. The fake does the same and holds its
+        // values in memory, so a wake leaves them as they were and nothing is sent again.
         canvas_adapters::resume::OnResume::NothingToRestore
     }
 }
