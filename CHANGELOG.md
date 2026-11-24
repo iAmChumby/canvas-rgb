@@ -16,6 +16,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Installer: the developer setup starts the tray again when it finishes, so a running canvas-rgb comes back without signing out and in. (#555)
+- Installer: a silent update installed by hand brings the tray back afterwards. (#552)
 - Editor: with `CANVAS_RGB_HOME` set, the editor reads the API token from that folder, the same one the daemon writes it to, instead of the default folder (where it got 401s). (#543)
 - Security: the tray uses `cookie` 0.18.3, the release that fixes RUSTSEC-2026-0594 (private cookie nonces can repeat after a fork; Windows applications are not affected, so this clears the advisory gate). (#557)
 - Security: the tray uses `url` 2.5.9, the release that fixes RUSTSEC-2026-0592 (a stack overflow on nested `blob:` URLs). (#545)
