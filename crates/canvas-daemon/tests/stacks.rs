@@ -1453,9 +1453,9 @@ async fn a_stack_is_listed_activated_and_tiled_with_the_seeded_builders() {
     let tile_calls = Arc::new(AtomicUsize::new(0));
     let real = canvas_daemon::user_effects::html_builder();
     let counter = Arc::clone(&tile_calls);
-    let tile_builder: canvas_daemon::user_effects::Builder = Arc::new(move |id: &str, source: &str| {
+    let tile_builder: canvas_daemon::user_effects::TileBuilder = Arc::new(move |id: &str, source: &str| {
         counter.fetch_add(1, Ordering::SeqCst);
-        real(id, source)
+        real(id, source).map_err(canvas_daemon::thumbnail::BuildError::plain)
     });
     let user = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock_and_tiles(
         canvas_daemon::user_effects::html_builder(),

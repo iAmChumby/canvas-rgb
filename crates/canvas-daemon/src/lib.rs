@@ -92,7 +92,7 @@ pub fn tile_leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack:
             ));
         }
         match user.create_for_tile(id) {
-            Some(made) => made,
+            Some(made) => made.map_err(|error| error.reason),
             None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
         }
     })
@@ -166,11 +166,11 @@ pub fn create_effect_for_tile(
     user: &Arc<user_effects::UserEffects>,
     stacks: &crate::stacks::Stacks,
     id: &str,
-) -> Result<Box<dyn canvas_proto::traits::Effect>, String> {
+) -> Result<Box<dyn canvas_proto::traits::Effect>, crate::thumbnail::BuildError> {
     if id.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
-        return Err(format!(
+        return Err(crate::thumbnail::BuildError::plain(format!(
             "{id} is a pattern: it has no picture, so it is drawn as its dots"
-        ));
+        )));
     }
     if let Some(stack) = stacks.get(id) {
         let live = Arc::new(std::sync::RwLock::new(crate::stack::LiveMap::from_stack(&stack, 1)));
@@ -185,7 +185,8 @@ pub fn create_effect_for_tile(
     }
     match user.create_for_tile(id) {
         Some(made) => made,
-        None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
+        None => canvas_effects::create(id)
+            .ok_or_else(|| crate::thumbnail::BuildError::plain(format!("no effect with the id {id}"))),
     }
 }
 

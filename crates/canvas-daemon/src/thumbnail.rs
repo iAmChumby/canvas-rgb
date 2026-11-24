@@ -85,6 +85,55 @@ pub const RENDER_BUDGET: std::time::Duration = std::time::Duration::from_secs(30
 /// gives every effect this seed instead of the clock's. See [`canvas_effects::TILE_SEED`].
 pub const TILE_SEED: u32 = canvas_effects::TILE_SEED;
 
+/// A tile build's failure, and whether it was the load budget rather than the effect.
+///
+/// The tile path decides whether to retry a tile from `timed_out`, which is set where
+/// [`canvas_html::HtmlError`] is converted (`user_effects::html_builder_seeded`). The message is
+/// only what a person reads; rewording it cannot change the verdict (#58).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildError {
+    /// What went wrong, as a sentence.
+    pub reason: String,
+    /// True when the effect's top-level script ran past its load budget.
+    pub timed_out: bool,
+}
+
+impl BuildError {
+    /// A failure of the effect itself: it fails the same way every time.
+    pub fn plain(reason: String) -> Self {
+        Self { reason, timed_out: false }
+    }
+
+    /// A load that ran past its budget: worth another try later (#58).
+    pub fn timeout(reason: String) -> Self {
+        Self { reason, timed_out: true }
+    }
+
+    /// A failure from a builder that only reports text: the load question is read from the
+    /// runtime's `timeout: ` prefix. The tile path's own builder passes [`BuildError::timeout`]
+    /// instead, so this is only for a caller that supplies one text builder (a test).
+    pub fn from_text(reason: String) -> Self {
+        if build_error_depends_on_load(&reason) {
+            Self::timeout(reason)
+        } else {
+            Self::plain(reason)
+        }
+    }
+}
+
+impl From<canvas_html::HtmlError> for BuildError {
+    fn from(error: canvas_html::HtmlError) -> Self {
+        let timed_out = matches!(&error, canvas_html::HtmlError::Timeout(_));
+        Self { reason: error.to_string(), timed_out }
+    }
+}
+
+impl std::fmt::Display for BuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
 /// Why a thumbnail render was given up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderError {
@@ -105,18 +154,18 @@ impl RenderError {
         }
     }
 
-    /// The error of building an effect for a tile. The builders return the text of
-    /// [`canvas_html::HtmlError`], and its `Timeout` variant reads `timeout: ...`: a top-level
+    /// The error of building an effect for a tile. Whether the load ran past its budget is
+    /// carried by the build ([`BuildError::timed_out`]), not read off its wording: a top-level
     /// script that ran past its load budget *may* have lost to a busy machine, so it is worth
     /// another try ([`RenderError::OverBudget`]). This is only a plausible cause, not proof —
-    /// a script that is slower than `LOAD_BUDGET_MS` on every PC looks the same and is retried too
-    /// (one build per tile per [`TIMEOUT_RETRY_AFTER`]) (#58). Any other build error fails the
-    /// same way every time.
-    pub fn from_build_error(why: String) -> Self {
-        if build_error_depends_on_load(&why) {
-            RenderError::OverBudget(why)
+    /// a script that is slower than `LOAD_BUDGET_MS` on every PC is retried too (one build per
+    /// tile per [`TIMEOUT_RETRY_AFTER`]) (#58). Any other build error fails the same way every
+    /// time.
+    pub fn from_build_error(error: BuildError) -> Self {
+        if error.timed_out {
+            RenderError::OverBudget(error.reason)
         } else {
-            RenderError::Failed(why)
+            RenderError::Failed(error.reason)
         }
     }
 
@@ -146,17 +195,14 @@ impl From<RenderError> for String {
     }
 }
 
-/// True when a build error says the machine was too busy, not the effect.
+/// True when a build error's text says the machine was too busy, not the effect.
 ///
-/// The builders return the text of [`canvas_html::HtmlError`], and its `Timeout` variant reads
-/// `timeout: ...`: a script that ran past its load budget may have lost to a busy machine (a
-/// game running, a build), so such a failure is worth another try later. It is a plausible
-/// cause, not proof — a script slower than `LOAD_BUDGET_MS` everywhere looks the same and is
-/// retried too (#58). Any other build error fails the same way every time.
-///
-/// The tile build path and the user-effects path ([`crate::user_effects`]) both ask this, so
-/// they tell a timeout from a real failure the same way. The tile *frame* path is a separate
-/// case: it carries its own flag (`TileFailure::load_dependent`) and does not ask this.
+/// The lights' and import paths get a builder's text ([`canvas_html::HtmlError`]'s Display,
+/// whose `Timeout` variant reads `timeout: ...`): a script that ran past its load budget may
+/// have lost to a busy machine (a game running, a build), so such a failure is worth another
+/// try later. The tile path does not ask this: its build carries [`BuildError::timed_out`] as
+/// data (#58). It is a plausible cause, not proof — a script slower than `LOAD_BUDGET_MS`
+/// everywhere looks the same and is retried too.
 pub fn build_error_depends_on_load(why: &str) -> bool {
     why.starts_with("timeout: ")
 }
@@ -1384,10 +1430,23 @@ mod tests {
 
     #[test]
     fn a_build_error_that_is_a_timeout_is_over_budget_and_any_other_is_failed() {
-        let timeout = RenderError::from_build_error("timeout: the effect's script ran longer than 2000 ms".into());
+        let timeout = RenderError::from_build_error(BuildError::timeout(
+            "the effect's script ran longer than 2000 ms".into(),
+        ));
         assert!(timeout.depends_on_load(), "{timeout:?}");
-        let script = RenderError::from_build_error("script: script 0: boom".into());
+        let script = RenderError::from_build_error(BuildError::plain("script: script 0: boom".into()));
         assert_eq!(script, RenderError::Failed("script: script 0: boom".into()));
+    }
+
+    /// A timeout is carried as data, not read off the wording: a build error whose message does
+    /// not start with `timeout: ` is still retried later (#58).
+    #[test]
+    fn a_timeout_whose_message_does_not_say_timeout_is_still_a_timeout() {
+        let why = "the effect's script ran longer than 2000 ms".to_string();
+        assert!(!why.starts_with("timeout: "), "the test message must not carry the old prefix");
+        let timeout = RenderError::from_build_error(BuildError::timeout(why.clone()));
+        assert!(timeout.depends_on_load(), "{timeout:?}");
+        assert_eq!(timeout.reason(), why);
     }
 
     #[test]
