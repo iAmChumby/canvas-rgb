@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use canvas_proto::tauri::{
@@ -92,16 +92,6 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
-}
-
-/// `log::append` writes under %LOCALAPPDATA%; point that at a temp folder for the whole test run.
-fn isolate_log() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("canvas-rgb-update-test-log-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("LOCALAPPDATA", dir);
-    });
 }
 
 /// The folder a test runs in starts empty, even when a killed run left one behind.
@@ -343,7 +333,6 @@ fn harness_full(
     service: Option<ServiceAsker>,
     channel: UpdateChannel,
 ) -> Harness {
-    isolate_log();
     let server = FakeServer::start();
     let dir = TempDir::new();
     let settings = Settings {
@@ -542,7 +531,6 @@ fn state_file_round_trips() {
 
 #[test]
 fn missing_corrupt_and_partial_state_files_are_defaults() {
-    isolate_log();
     let dir = TempDir::new();
     let path = dir.path().join("update.json");
     assert_eq!(state::load(&path), Stored::default());
@@ -1651,7 +1639,6 @@ fn a_timeout_after_connecting_is_not_offline() {
 
 #[test]
 fn a_corrupt_state_file_is_kept_aside_not_overwritten() {
-    isolate_log();
     let dir = TempDir::new();
     let path = dir.path().join("update.json");
     std::fs::write(&path, r#"{"pending": {"version": "0.1.1", "notes": "n""#).unwrap(); // cut off

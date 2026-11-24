@@ -101,8 +101,9 @@ ConfirmUninstall=canvas-rgb has stopped running and every fan is back on your mo
 [Run]
 ; Everything else runs from [Code] in a fixed order. This is the only [Run] entry.
 ; The wizard's ticked "Launch canvas-rgb" starts the tray with --onboard, so the window opens on the
-; onboarding. skipifsilent: a /SILENT run starts the tray from [Code] instead (CurStepChanged), so the
-; two paths never start it twice. A /VERYSILENT run starts nothing.
+; onboarding. skipifsilent: a silent run starts the tray from [Code] instead (CurStepChanged), so the
+; two paths never start it twice. There a /SILENT run starts --onboard, a /UPDATE run --after-update,
+; and a plain /VERYSILENT run starts nothing (#552).
 Filename: "{app}\canvas-rgb.exe"; Parameters: "--onboard"; Description: "Launch canvas-rgb"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: ScriptsOk
 
 [Code]
@@ -188,6 +189,17 @@ begin
   Result := False;
   for I := 1 to ParamCount do
     if Uppercase(ParamStr(I)) = '/SERVICEUPDATE' then Result := True;
+end;
+
+// Which runs start the tray after the elevated and per-user steps (CurStepChanged), and how:
+// a /SERVICEUPDATE never starts it here (the service does, as the console user); any silent /UPDATE
+// relaunches it with --after-update; a plain /SILENT starts it on the onboarding; a plain /VERYSILENT
+// starts nothing, because that is the mode that asks for no window at all (#552).
+// The rule is plain booleans on purpose: installer/tests/Payload.Tests.ps1 reads this very
+// expression and evaluates every combination of the four inputs.
+function ShouldLaunchTrayOnFinish(SilentRun, VerySilent, UpdateRun, ServiceUpdateRun: Boolean): Boolean;
+begin
+  Result := SilentRun and (not ServiceUpdateRun) and (UpdateRun or (not VerySilent));
 end;
 
 function PsExe: String;
@@ -691,15 +703,18 @@ begin
   FScriptsOk := True;
   { The service owns launching the daemon (in the user's session). Starting canvas-rgbd.exe here raced it:
     the service's daemon then failed to bind the API (os error 10048) and was refused as not the launched one. }
-  { The tray, in the user's session, on the onboarding. Every mode except /VERYSILENT starts it once:
-    the wizard does it through the ticked "Launch canvas-rgb" ([Run], --onboard), /SILENT does it here
-    ([Run] has skipifsilent). The tray is also single-instance, so a stray second launch only focuses it. }
-  { /UPDATE (the tray updating itself) relaunches it with --after-update: it starts quietly, with no window. }
-  // token: ExecAsOriginalUser starts the tray as the person who started Setup. That is the non-elevated user only
-  // because the tray starts Setup unelevated and Setup raises itself (#28): never start Setup with an elevating verb.
+  { The tray, in the user's session. ShouldLaunchTrayOnFinish (above) says which runs start it here;
+    the wizard does it through the ticked "Launch canvas-rgb" ([Run], --onboard, which silent runs
+    skip). The tray is single-instance, so a stray second launch only focuses it. }
+  { /UPDATE (the tray updating itself, or a by-hand update) relaunches it with --after-update under
+    both /SILENT and /VERYSILENT: it starts quietly, with no window. A plain /VERYSILENT run starts
+    nothing (#552). }
   { /SERVICEUPDATE never relaunches the tray from here (the original user is SYSTEM): the service starts it. }
-  if WizardSilent and (not IsVerySilent) and (not IsServiceUpdateRun) then
+  if ShouldLaunchTrayOnFinish(WizardSilent, IsVerySilent, IsUpdateRun, IsServiceUpdateRun) then
   begin
+    // token: ExecAsOriginalUser starts the tray as the person who started Setup. That is the non-elevated user
+    // only because the tray starts Setup unelevated and Setup raises itself (#28): never start Setup with an
+    // elevating verb. A /SERVICEUPDATE never reaches this block: the service starts the tray as the console user.
     if IsUpdateRun then
       ExecAsOriginalUser(ExpandConstant('{app}\canvas-rgb.exe'), '--after-update', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code)
     else
@@ -746,8 +761,8 @@ end;
 // file the next tray reads: {app}\update-result.json. It lives in {app} (admin-writable, user-readable)
 // rather than in a user's profile: a profile folder here belongs to whoever approved the permission
 // prompt, which is another account when a standard user typed an admin's password. On a failure the tray
-// is started again (--after-update, quietly) so it can show the message; a tray that is still running
-// ignores the second launch.
+// is started again (--after-update, quietly, under /SILENT and /VERYSILENT alike) so it can show the
+// message; a tray that is still running ignores the second launch.
 procedure DeinitializeSetup;
 var
   Code: Integer;
