@@ -16,6 +16,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Editor: with `CANVAS_RGB_HOME` set, the editor reads the API token from that folder, the same one the daemon writes it to, instead of the default folder (where it got 401s). (#543)
+- Security: the tray uses `cookie` 0.18.3, the release that fixes RUSTSEC-2026-0594 (private cookie nonces can repeat after a fork; Windows applications are not affected, so this clears the advisory gate). (#557)
 - Security: the tray uses `url` 2.5.9, the release that fixes RUSTSEC-2026-0592 (a stack overflow on nested `blob:` URLs). (#545)
 - Security: the daemon locks the API token file down to the logged-on user and SYSTEM on every start, not only when it first creates it. A token file that was copied in, restored from a backup or made by an older build keeps its token and gets its permissions put right; when they cannot be put right the daemon refuses to start and names the file. The installer puts the same permissions back on a token file it finds. (#542)
 - Patterns: adding, copying, deleting or moving a frame no longer loses the transition you set for the loop (the last frame back to frame 1); the loop connector stays on whichever frame is last, and a frame that stops being last passes to the next as a cut. (#468)
