@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchReleaseSha256 } from "./release-sha.mjs";
+import { checkInstallHashes, checkReleaseHash } from "./install-checks.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const site = path.resolve(here, "..");
@@ -85,17 +86,11 @@ if (!fs.existsSync(htmlFile)) {
 const setup = JSON.parse(fs.readFileSync(setupFile, "utf8"));
 const html = fs.readFileSync(htmlFile, "utf8");
 
-// The hash is a SHA-256.
-check(
-  /^[0-9a-f]{64}$/.test(setup.sha256 ?? ""),
-  `the hash the build used is 64 hex characters (${setup.sha256})`,
-);
-
-// The page shows it, in full.
-check(
-  html.includes(setup.sha256),
-  `the page shows the hash ${setup.sha256}`,
-);
+// The hash is a SHA-256, and the page shows it in full: the release's hash, character for
+// character (site/scripts/install-checks.mjs, tested in site/tests/install-hash.test.mjs).
+const hashes = checkInstallHashes(html, setup);
+ok.push(...hashes.ok);
+fail.push(...hashes.fail);
 
 // The page shows the command that checks the download.
 const command = `Get-FileHash .\\${setup.file}`;
@@ -135,10 +130,8 @@ if (offline) {
 } else {
   try {
     const release = await fetchReleaseSha256(setup.version, setup.file, { attempts: 3 });
-    check(
-      release === setup.sha256,
-      `the release v${setup.version} carries the same hash (${release})`,
-    );
+    const same = checkReleaseHash(release, setup);
+    check(same.passed, same.message);
   } catch (e) {
     check(false, `could not read the release's hash: ${e.message}`);
   }

@@ -426,6 +426,11 @@ jobs:
       - name: API reference drift
         run: node --test site/tests/api-reference.test.mjs
 
+      # The install page's hash checks (check-install.mjs's logic), on pages written by the test.
+      # Plain Node, no site build or install (#91).
+      - name: Install-page hash checks
+        run: node --test site/tests/install-hash.test.mjs
+
   changelog:
     # PRs only: a new CHANGELOG.md line must land under ## [Unreleased] (#149).
     if: github.event_name == 'pull_request'

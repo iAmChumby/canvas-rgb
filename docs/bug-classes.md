@@ -194,6 +194,14 @@ next step needs breaks what that step does.
   scripts that elevate only their own machine-wide child), (3) a process start has no `token:`
   comment (a real comment, not code) within 8 lines above saying which token it runs with, or (4) a file that names the daemon starts any process (the daemon launched through a variable path). Allow-list entries are per line, and the scan fails on an entry that matches no line. A new launch site needs the comment;
   that is the point.
+- **Accepted gap (#82):** in a `.ps1` file the scan counts a PowerShell launch only on a line that
+  starts with the call operator. A bare `powershell -NoProfile -File ...` line in a script is a
+  real launch the scan does not see (verified by running one); `tools/*.ps1` has 36 lines that match
+  `powershell ... -File` today, and the 28 that do not start with `&` are usage text (27 in `<# #>`
+  help blocks or `#` comments, one printed by `Write-Host`), so no launch hides there. The other
+  shapes it misses are named in `crates/canvas-svc/tests/process_launch.rs` beside `runs_powershell`:
+  a program held in a variable, a call operator after other code on the line, and PowerShell started
+  by `cmd /c`. Review of the line is what catches these.
 - **Sibling search** (every area): the tray starts one process, the installer (`update/launch.rs`;
   fixed, #28). The Inno script's `Exec` calls are `RunPs` (machine script as Setup's admin token, user
   script as the original user), the PawnIO page and the tray relaunches, all as the original user
