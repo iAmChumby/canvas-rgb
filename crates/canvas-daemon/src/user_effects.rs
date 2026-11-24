@@ -2003,6 +2003,40 @@ window.requestAnimationFrame(draw);
         assert!(took < std::time::Duration::from_secs(5), "the render ran for {took:?} on a 400 ms budget");
     }
 
+    /// An effect whose top-level script never returns: the load itself runs past its budget.
+    const BUSY_AT_LOAD: &str = r##"<head><title>Busy</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>while (true) {}</script>"##;
+
+    /// An effect whose top-level script throws: a failure of the effect, not of the clock.
+    const THROWS_AT_LOAD: &str = r##"<head><title>Throws at load</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>throw new Error("boom at load");</script>"##;
+
+    /// The error of a build a test expected to fail (`Effect` is not `Debug`, so
+    /// `expect_err` cannot be used on the builder's answer).
+    fn build_error(made: Result<Box<dyn Effect>, crate::thumbnail::BuildError>) -> crate::thumbnail::BuildError {
+        match made {
+            Ok(_) => panic!("the effect was expected not to build"),
+            Err(error) => error,
+        }
+    }
+
+    /// The real conversion carries the load question as data: a real top-level script that
+    /// never returns is a timeout, and a real script error is not (#58). This is the only test
+    /// that reads `BuildError::timed_out` off a real [`canvas_html::HtmlError`]: flipping the
+    /// flag in `impl From<HtmlError> for BuildError` fails it.
+    #[test]
+    fn a_tile_build_carries_a_load_timeout_as_data_and_a_script_error_as_a_plain_failure() {
+        let timeout = build_error(html_builder_seeded(1)("html:busy", BUSY_AT_LOAD));
+        assert!(timeout.timed_out, "a load past its budget is a timeout: {timeout:?}");
+        assert!(timeout.reason.contains("ran longer than"), "{timeout:?}");
+
+        let script = build_error(html_builder_seeded(1)("html:throws", THROWS_AT_LOAD));
+        assert!(!script.timed_out, "a script error fails the same way every time: {script:?}");
+        assert!(script.reason.contains("boom at load"), "{script:?}");
+    }
+
     /// An effect whose every frame burns `BURN` loop iterations.
     fn burning_frames(iterations: u64) -> String {
         format!(

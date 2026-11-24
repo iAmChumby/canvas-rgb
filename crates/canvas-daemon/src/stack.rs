@@ -37,6 +37,13 @@ use std::time::{Duration, Instant};
 /// refuses a `stack:` id outright, so a stack can never contain a stack (D95.4.8).
 pub type LeafBuilder = Arc<dyn Fn(&str) -> Result<Box<dyn Effect>, String> + Send + Sync>;
 
+/// The builder a stack's tile builds its layers with: like [`LeafBuilder`], but it says whether
+/// a layer's build ran out of its load budget, so the tile path can give the tile up and try it
+/// again later instead of caching a picture without that layer (#58). The lights' builder keeps
+/// [`LeafBuilder`], so only the tile path carries the flag.
+pub type TileLeafBuilder =
+    Arc<dyn Fn(&str) -> Result<Box<dyn Effect>, crate::thumbnail::BuildError> + Send + Sync>;
+
 /// The clock the hold is measured on. The daemon uses [`Instant::now`]; the tests move one by
 /// hand, so a 250 ms hold is checked without waiting.
 pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
@@ -1284,6 +1291,46 @@ impl StackEffect {
             init_panicked: false,
             read,
         }
+    }
+
+    /// [`StackEffect::new`] from a tile builder, which carries a layer's load budget question as
+    /// data (#58).
+    ///
+    /// The first layer (or mask) whose build timed out comes back with the stack: the tile path
+    /// gives the tile up and tries it again later, like a user effect's tile whose load timed
+    /// out, instead of caching a picture the stack does not draw. Any other build failure is
+    /// still only a layer that is skipped and reported missing, as it is for the lights.
+    pub fn new_for_tile(
+        stack: &Stack,
+        leaf: TileLeafBuilder,
+        live: LiveStack,
+        areas: AreaBook,
+    ) -> (Self, Option<crate::thumbnail::BuildError>) {
+        // The tile builder's answer is turned into the text [`StackEffect::new`] takes, and the
+        // first timed-out build is kept here on the way past. One build runs at most
+        // `STACK_MAX_LAYERS` leaves, so a lock on a plain `Mutex` is enough.
+        let timed_out: Arc<Mutex<Option<crate::thumbnail::BuildError>>> = Arc::new(Mutex::new(None));
+        let leaves: LeafBuilder = {
+            let leaf = Arc::clone(&leaf);
+            let timed_out = Arc::clone(&timed_out);
+            Arc::new(move |id: &str| {
+                leaf(id).map_err(|error| {
+                    if error.timed_out {
+                        let mut slot = timed_out.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        slot.get_or_insert_with(|| {
+                            crate::thumbnail::BuildError::timeout(format!(
+                                "the layer {id} ran out of its load budget: {}",
+                                error.reason
+                            ))
+                        });
+                    }
+                    error.reason
+                })
+            })
+        };
+        let effect = Self::new(stack, leaves, live, areas);
+        let timed_out = timed_out.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+        (effect, timed_out)
     }
 
     /// The clock the hold is measured on.
