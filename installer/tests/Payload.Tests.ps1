@@ -153,17 +153,66 @@ try {
         Assert-True ($iss -match 'False, False\);') 'checkbox page, nothing ticked'
         Assert-True ($iss -notmatch '(?i)Source:.*pawn') 'PawnIO must not be a [Files] source'
     }
-    Test-Case 'iss: /UPDATE relaunches the tray with --after-update, every other silent run with --onboard' {
+    Test-Case 'iss: /UPDATE relaunches the tray with --after-update, a plain /SILENT with --onboard' {
         Assert-True ($iss -match "(?s)function IsUpdateRun: Boolean;.*?Uppercase\(ParamStr\(I\)\) = '/UPDATE'") 'IsUpdateRun reads /UPDATE'
-        Assert-True ($iss -match "(?s)if IsUpdateRun then\s+ExecAsOriginalUser\(ExpandConstant\('\{app\}\\canvas-rgb\.exe'\), '--after-update'") '/UPDATE starts --after-update'
-        Assert-True ($iss -match "(?s)else\s+ExecAsOriginalUser\(ExpandConstant\('\{app\}\\canvas-rgb\.exe'\), '--onboard'") 'other silent runs keep --onboard'
-        Assert-True ($iss -match "WizardSilent and \(not IsVerySilent\)") '/VERYSILENT still starts nothing'
+        $body = Get-IssFunction 'procedure CurStepChanged(' $iss
+        Assert-True ($body -match 'if ShouldLaunchTrayOnFinish\(WizardSilent, IsVerySilent, IsUpdateRun, IsServiceUpdateRun\) then') 'the relaunch is gated by the decision function'
+        # The guarded statement, with its strings blanked, holds both launches and nothing else.
+        $guard = Get-GuardedStatement $body 'if ShouldLaunchTrayOnFinish(WizardSilent, IsVerySilent, IsUpdateRun, IsServiceUpdateRun)'
+        Assert-Equal ([regex]::Matches($guard, 'ExecAsOriginalUser').Count) 2 'the guard starts the tray once, with one of the two arguments'
+        # The arguments themselves, read from the text with its strings intact.
+        Assert-True ($body -match "(?s)if IsUpdateRun then\s+ExecAsOriginalUser\(ExpandConstant\('\{app\}\\canvas-rgb\.exe'\), '--after-update'") '/UPDATE starts --after-update'
+        Assert-True ($body -match "(?s)else\s+ExecAsOriginalUser\(ExpandConstant\('\{app\}\\canvas-rgb\.exe'\), '--onboard'") 'a plain silent run keeps --onboard'
+        $a = $body.IndexOf('if ShouldLaunchTrayOnFinish('); $b = $body.IndexOf("'--after-update'"); $c = $body.IndexOf("'--onboard'")
+        Assert-True (($a -ge 0) -and ($a -lt $b) -and ($b -lt $c)) "both launches follow the guard, --after-update first ($a $b $c)"
         Assert-True ($iss -match 'Parameters: "--onboard"[^\r\n]*skipifsilent') 'the wizard launch is unchanged'
+    }
+    Test-Case 'iss: the tray relaunch decision, every input combination (#552)' {
+        # Inno's Pascal cannot be run here without ISCC, so the decision is taken from the script's own
+        # function and evaluated for every combination of its four inputs. A change to the expression
+        # alone cannot pass: each row below is the rule, written out.
+        $fn = Get-IssFunction 'function ShouldLaunchTrayOnFinish(' $iss
+        $m = [regex]::Match($fn, '(?s)Result\s*:=\s*([^;]+);')
+        Assert-True $m.Success 'ShouldLaunchTrayOnFinish must set Result'
+        $expr = $m.Groups[1].Value.Trim()
+        foreach ($id in ([regex]::Matches($expr, '[A-Za-z_][A-Za-z0-9_]*') | ForEach-Object { $_.Value })) {
+            Assert-True (@('SilentRun', 'VerySilent', 'UpdateRun', 'ServiceUpdateRun', 'and', 'or', 'not') -contains $id) "the decision may use only its four inputs and and/or/not, not [$id]"
+        }
+        # Pascal's and/or/not are PowerShell's -and/-or/-not with the same precedence; eval the real text.
+        $ps = [regex]::Replace($expr, '\b(and|or|not)\b', { param($x) '-' + $x.Groups[1].Value }, 'IgnoreCase')
+        $ps = [regex]::Replace($ps, '\b(SilentRun|VerySilent|UpdateRun|ServiceUpdateRun)\b', { param($x) '$' + $x.Groups[1].Value })
+        $decide = [scriptblock]::Create("param(`$SilentRun, `$VerySilent, `$UpdateRun, `$ServiceUpdateRun) $ps")
+        # Rows: SilentRun, VerySilent, UpdateRun, ServiceUpdateRun, expected.
+        $rows = @(
+            @($true,  $false, $false, $false, $true),  # /SILENT: --onboard
+            @($true,  $true,  $false, $false, $false), # plain /VERYSILENT: nothing
+            @($true,  $false, $true,  $false, $true),  # /SILENT /UPDATE: --after-update
+            @($true,  $true,  $true,  $false, $true),  # /VERYSILENT /UPDATE: --after-update (#552)
+            @($false, $false, $false, $false, $false), # wizard: the [Run] entry starts it
+            @($false, $true,  $false, $false, $false),
+            @($false, $false, $true,  $false, $false), # wizard /UPDATE: the [Run] entry starts it
+            @($false, $true,  $true,  $false, $false),
+            @($true,  $false, $false, $true,  $false), # /SERVICEUPDATE: the service starts it
+            @($true,  $true,  $false, $true,  $false),
+            @($true,  $false, $true,  $true,  $false),
+            @($true,  $true,  $true,  $true,  $false),
+            @($false, $false, $false, $true,  $false),
+            @($false, $true,  $false, $true,  $false),
+            @($false, $false, $true,  $true,  $false),
+            @($false, $true,  $true,  $true,  $false)
+        )
+        foreach ($r in $rows) {
+            $got = & $decide $r[0] $r[1] $r[2] $r[3]
+            Assert-True ($got -eq $r[4]) "SilentRun=$($r[0]) VerySilent=$($r[1]) UpdateRun=$($r[2]) ServiceUpdateRun=$($r[3]): expected $($r[4]), got $got"
+        }
+        Assert-True (& $decide $true $true $true $false) 'a /VERYSILENT /UPDATE run must relaunch the tray (#552)'
+        Assert-True (-not (& $decide $true $true $false $false)) 'a plain /VERYSILENT run must still start nothing'
+        Assert-True (-not (& $decide $true $true $true $true)) '/SERVICEUPDATE must never relaunch it here'
     }
     Test-Case 'iss: /SERVICEUPDATE skips the per-user script and both tray relaunches, and still counts the run ok (#43)' {
         Assert-True ($iss -match "(?s)function IsServiceUpdateRun: Boolean;.*?Uppercase\(ParamStr\(I\)\) = '/SERVICEUPDATE'") 'IsServiceUpdateRun reads /SERVICEUPDATE'
         Assert-True ($iss -match "(?s)if not IsServiceUpdateRun then\s+begin\s+WizardForm\.StatusLabel\.Caption := 'Setting up canvas-rgb for your account\.\.\.';.*?setup-user\.ps1'\), Args, True.*?FScriptsOk := True;") 'setup-user.ps1 only runs when it is not a service update, and FScriptsOk is set either way'
-        Assert-True ($iss -match "WizardSilent and \(not IsVerySilent\) and \(not IsServiceUpdateRun\)") 'the CurStepChanged relaunch skips a service update'
+        Assert-True ($iss -match 'ShouldLaunchTrayOnFinish\(WizardSilent, IsVerySilent, IsUpdateRun, IsServiceUpdateRun\)') 'the CurStepChanged relaunch skips a service update'
         Assert-True ($iss -match "\(not Ok\) and FileExists\(Exe\) and \(not IsServiceUpdateRun\)") 'the DeinitializeSetup relaunch skips a service update'
         $a = $iss.IndexOf('procedure DeinitializeSetup;')
         $body = $iss.Substring($a, $iss.IndexOf('// ---- uninstall') - $a)
