@@ -831,13 +831,20 @@ impl FakeOpenRgbServer {
     /// ([`STATE_WAIT_CAP`]) only ends a wait that cannot be met; the caller then reads the same
     /// state `ready` reads, so its assert says why. A test that used to poll a counter under a
     /// wall-clock deadline waits here instead (#519).
+    ///
+    /// The changes channel closing means the server is gone and no change can wake this wait
+    /// again: the condition cannot become true, so the wait panics rather than returning as if
+    /// it had.
     pub async fn wait_until(&self, what: &str, ready: impl Fn() -> bool) {
         let mut changed = self.changes();
         tokio::time::timeout(STATE_WAIT_CAP, async {
             while !ready() {
-                if changed.changed().await.is_err() {
-                    break;
-                }
+                changed.changed().await.unwrap_or_else(|_| {
+                    panic!(
+                        "the fake server went away before {what}: its changes channel is closed, \
+                         so the condition can never become true"
+                    )
+                });
             }
         })
         .await
