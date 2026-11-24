@@ -170,6 +170,11 @@ const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
     "runs the build-lock script as the person; the one UAC prompt is the allow-listed line above it",
 ),
 (
+    "installer/setup.ps1",
+    "Start-Process -FilePath $trayPath -ArgumentList $trayArg",
+    "starts the installed tray as the person who ran setup, unelevated, after the per-user step (#555); not the daemon",
+),
+(
     "tools/build-installer.ps1",
     "& powershell.exe -NoProfile -File $lockTool @Command",
     "runs the build-lock script as the developer; the installer build, not a daemon start",

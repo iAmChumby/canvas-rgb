@@ -35,6 +35,12 @@ $sgSvc = Get-SignalRgbServiceInfo
 $found = Find-SignalRgbAutostart -RunValues (Get-RunValueTable) -StartupFiles (Get-UserStartupFiles) `
     -ServiceStartType $(if ($sgSvc) { $sgSvc.StartType } else { '' }) -ServiceName $(if ($sgSvc) { $sgSvc.Name } else { '' })
 
+# Whether canvas-rgb was already installed, read before the elevated child copies the new files: an
+# existing tray exe means this run is an update (the tray restarts quietly), its absence a fresh
+# install (the onboarding). The tray was stopped by the child, so it is started again at the end.
+$trayPath = Join-Path $InstallDir $c.TrayExe
+$wasInstalled = Test-Path -LiteralPath $trayPath
+
 # The SignalRGB question: asked in a real run when -SignalRgb was not given. Never asked under -WhatIf.
 if (-not $dry -and -not $PSBoundParameters.ContainsKey('SignalRgb')) {
     Write-Host ''
@@ -108,6 +114,20 @@ Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 # Per-user steps, unelevated (setup-user.ps1 is shared with the Inno installer).
 & (Join-Path $PSScriptRoot 'setup-user.ps1') -InstallDir $InstallDir -SignalRgb $SignalRgb
 if (-not $?) { Fail 'The per-user step failed.' }
+
+# The tray comes back, as the person who ran setup and never elevated: it was stopped by the
+# elevated child above, and without this it stays gone until the next sign-in (#555). A failed run
+# never reaches these lines (Fail exits), and the decision keeps the plan mode and an elevated setup
+# from starting anything.
+$trayDecision = Get-SetupTrayDecision -WasInstalled $wasInstalled -ParentElevated (Test-IsAdmin) -WhatIf $dry -Succeeded $true
+if ($trayDecision -eq 'skip-elevated') {
+    Write-Host 'canvas-rgb: setup is running elevated, and the tray never runs elevated. Start canvas-rgb from the Start menu.'
+} elseif ($trayDecision -ne 'none') {
+    $trayArg = if ($trayDecision -eq 'after-update') { '--after-update' } else { '--onboard' }
+    # token: the person's own, non-elevated: setup.ps1 runs unelevated, and only its child above is elevated
+    Start-Process -FilePath $trayPath -ArgumentList $trayArg -WorkingDirectory $InstallDir | Out-Null
+    Write-Host "canvas-rgb: started the tray ($trayArg)"
+}
 
 Write-Host ''
 Write-Host 'setup finished. Check:'

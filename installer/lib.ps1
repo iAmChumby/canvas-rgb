@@ -479,7 +479,31 @@ function Get-SetupPlan {
         $L.Add('  14. SignalRGB autostart left as is')
     }
     $L.Add("  15. add $($E.InstallDir)\bin to the user PATH")
+    $L.Add("  16. start $($E.InstallDir)\$($c.TrayExe) as you, unelevated, with --after-update when canvas-rgb was already installed and --onboard on a fresh install (nothing under -WhatIf, or when setup.ps1 itself runs elevated)")
     return $L.ToArray()
+}
+
+# Whether setup.ps1 starts the tray after a successful run, and with which argument (#555). The
+# developer install stops a running canvas-rgb in its elevated child, which ends the tray; the Inno
+# installer starts it after its own run the same way, with --onboard or --after-update (#552).
+# Returns:
+#   'onboard'       - a fresh install: the tray opens on the onboarding (--onboard)
+#   'after-update'  - canvas-rgb was already installed: the tray starts quietly (--after-update)
+#   'skip-elevated' - setup.ps1 itself runs elevated, and the tray refuses to run elevated (#28):
+#                     nothing is started, and the person is told to start it from the Start menu
+#   'none'          - the plan mode (-WhatIf), or a run that did not succeed, starts nothing
+# Pure: it reads nothing but these four facts.
+function Get-SetupTrayDecision {
+    param(
+        [bool]$WasInstalled = $false,
+        [bool]$ParentElevated = $false,
+        [bool]$WhatIf = $false,
+        [bool]$Succeeded = $true
+    )
+    if ($WhatIf -or -not $Succeeded) { return 'none' }
+    if ($ParentElevated) { return 'skip-elevated' }
+    if ($WasInstalled) { return 'after-update' }
+    return 'onboard'
 }
 
 # ---------------------------------------------------------------- uninstall safety
