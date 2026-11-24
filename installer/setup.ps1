@@ -115,18 +115,27 @@ Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 & (Join-Path $PSScriptRoot 'setup-user.ps1') -InstallDir $InstallDir -SignalRgb $SignalRgb
 if (-not $?) { Fail 'The per-user step failed.' }
 
-# The tray comes back, as the person who ran setup and never elevated: it was stopped by the
-# elevated child above, and without this it stays gone until the next sign-in (#555). A failed run
-# never reaches these lines (Fail exits), and the decision keeps the plan mode and an elevated setup
-# from starting anything.
+# The tray starts, as the person who ran setup and never elevated: the elevated child above stopped
+# any running canvas-rgb, and without this the tray stays gone until the next sign-in (#555). Like
+# the Inno installer on an /UPDATE run, it starts whether or not the tray was running before.
+# Today the early exits above already cover two of the decision's inputs: the plan mode exits after
+# printing the plan, and an elevated setup.ps1 fails at the Test-IsAdmin check, so here -WhatIf and
+# -ParentElevated are false. They stay so the decision holds if those exits ever move.
+# Accepted gap: "was installed" is "the tray exe exists", so a folder left by a failed earlier run
+# reads as an update and the tray starts with --after-update (no onboarding prompt that run).
 $trayDecision = Get-SetupTrayDecision -WasInstalled $wasInstalled -ParentElevated (Test-IsAdmin) -WhatIf $dry -Succeeded $true
 if ($trayDecision -eq 'skip-elevated') {
     Write-Host 'canvas-rgb: setup is running elevated, and the tray never runs elevated. Start canvas-rgb from the Start menu.'
 } elseif ($trayDecision -ne 'none') {
     $trayArg = if ($trayDecision -eq 'after-update') { '--after-update' } else { '--onboard' }
-    # token: the person's own, non-elevated: setup.ps1 runs unelevated, and only its child above is elevated
-    Start-Process -FilePath $trayPath -ArgumentList $trayArg -WorkingDirectory $InstallDir | Out-Null
-    Write-Host "canvas-rgb: started the tray ($trayArg)"
+    try {
+        # token: the person's own, non-elevated: setup.ps1 runs unelevated, and only its child above is elevated
+        Start-Process -FilePath $trayPath -ArgumentList $trayArg -WorkingDirectory $InstallDir | Out-Null
+        Write-Host "canvas-rgb: started the tray ($trayArg)"
+    } catch {
+        # The install itself succeeded; a tray that will not start is a warning, not a failed setup.
+        Write-Warning "canvas-rgb is installed, but the tray did not start ($($_.Exception.Message)). Start canvas-rgb from the Start menu."
+    }
 }
 
 Write-Host ''
