@@ -112,6 +112,31 @@ try {
         }
     }
 
+    # The check itself, on wrappers written here and only read, never run: each shape below would
+    # lose -WhatIf (or run another script) while still containing %* somewhere on the line.
+    Test-Case 'the wrapper check refuses every shape that could lose the arguments or run another script' {
+        $probeDir = Join-Path $fake 'probe'
+        New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+        $probe = Join-Path $probeDir 'uninstall.cmd'
+        $good = 'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1" %*'
+        Set-Content -LiteralPath $probe -Value @('@echo off', $good, 'exit /b %ERRORLEVEL%')
+        Assert-Equal @(Get-CmdWrapperProblems $probe) @() 'the real shape passes'
+        $bad = @(
+            'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1"',
+            'set "X=%*" & powershell -NoProfile -File "%~dp0uninstall.ps1"',
+            'powershell -NoProfile -File "%~dp0uninstall.ps1" & rem %*',
+            'powershell -NoProfile -File "%~dp0other.ps1" %*',
+            'powershell -NoProfile -File "%~dp0uninstall.ps1" %* | more'
+        )
+        foreach ($line in $bad) {
+            Set-Content -LiteralPath $probe -Value @('@echo off', $line)
+            Assert-True (@(Get-CmdWrapperProblems $probe).Count -gt 0) "accepted: $line"
+        }
+        Set-Content -LiteralPath $probe -Value @('@echo off', $good, $good)
+        Assert-True (@(Get-CmdWrapperProblems $probe).Count -gt 0) 'accepted two launches'
+        Remove-Item -LiteralPath $probeDir -Recurse -Force
+    }
+
     Test-Case 'setup.ps1 -WhatIf exits 0, prints the pinned lock and the plan, and writes nothing' {
         $r = & $runChild (Join-Path $PSScriptRoot '..\setup.ps1')
         Assert-Equal $r.Code 0

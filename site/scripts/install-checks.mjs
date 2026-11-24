@@ -31,3 +31,16 @@ export function checkInstallHashes(html, setup) {
 
   return { ok, fail };
 }
+
+/**
+ * Whether the release carries the hash the build used, as the line check-install.mjs prints.
+ *
+ * `release` is the hash read from the GitHub release (release-sha.mjs). Returns
+ * `{ passed, message }`. One wrong character is a different file (#91).
+ */
+export function checkReleaseHash(release, setup) {
+  return {
+    passed: release === setup.sha256,
+    message: `the release v${setup.version} carries the same hash (${release})`,
+  };
+}
