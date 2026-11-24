@@ -104,6 +104,9 @@ jobs:
               - '.github/workflows/release.yml'
               - '.github/workflows/test-build.yml'
               - '.github/workflows/experimental.yml'
+              # installer/tests/PagesWorkflow.Tests.ps1 guards this workflow's shape, so a change to
+              # it alone has to run that suite too.
+              - '.github/workflows/pages.yml'
             versions:
               # Every file that carries a copy of the version (tools/set-version.ps1 lists them):
               # the manifests, the lock file, the editor's and the site's packages, the Tauri
