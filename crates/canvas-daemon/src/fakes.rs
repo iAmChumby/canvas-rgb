@@ -375,6 +375,13 @@ impl canvas_adapters::resume::ResumeBehavior for FakeNumericDisplay {
 /// the same sections, ranges and read-only keys as the real devices, and cannot drift from them.
 /// A read answers with the values the fake holds and a write changes them: nothing is opened and
 /// no HID report is sent.
+///
+/// A write is checked against the schema as the real adapters check it: a known key, a writable
+/// key, and a value of the right kind inside its range, step or option list. The fake does not
+/// model the device's own order rules or side effects (the X6 refusing a DPI write before a read,
+/// a stage past the stage count, brightness off a static LED mode, the stage-count side effect;
+/// the 8BitDo refusing paddle keys of an inactive profile), so a write the fake accepts can still
+/// be refused by the real device. Modelling those would be a second copy of the device.
 pub struct FakePeripheral {
     /// The adapter name the hub logs (`fake-attack-shark-x6`, ...).
     name: &'static str,
@@ -426,8 +433,8 @@ pub fn fake_peripherals() -> Vec<Box<dyn crate::peripherals::Peripheral>> {
     vec![Box::new(FakePeripheral::mouse()), Box::new(FakePeripheral::controller())]
 }
 
-/// Checks one value against its kind, as the real adapters do: the right shape, inside the range
-/// or the option list.
+/// Checks one value against its kind, as the real adapters do: the right shape, inside the range,
+/// on the step, or in the option list.
 fn check_fake_value(
     def: &canvas_proto::props::PropertyDef,
     value: &canvas_proto::props::PropValue,
@@ -441,10 +448,16 @@ fn check_fake_value(
         ))
     };
     match (&def.kind, value) {
-        (PropKind::Number { min, max, .. }, PropValue::Number(number)) => {
+        (PropKind::Number { min, max, step, .. }, PropValue::Number(number)) => {
             if *number < *min || *number > *max {
                 return Err(AdapterError::Protocol(format!(
                     "{} is {number}; it takes {min} to {max}",
+                    def.key
+                )));
+            }
+            if *step > 0.0 && ((*number - *min) / *step).fract() != 0.0 {
+                return Err(AdapterError::Protocol(format!(
+                    "{} is {number}; it takes steps of {step}",
                     def.key
                 )));
             }
@@ -463,13 +476,8 @@ fn check_fake_value(
         (PropKind::Choice { .. }, _) => Err(wrong()),
         (PropKind::Color { .. }, PropValue::Color(_)) => Ok(()),
         (PropKind::Color { .. }, _) => Err(wrong()),
-        (PropKind::Hue { .. }, PropValue::Hue(hue)) | (PropKind::Angle { .. }, PropValue::Angle(hue)) => {
-            if (0.0..=360.0).contains(hue) {
-                Ok(())
-            } else {
-                Err(AdapterError::Protocol(format!("a hue must be 0..=360, got {hue}")))
-            }
-        }
+        // The real adapters put no bounds on a hue or an angle, so neither does the fake.
+        (PropKind::Hue { .. }, PropValue::Hue(_)) | (PropKind::Angle { .. }, PropValue::Angle(_)) => Ok(()),
         (PropKind::Hue { .. }, _) | (PropKind::Angle { .. }, _) => Err(wrong()),
     }
 }
@@ -567,7 +575,9 @@ impl crate::peripherals::Peripheral for FakePeripheral {
 
 impl canvas_adapters::resume::ResumeBehavior for FakePeripheral {
     fn on_resume(&self) -> canvas_adapters::resume::OnResume {
-        // In memory: a sleep resets nothing.
+        // Nothing to restore, like the real X6 and 8BitDo: neither device sets a mode when it
+        // connects, and both store what the app writes. The fake does the same and holds its
+        // values in memory, so a wake leaves them as they were and nothing is sent again.
         canvas_adapters::resume::OnResume::NothingToRestore
     }
 }

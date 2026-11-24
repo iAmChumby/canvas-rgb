@@ -125,6 +125,22 @@ fn access_path_of(id: &str) -> String {
     format!("{}/{id}/access", routes::PERIPHERALS)
 }
 
+/// The id of the one listed peripheral of this kind.
+async fn id_of(router: &axum::Router, kind: &str) -> String {
+    let list = json(call(router, "GET", routes::PERIPHERALS).await).await;
+    list.get("peripherals")
+        .and_then(|v| v.as_array())
+        .and_then(|peripherals| {
+            peripherals
+                .iter()
+                .find(|p| p.get("kind").and_then(|k| k.as_str()) == Some(kind))
+        })
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("a {kind} is listed: {list}"))
+        .to_string()
+}
+
 /// Gives the device reads and writes, as the person does with the Apply controls.
 async fn give_full_access(router: &axum::Router, id: &str) {
     let response = call_json(
@@ -314,23 +330,104 @@ async fn a_write_to_each_fake_is_read_back() {
     );
 }
 
-/// Fakes mode still never enables real HID: every gate stays off, and the adapters the hub holds
-/// are the in-memory fakes, not the real ones.
+/// A write the fake's schema check refuses changes nothing: an out-of-range DPI, an off-step DPI,
+/// an option the property does not have, a string where a number belongs, and a key the schema
+/// does not have are all refused, and the values the fake holds stand.
+///
+/// These go through the same PATCH route as the accepted writes. An adapter refusal is a 422
+/// `validation` here: `adapter_failure` in `crates/canvas-daemon/src/api/peripherals.rs` maps
+/// `AdapterError::Protocol` to `ApiFailure::validation`.
 #[tokio::test]
-async fn fakes_mode_still_never_enables_real_hid() {
-    for gate in [
-        canvas_daemon::fakes::real_peripherals_enabled,
-        canvas_daemon::fakes::real_display_enabled,
-        canvas_daemon::fakes::real_keyboard_enabled,
-    ] {
-        assert!(!gate(true), "fakes mode never opens real HID");
-        assert!(gate(false), "a normal daemon does open the real HID");
-    }
+async fn a_refused_write_is_refused_and_changes_nothing() {
+    let (router, _app, _home) = build();
+    let mouse_id = id_of(&router, "mouse").await;
+    give_full_access(&router, &mouse_id).await;
 
+    // A write the mouse takes first, so the values it holds are known and a change would show.
+    let accepted = call_json(
+        &router,
+        "PATCH",
+        &path_of(&mouse_id),
+        &serde_json::json!({ "dpi-stage-1": { "type": "number", "value": 1600.0 } }),
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::OK, "the mouse takes a valid DPI stage");
+    let held_dpi = serde_json::json!({ "type": "number", "value": 1600.0 });
+
+    let refusal = StatusCode::UNPROCESSABLE_ENTITY;
+    for (why, props, needle) in [
+        // Above the X6's 26000 maximum.
+        (
+            "an out-of-range DPI",
+            serde_json::json!({ "dpi-stage-1": { "type": "number", "value": 30000.0 } }),
+            "it takes 50 to 26000",
+        ),
+        // Inside the range but off the 50 DPI step: (1025 - 50) / 50 is not a whole number.
+        (
+            "a DPI off the 50 step",
+            serde_json::json!({ "dpi-stage-1": { "type": "number", "value": 1025.0 } }),
+            "it takes steps of 50",
+        ),
+        // `led-mode` is a choice of off, static, breathing, neon, ...; "sparkle" is none of them.
+        (
+            "an option the property does not have",
+            serde_json::json!({ "led-mode": { "type": "choice", "value": "sparkle" } }),
+            "has no option",
+        ),
+        // A choice value is a string: the wrong kind for a number.
+        (
+            "a string for a number",
+            serde_json::json!({ "dpi-stage-1": { "type": "choice", "value": "1600" } }),
+            "does not take that kind of value",
+        ),
+        (
+            "an unknown key",
+            serde_json::json!({ "dpi-stage-99": { "type": "number", "value": 1600.0 } }),
+            "has no setting called dpi-stage-99",
+        ),
+    ] {
+        let response = call_json(&router, "PATCH", &path_of(&mouse_id), &props).await;
+        assert_eq!(response.status(), refusal, "{why} is refused: {props}");
+        // The message names the check that refused it, so each case is refused for its own
+        // reason and not by a neighbour's check.
+        let body = json(response).await;
+        assert_eq!(body.get("error").and_then(|e| e.as_str()), Some("validation"), "{why}: {body}");
+        let message = body.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+        assert!(message.contains(needle), "{why} is refused with {needle:?}, got {message:?}");
+        // A fresh read comes from the fake itself, so this is what it holds.
+        let after = detail(&router, &mouse_id, true).await;
+        assert_eq!(
+            after.pointer("/values/dpi-stage-1"),
+            Some(&held_dpi),
+            "{why} left the held DPI stage as it was: {after}"
+        );
+        assert_eq!(after.get("problem"), Some(&serde_json::Value::Null), "{why}: {after}");
+    }
+}
+
+/// The peripherals fakes mode wires in are the in-memory fakes, never a real adapter: each reports
+/// one of the fakes' own adapter names and never the real adapters' names, and each device is
+/// marked `(fake)`.
+#[tokio::test]
+async fn every_wired_peripheral_is_an_in_memory_fake() {
+    use canvas_proto::traits::PeripheralAdapter;
+    let fake_names = ["fake-attack-shark-x6", "fake-eightbitdo-ultimate-2"];
+    let real_names = [
+        canvas_adapters::attack_shark_x6::AttackSharkX6::new().name(),
+        canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::new().name(),
+    ];
     let mut fakes = canvas_daemon::fakes::fake_peripherals();
-    assert_eq!(fakes.len(), 2);
+    assert_eq!(fakes.len(), 2, "one fake per real device");
     for fake in fakes.iter_mut() {
-        assert!(fake.name().starts_with("fake-"), "the adapter is a fake: {}", fake.name());
+        let name = fake.name();
+        assert!(
+            fake_names.contains(&name),
+            "{name} is one of the fakes' adapter names: {fake_names:?}"
+        );
+        assert!(
+            !real_names.contains(&name),
+            "{name} is never a real adapter ({real_names:?}): a real one would open HID"
+        );
         let found = fake.discover().await.expect("the fake enumerates");
         assert_eq!(found.len(), 1);
         assert!(
@@ -338,5 +435,6 @@ async fn fakes_mode_still_never_enables_real_hid() {
             "the device is marked fake: {}",
             found[0].name
         );
+        assert!(!found[0].connected, "a listed fake is not one the daemon has opened");
     }
 }
