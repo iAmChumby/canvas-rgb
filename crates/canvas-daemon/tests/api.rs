@@ -907,7 +907,8 @@ async fn a_tile_whose_load_ran_out_of_time_is_tried_again_after_the_retry_interv
             let count = builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if count > 1 {
                 // The tile build: the real HTML loader, whose top-level script never returns.
-                return canvas_daemon::user_effects::html_builder_seeded(1)(id, BUSY_AT_LOAD);
+                return canvas_daemon::user_effects::html_builder_seeded(1)(id, BUSY_AT_LOAD)
+                    .map_err(|error| error.reason);
             }
             Ok(Box::new(common::FakeEffect::new("busy")) as Box<dyn canvas_proto::traits::Effect>)
         })

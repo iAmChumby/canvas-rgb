@@ -77,23 +77,26 @@ pub fn leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack::Leaf
 }
 
 /// The builder a stack's library tile is built from: the same leaf rule, with the tile's fixed
-/// seed, so a layer draws the tile's own picture (D95.4.10).
-pub fn tile_leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack::LeafBuilder {
+/// seed, so a layer draws the tile's own picture (D95.4.10). A layer's build says whether it ran
+/// out of its load budget, so the tile path can give the tile up rather than cache a picture
+/// without that layer (#58).
+pub fn tile_leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack::TileLeafBuilder {
     let user = Arc::clone(user);
     Arc::new(move |id: &str| {
         if id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
-            return Err(format!(
+            return Err(crate::thumbnail::BuildError::plain(format!(
                 "{id} is a stack, and a stack cannot contain a stack"
-            ));
+            )));
         }
         if id.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
-            return Err(format!(
+            return Err(crate::thumbnail::BuildError::plain(format!(
                 "{id} is a pattern, and a pattern cannot be a layer of a stack"
-            ));
+            )));
         }
         match user.create_for_tile(id) {
             Some(made) => made,
-            None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
+            None => canvas_effects::create(id)
+                .ok_or_else(|| crate::thumbnail::BuildError::plain(format!("no effect with the id {id}"))),
         }
     })
 }
@@ -166,26 +169,33 @@ pub fn create_effect_for_tile(
     user: &Arc<user_effects::UserEffects>,
     stacks: &crate::stacks::Stacks,
     id: &str,
-) -> Result<Box<dyn canvas_proto::traits::Effect>, String> {
+) -> Result<Box<dyn canvas_proto::traits::Effect>, crate::thumbnail::BuildError> {
     if id.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
-        return Err(format!(
+        return Err(crate::thumbnail::BuildError::plain(format!(
             "{id} is a pattern: it has no picture, so it is drawn as its dots"
-        ));
+        )));
     }
     if let Some(stack) = stacks.get(id) {
         let live = Arc::new(std::sync::RwLock::new(crate::stack::LiveMap::from_stack(&stack, 1)));
-        let effect = crate::stack::StackEffect::new(
+        let (effect, timed_out) = crate::stack::StackEffect::new_for_tile(
             &stack,
             tile_leaf_builder(user),
             live,
             stacks.areas(),
-        )
-        .with_fps(stacks.fps_handle());
+        );
+        // A layer whose build lost to the clock leaves the stack's picture different from the
+        // one the stack draws, so the tile is given up and tried again later, exactly like a
+        // user effect's tile whose load timed out (#58).
+        if let Some(error) = timed_out {
+            return Err(error);
+        }
+        let effect = effect.with_fps(stacks.fps_handle());
         return Ok(Box::new(effect));
     }
     match user.create_for_tile(id) {
         Some(made) => made,
-        None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
+        None => canvas_effects::create(id)
+            .ok_or_else(|| crate::thumbnail::BuildError::plain(format!("no effect with the id {id}"))),
     }
 }
 

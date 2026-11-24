@@ -124,6 +124,22 @@ fn monotonic_clock() -> Clock {
 /// The daemon uses [`html_builder`]; the tests inject fakes.
 pub type Builder = Arc<dyn Fn(&str, &str) -> Result<Box<dyn Effect>, String> + Send + Sync>;
 
+/// The builder a library tile is rendered with. It says whether the load ran past its budget as
+/// data on its error ([`crate::thumbnail::BuildError`]), set where the HTML runtime's
+/// [`canvas_html::HtmlError`] is converted, so rewording the message cannot change the tile's
+/// retry verdict (#58).
+pub type TileBuilder =
+    Arc<dyn Fn(&str, &str) -> Result<Box<dyn Effect>, crate::thumbnail::BuildError> + Send + Sync>;
+
+/// A tile builder from one that reports text: the load question is read from the runtime's
+/// `timeout: ` prefix. The daemon passes [`html_builder_seeded`], which carries it as data; this
+/// keeps a caller that supplies one text builder (a test) working.
+fn tile_builder_from_text(builder: Builder) -> TileBuilder {
+    Arc::new(move |id: &str, source: &str| {
+        builder(id, source).map_err(crate::thumbnail::BuildError::from_text)
+    })
+}
+
 /// Builds a user effect's HTML with the runtime the daemon runs, without boxing it: the
 /// editor's preview reads the concrete instance's schema, errors and warnings after the render.
 ///
@@ -188,7 +204,7 @@ fn boxed_html_effect(
 /// A tile is rendered again and again, on any machine and under any load, so it needs a seed
 /// that does not move and frames that always finish. A frame that fails for any reason fails
 /// the tile render ([`TileHtml`]), so a tile is never a quietly different picture.
-pub fn html_builder_seeded(seed: u32) -> Builder {
+pub fn html_builder_seeded(seed: u32) -> TileBuilder {
     Arc::new(move |id: &str, source: &str| {
         canvas_html::HtmlEffect::from_source_seeded(id, source, &Props::new(), seed)
             .map(|effect| {
@@ -197,7 +213,7 @@ pub fn html_builder_seeded(seed: u32) -> Builder {
                 }
                 Box::new(TileHtml(effect.tile_mode())) as Box<dyn Effect>
             })
-            .map_err(|e| e.to_string())
+            .map_err(crate::thumbnail::BuildError::from)
     })
 }
 
@@ -379,7 +395,7 @@ pub struct UserEffects {
     builder: Builder,
     /// The builder a library tile is rendered with: the same file, run with a fixed seed,
     /// so a tile is the same picture every time it is rendered.
-    tile_builder: Builder,
+    tile_builder: TileBuilder,
     /// The builder an import runs when its normal load ran out of time: the same file, held
     /// to [`IMPORT_LOAD_BUDGET_MS`], so a busy machine is told apart from a script that never
     /// ends before anything is written.
@@ -405,14 +421,15 @@ impl UserEffects {
     /// The import's longer load is the same builder: a test that injects a builder models
     /// both budgets with it.
     pub fn with_stock(builder: Builder, stock: &[(&str, &str)]) -> Self {
-        Self::build(builder.clone(), builder.clone(), builder, stock)
+        let tile_builder = tile_builder_from_text(builder.clone());
+        Self::build(builder.clone(), tile_builder, builder, stock)
     }
 
     /// Like [`UserEffects::with_stock`], with a builder of its own for library tiles: the
     /// same file run with a fixed seed, so a tile is the same picture every time.
     pub fn with_stock_and_tiles(
         builder: Builder,
-        tile_builder: Builder,
+        tile_builder: TileBuilder,
         stock: &[(&str, &str)],
     ) -> Self {
         Self::build(builder.clone(), tile_builder, builder, stock)
@@ -423,7 +440,7 @@ impl UserEffects {
     /// injects its own builders can say which budget a call is under.
     pub fn with_stock_tiles_and_import_load(
         builder: Builder,
-        tile_builder: Builder,
+        tile_builder: TileBuilder,
         import_builder: Builder,
         stock: &[(&str, &str)],
     ) -> Self {
@@ -441,9 +458,10 @@ impl UserEffects {
         max_retry_after: Duration,
         clock: Clock,
     ) -> Self {
+        let tile_builder = tile_builder_from_text(builder.clone());
         Self::build_with_limits(
             builder.clone(),
-            builder.clone(),
+            tile_builder,
             builder,
             stock,
             max_retry_after,
@@ -453,7 +471,7 @@ impl UserEffects {
 
     fn build(
         builder: Builder,
-        tile_builder: Builder,
+        tile_builder: TileBuilder,
         import_builder: Builder,
         stock: &[(&str, &str)],
     ) -> Self {
@@ -469,7 +487,7 @@ impl UserEffects {
 
     fn build_with_limits(
         builder: Builder,
-        tile_builder: Builder,
+        tile_builder: TileBuilder,
         import_builder: Builder,
         stock: &[(&str, &str)],
         max_retry_after: Duration,
@@ -546,7 +564,10 @@ impl UserEffects {
     /// Builds a fresh instance of a user effect for a library tile: the same file, run
     /// with the tile builder's fixed seed, so the tile is the same picture every time it
     /// is rendered. `None` when `id` is not a loaded user effect.
-    pub fn create_for_tile(&self, id: &str) -> Option<Result<Box<dyn Effect>, String>> {
+    pub fn create_for_tile(
+        &self,
+        id: &str,
+    ) -> Option<Result<Box<dyn Effect>, crate::thumbnail::BuildError>> {
         let source = self.source_of(id)?;
         Some((self.tile_builder)(id, &source))
     }
@@ -1982,6 +2003,39 @@ window.requestAnimationFrame(draw);
         assert!(took < std::time::Duration::from_secs(5), "the render ran for {took:?} on a 400 ms budget");
     }
 
+    /// An effect whose top-level script never returns: the load itself runs past its budget.
+    const BUSY_AT_LOAD: &str = r##"<head><title>Busy</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>while (true) {}</script>"##;
+
+    /// An effect whose top-level script throws: a failure of the effect, not of the clock.
+    const THROWS_AT_LOAD: &str = r##"<head><title>Throws at load</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>throw new Error("boom at load");</script>"##;
+
+    /// The error of a build a test expected to fail (`Effect` is not `Debug`, so
+    /// `expect_err` cannot be used on the builder's answer).
+    fn build_error(made: Result<Box<dyn Effect>, crate::thumbnail::BuildError>) -> crate::thumbnail::BuildError {
+        match made {
+            Ok(_) => panic!("the effect was expected not to build"),
+            Err(error) => error,
+        }
+    }
+
+    /// The real conversion carries the load question as data: a real top-level script that
+    /// never returns is a timeout, and a real script error is not (#58). This is the only test
+    /// that reads `BuildError::timed_out` off a real [`canvas_html::HtmlError`]: flipping the
+    /// flag in `impl From<HtmlError> for BuildError` fails it.
+    #[test]
+    fn a_tile_build_carries_a_load_timeout_as_data_and_a_script_error_as_a_plain_failure() {
+        let timeout = build_error(html_builder_seeded(1)("html:busy", BUSY_AT_LOAD));
+        assert!(timeout.timed_out, "a load past its budget is a timeout: {timeout:?}");
+
+        let script = build_error(html_builder_seeded(1)("html:throws", THROWS_AT_LOAD));
+        assert!(!script.timed_out, "a script error fails the same way every time: {script:?}");
+        assert!(script.reason.contains("boom at load"), "{script:?}");
+    }
+
     /// An effect whose every frame burns `BURN` loop iterations.
     fn burning_frames(iterations: u64) -> String {
         format!(
@@ -2069,9 +2123,26 @@ window.requestAnimationFrame(draw);
                 }) as Box<dyn Effect>)
             }) as Builder
         };
+        let make_tile = |name: &'static str| {
+            let calls = calls.clone();
+            Arc::new(move |id: &str, _source: &str| {
+                calls.lock().unwrap().push(name);
+                Ok(Box::new(FakeHtml {
+                    schema: PropertySchema {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                        description: String::new(),
+                        needs: Default::default(),
+                        properties: Vec::new(),
+                        presets: Vec::new(),
+                        thumbnail: None,
+                    },
+                }) as Box<dyn Effect>)
+            }) as TileBuilder
+        };
         let dir = TempDir::new("tile-builder");
         dir.write("live.html", "Live\n<canvas></canvas>");
-        let effects = UserEffects::with_stock_and_tiles(make("lights"), make("tiles"), &[]);
+        let effects = UserEffects::with_stock_and_tiles(make("lights"), make_tile("tiles"), &[]);
         effects.rescan(&dir.0);
         effects.create("html:live").expect("a loaded effect").expect("the effect builds");
         effects.create_for_tile("html:live").expect("a loaded effect").expect("the effect builds");

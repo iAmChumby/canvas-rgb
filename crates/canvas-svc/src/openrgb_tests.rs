@@ -338,18 +338,12 @@ fn a_write_to_zero_devices_is_a_warning_and_a_write_to_some_is_info() {
 
 // ---- #18 review: late controllers, the unsettled cap, and the restart-limit black ----
 
-/// Polls `fake.custom_mode_writes(index)` until it is above zero (the adapter writes a device's
-/// colors only after switching it to custom mode), or gives up after 2 s.
+/// Waits until `fake.custom_mode_writes(index)` is above zero (the adapter writes a device's
+/// colors only after switching it to custom mode), then returns the count. The wait is woken by
+/// the fake's own changes, not by a clock, so its cap only ends a write that never lands.
 async fn wait_for_write(fake: &FakeOpenRgbServer, index: u32) -> u32 {
-    let mut writes = 0;
-    for _ in 0..100 {
-        writes = fake.custom_mode_writes(index);
-        if writes > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    writes
+    fake.wait_until("the custom-mode write landed", || fake.custom_mode_writes(index) > 0).await;
+    fake.custom_mode_writes(index)
 }
 
 /// Real OpenRGB announces controllers over seconds. Devices 0 and 1 settle and get the boot

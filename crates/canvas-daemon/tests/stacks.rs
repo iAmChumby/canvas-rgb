@@ -99,24 +99,35 @@ fn build(tag: &str) -> Harness {
 }
 
 fn build_with(tag: &str, user: Option<Arc<canvas_daemon::user_effects::UserEffects>>) -> Harness {
-    harness_in(TempHome::new(tag), user, None)
+    harness_in(TempHome::new(tag), user, None, None)
+}
+
+/// The daemon whose thumbnails cache is the one the test gives: a test that waits out the retry
+/// interval of a tile render that ran past its budget uses a short one.
+fn build_with_cache(
+    tag: &str,
+    user: Option<Arc<canvas_daemon::user_effects::UserEffects>>,
+    cache: canvas_daemon::thumbnail::ThumbnailCache,
+) -> Harness {
+    harness_in(TempHome::new(tag), user, None, Some(cache))
 }
 
 /// The daemon whose draft route builds with `builder` instead of the real HTML builder: a test
 /// that counts a draft's builds, or makes one panic.
 fn build_with_draft(tag: &str, builder: canvas_daemon::user_effects::Builder) -> Harness {
-    harness_in(TempHome::new(tag), None, Some(builder))
+    harness_in(TempHome::new(tag), None, Some(builder), None)
 }
 
 /// The daemon on a home a test wrote first (a hand-written or corrupt `stacks.json`).
 fn harness_at(home: TempHome) -> Harness {
-    harness_in(home, None, None)
+    harness_in(home, None, None, None)
 }
 
 fn harness_in(
     home: TempHome,
     user: Option<Arc<canvas_daemon::user_effects::UserEffects>>,
     draft_builder: Option<canvas_daemon::user_effects::Builder>,
+    thumbnails: Option<canvas_daemon::thumbnail::ThumbnailCache>,
 ) -> Harness {
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
@@ -141,6 +152,9 @@ fn harness_in(
     app.effects_dir = folder.clone();
     if let Some(user) = user {
         app.user_effects = user;
+    }
+    if let Some(thumbnails) = thumbnails {
+        app.thumbnails = thumbnails;
     }
     app.user_effects.rescan(&folder);
     // The preview engine is a fake, so a test reads its sinks, rate and layout directly.
@@ -1453,9 +1467,9 @@ async fn a_stack_is_listed_activated_and_tiled_with_the_seeded_builders() {
     let tile_calls = Arc::new(AtomicUsize::new(0));
     let real = canvas_daemon::user_effects::html_builder();
     let counter = Arc::clone(&tile_calls);
-    let tile_builder: canvas_daemon::user_effects::Builder = Arc::new(move |id: &str, source: &str| {
+    let tile_builder: canvas_daemon::user_effects::TileBuilder = Arc::new(move |id: &str, source: &str| {
         counter.fetch_add(1, Ordering::SeqCst);
-        real(id, source)
+        real(id, source).map_err(canvas_daemon::thumbnail::BuildError::plain)
     });
     let user = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock_and_tiles(
         canvas_daemon::user_effects::html_builder(),
@@ -1537,6 +1551,72 @@ async fn a_stack_is_listed_activated_and_tiled_with_the_seeded_builders() {
         third_bytes.len()
     );
     assert!(!same, "an edited layer changes the tile");
+}
+
+/// A stack tile whose layer lost its load to the clock is given up and tried again later, like
+/// a user effect's tile that timed out: the stack is never cached as a picture without that
+/// layer (#58). The layer's build is the real loader, so its top-level script runs past
+/// `LOAD_BUDGET_MS` exactly as a busy machine's would.
+#[tokio::test]
+async fn a_stack_tile_whose_layer_ran_out_of_its_load_budget_is_a_load_timeout() {
+    const BUSY_AT_LOAD: &str = r##"<head><title>Busy</title></head>
+<body><canvas id="stage" width="8" height="8"></canvas></body>
+<script>while (true) {}</script>"##;
+    let builds = Arc::new(AtomicUsize::new(0));
+    let real = canvas_daemon::user_effects::html_builder_seeded(1);
+    let tile_builder: canvas_daemon::user_effects::TileBuilder = {
+        let builds = Arc::clone(&builds);
+        Arc::new(move |id: &str, _source: &str| {
+            builds.fetch_add(1, Ordering::SeqCst);
+            real(id, BUSY_AT_LOAD)
+        })
+    };
+    let user = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock_and_tiles(
+        canvas_daemon::user_effects::html_builder(),
+        tile_builder,
+        &[],
+    ));
+    // A long retry interval, so nothing here depends on the clock: the retry after the interval is
+    // the cache's own behaviour, tested for a user effect's tile in tests/api.rs
+    // (a_tile_whose_load_ran_out_of_time_is_tried_again_after_the_retry_interval). This test
+    // proves a stack tile reaches that same path: a load timeout, not a plain failure.
+    let retry = Duration::from_secs(600);
+    let cache = canvas_daemon::thumbnail::ThumbnailCache::with_limits(Duration::from_secs(30), retry);
+    let harness = build_with_cache("t8-load-timeout", Some(user), cache);
+    // The layer is a loaded user effect; its tile build is the real loader on the busy source.
+    std::fs::write(harness.folder.join("busy.html"), VALID_HTML).unwrap();
+    harness.app.user_effects.rescan(&harness.folder);
+
+    let saved = stack("stack:Stalled", vec![layer("l1", "html:busy")]);
+    assert_eq!(put_stack(&harness, &saved).await, StatusCode::OK);
+
+    let ask = || {
+        let router = harness.router.clone();
+        async move {
+            router
+                .oneshot(request("GET", "/api/v1/effects/stack:Stalled/thumbnail"))
+                .await
+                .expect("the router answers")
+        }
+    };
+
+    // The layer's build ran past its budget, so the stack's tile is given up, naming the layer.
+    let response = ask().await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json(response).await;
+    let message = body.get("message").and_then(|m| m.as_str()).unwrap_or_default().to_string();
+    assert!(message.contains("html:busy"), "the answer does not name the layer: {message}");
+    assert!(message.contains("load budget"), "the answer does not name the budget: {message}");
+    let after_the_first = builds.load(Ordering::SeqCst);
+    assert_eq!(after_the_first, 1, "the layer was built once: {after_the_first}");
+
+    // Inside the retry interval the timeout is remembered: the layer is not built again.
+    assert_eq!(ask().await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        after_the_first,
+        "a stack tile's load timeout inside the retry interval was built again"
+    );
 }
 
 // ================================================================ test 9

@@ -831,13 +831,20 @@ impl FakeOpenRgbServer {
     /// ([`STATE_WAIT_CAP`]) only ends a wait that cannot be met; the caller then reads the same
     /// state `ready` reads, so its assert says why. A test that used to poll a counter under a
     /// wall-clock deadline waits here instead (#519).
+    ///
+    /// The changes channel closing means the server is gone and no change can wake this wait
+    /// again: the condition cannot become true, so the wait panics rather than returning as if
+    /// it had.
     pub async fn wait_until(&self, what: &str, ready: impl Fn() -> bool) {
         let mut changed = self.changes();
         tokio::time::timeout(STATE_WAIT_CAP, async {
             while !ready() {
-                if changed.changed().await.is_err() {
-                    break;
-                }
+                changed.changed().await.unwrap_or_else(|_| {
+                    panic!(
+                        "the fake server went away before {what}: its changes channel is closed, \
+                         so the condition can never become true"
+                    )
+                });
             }
         })
         .await
@@ -1008,8 +1015,13 @@ async fn serve(
                         }
                     }
                     state.pending_resizes = keeping;
+                    let mut resized = false;
                     for resize in landed {
-                        apply_resize(&mut state, resize.device as usize, resize.zone, resize.leds);
+                        resized |= apply_resize(&mut state, resize.device as usize, resize.zone, resize.leds);
+                    }
+                    if resized {
+                        // The resize blanked the controller's colours: wake a waiter for them.
+                        writes.send_modify(|n| *n += 1);
                     }
                 }
                 changes.send_modify(|n| *n += 1);
@@ -1079,7 +1091,7 @@ async fn serve(
                     }
                 }
             }
-            let reply = handle(&state, connection, device, packet_id, &payload);
+            let reply = handle(&state, connection, device, packet_id, &payload, &writes);
             if packet_id == UPDATE_LEDS {
                 // The colours are applied: wake a test that waits for them instead of polling.
                 writes.send_modify(|n| *n += 1);
@@ -1257,16 +1269,17 @@ fn to_io(error: canvas_proto::AdapterError) -> std::io::Error {
 
 /// Applies a resize to the device at `at` in the server's list, as OpenRGB does: a resizable zone
 /// takes the size within its range (a zone that cannot resize keeps its own), and the controller's
-/// colours are blanked to the new length.
+/// colours are blanked to the new length. Returns whether it applied to a controller, so the
+/// caller bumps the write signal a waiter sleeps on (a resize blanks colours like a frame does).
 ///
 /// A resize is `ConfigureZone` (`RGBController.cpp:2271`, `:2274-2287`), whose signal reaches only a
 /// client that negotiated protocol 6 or later (`NetworkServer.cpp:4175-4190`), as the controller's whole
 /// description; packet 100 comes only from a change of the controller list (`:391-392`, the detection
 /// and the plugging of devices). A protocol 5 client learns the new size by reading the list again,
 /// which is what the adapter does.
-fn apply_resize(state: &mut FakeState, at: usize, zone: usize, leds: u32) {
+fn apply_resize(state: &mut FakeState, at: usize, zone: usize, leds: u32) -> bool {
     let Some(target) = state.devices.get_mut(at) else {
-        return;
+        return false;
     };
     if let Some(zone) = target.info.zones.get_mut(zone) {
         if zone.resizable && zone.min_leds <= zone.max_leds {
@@ -1276,6 +1289,7 @@ fn apply_resize(state: &mut FakeState, at: usize, zone: usize, leds: u32) {
     target.colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; target.info.led_count() as usize];
     let echo = description_update(&state.devices[at], UPDATE_REASON_CONFIGURE_ZONE);
     state.broadcast(|version| if version >= PROTOCOL_WITH_EVENTS { echo.clone() } else { Vec::new() });
+    true
 }
 
 /// `RGBCONTROLLER_UPDATE_REASON_CONFIGUREZONE` (`RGBControllerInterface.h:46`).
@@ -1312,7 +1326,14 @@ fn device_list_updated() -> Vec<u8> {
 
 /// Handles one client packet. Returns the bytes to send back, the ACK of protocol 6 included (empty
 /// when there is nothing to send).
-fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32, payload: &[u8]) -> Vec<u8> {
+fn handle(
+    state: &Mutex<FakeState>,
+    connection: u64,
+    device: u32,
+    packet_id: u32,
+    payload: &[u8],
+    writes: &tokio::sync::watch::Sender<u64>,
+) -> Vec<u8> {
     let mut state = guard(state);
     let reply = |device: u32, packet_id: u32, body: &[u8]| encode_packet(device, packet_id, body).unwrap_or_default();
     // A resize that fails silences the whole server, the resize packet included: real OpenRGB
@@ -1419,7 +1440,11 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
                     });
                     return ack_for(&state, connection, device, packet_id);
                 }
-                apply_resize(&mut state, at, zone, leds);
+                if apply_resize(&mut state, at, zone, leds) {
+                    // The resize blanked the controller's colours: a waiter for them is woken,
+                    // as a frame that lands them does.
+                    writes.send_modify(|n| *n += 1);
+                }
             }
             Vec::new()
         }
