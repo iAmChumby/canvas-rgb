@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\lib.ps1')
 . (Join-Path $PSScriptRoot '_assert.ps1')
+. (Join-Path $PSScriptRoot '_wrapper.ps1')
 
 $refusal = "OpenRGB hash not recorded yet: run installer/pin-openrgb.ps1 once, then review the hash it records"
 $okLock = @{ Ok = $true; Message = ''; Url = 'https://example.invalid/OpenRGB.zip'; File = 'OpenRGB.zip'; Sha256 = ('b' * 64) }
@@ -98,6 +99,44 @@ try {
         return @{ Out = $out; Code = $LASTEXITCODE }
     }
 
+    # --- the wrappers pass their arguments through (#82). Both are read before either is run:
+    # uninstall.ps1 decides it is a dry run from -WhatIf alone, so a wrapper that lost %* would run
+    # a REAL uninstall here, and a setup.cmd that lost it would run a real setup.
+    $wrapperProblems = @{
+        'setup.cmd'     = @(Get-CmdWrapperProblems (Join-Path $PSScriptRoot '..\setup.cmd'))
+        'uninstall.cmd' = @(Get-CmdWrapperProblems (Join-Path $PSScriptRoot '..\uninstall.cmd'))
+    }
+    Test-Case 'setup.cmd and uninstall.cmd pass their arguments through (%*) to the script they run' {
+        foreach ($name in 'setup.cmd', 'uninstall.cmd') {
+            Assert-Equal @($wrapperProblems[$name] | ForEach-Object { "$name : $_" }) @() "$name "
+        }
+    }
+
+    # The check itself, on wrappers written here and only read, never run: each shape below would
+    # lose -WhatIf (or run another script) while still containing %* somewhere on the line.
+    Test-Case 'the wrapper check refuses every shape that could lose the arguments or run another script' {
+        $probeDir = Join-Path $fake 'probe'
+        New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+        $probe = Join-Path $probeDir 'uninstall.cmd'
+        $good = 'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1" %*'
+        Set-Content -LiteralPath $probe -Value @('@echo off', $good, 'exit /b %ERRORLEVEL%')
+        Assert-Equal @(Get-CmdWrapperProblems $probe) @() 'the real shape passes'
+        $bad = @(
+            'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1"',
+            'set "X=%*" & powershell -NoProfile -File "%~dp0uninstall.ps1"',
+            'powershell -NoProfile -File "%~dp0uninstall.ps1" & rem %*',
+            'powershell -NoProfile -File "%~dp0other.ps1" %*',
+            'powershell -NoProfile -File "%~dp0uninstall.ps1" %* | more'
+        )
+        foreach ($line in $bad) {
+            Set-Content -LiteralPath $probe -Value @('@echo off', $line)
+            Assert-True (@(Get-CmdWrapperProblems $probe).Count -gt 0) "accepted: $line"
+        }
+        Set-Content -LiteralPath $probe -Value @('@echo off', $good, $good)
+        Assert-True (@(Get-CmdWrapperProblems $probe).Count -gt 0) 'accepted two launches'
+        Remove-Item -LiteralPath $probeDir -Recurse -Force
+    }
+
     Test-Case 'setup.ps1 -WhatIf exits 0, prints the pinned lock and the plan, and writes nothing' {
         $r = & $runChild (Join-Path $PSScriptRoot '..\setup.ps1')
         Assert-Equal $r.Code 0
@@ -108,14 +147,20 @@ try {
 
     # The page and the README show `installer\setup.cmd`, not a PowerShell command line (#79): the
     # wrapper must run the same plan, pass its arguments through and return the script's exit code.
-    Test-Case 'setup.cmd -WhatIf runs setup.ps1 -WhatIf: exits 0, prints the plan, writes nothing' {
-        $cmdFile = Join-Path $PSScriptRoot '..\setup.cmd'
-        $line = 'set "ProgramData={0}" && set "APPDATA={1}" && "{2}" -WhatIf' -f $fakePd, $fakeAd, $cmdFile
-        $out = & cmd.exe /d /c $line 2>&1 | Out-String
-        Assert-Equal $LASTEXITCODE 0 $out
-        Assert-True $out.Contains('OpenRGB lock ok') "the wrapper ran setup.ps1: $out"
-        Assert-True $out.Contains('WhatIf: nothing was changed') $out
-        Assert-Equal @(Get-ChildItem -LiteralPath $fake -Recurse -Force).Count 2 'only the two empty folders may exist'
+    # The live run is behind the static check above: a wrapper that dropped %* is not run at all.
+    if ($wrapperProblems['setup.cmd'].Count -gt 0) {
+        Skip-Case 'setup.cmd -WhatIf runs setup.ps1 -WhatIf: exits 0, prints the plan, writes nothing' `
+            ('the static wrapper check failed, so the wrapper was not run: ' + ($wrapperProblems['setup.cmd'] -join '; '))
+    } else {
+        Test-Case 'setup.cmd -WhatIf runs setup.ps1 -WhatIf: exits 0, prints the plan, writes nothing' {
+            $cmdFile = Join-Path $PSScriptRoot '..\setup.cmd'
+            $line = 'set "ProgramData={0}" && set "APPDATA={1}" && "{2}" -WhatIf' -f $fakePd, $fakeAd, $cmdFile
+            $out = & cmd.exe /d /c $line 2>&1 | Out-String
+            Assert-Equal $LASTEXITCODE 0 $out
+            Assert-True $out.Contains('OpenRGB lock ok') "the wrapper ran setup.ps1: $out"
+            Assert-True $out.Contains('WhatIf: nothing was changed') $out
+            Assert-Equal @(Get-ChildItem -LiteralPath $fake -Recurse -Force).Count 2 'only the two empty folders may exist'
+        }
     }
 
     Test-Case 'uninstall.ps1 -WhatIf exits 0 and writes nothing' {
@@ -128,15 +173,21 @@ try {
 
     # The uninstall wrapper gets the same check setup.cmd has (#82): a wrapper that stopped passing
     # its arguments through, or that hid the plan, would leave the page telling people about a
-    # command that no longer does what uninstall.ps1 does.
-    Test-Case 'uninstall.cmd -WhatIf runs uninstall.ps1 -WhatIf: exits 0, prints the plan, writes nothing' {
-        $cmdFile = Join-Path $PSScriptRoot '..\uninstall.cmd'
-        $line = 'set "ProgramData={0}" && set "APPDATA={1}" && "{2}" -WhatIf' -f $fakePd, $fakeAd, $cmdFile
-        $out = & cmd.exe /d /c $line 2>&1 | Out-String
-        Assert-Equal $LASTEXITCODE 0 $out
-        Assert-True $out.Contains('--restore-bios') "the wrapper ran uninstall.ps1: $out"
-        Assert-True $out.Contains('WhatIf: nothing was changed') $out
-        Assert-Equal @(Get-ChildItem -LiteralPath $fake -Recurse -Force).Count 2 'only the two empty folders may exist'
+    # command that no longer does what uninstall.ps1 does. The live run is behind the static check
+    # above: this is the case that would run a REAL uninstall if %* were dropped.
+    if ($wrapperProblems['uninstall.cmd'].Count -gt 0) {
+        Skip-Case 'uninstall.cmd -WhatIf runs uninstall.ps1 -WhatIf: exits 0, prints the plan, writes nothing' `
+            ('the static wrapper check failed, so the wrapper was not run: ' + ($wrapperProblems['uninstall.cmd'] -join '; '))
+    } else {
+        Test-Case 'uninstall.cmd -WhatIf runs uninstall.ps1 -WhatIf: exits 0, prints the plan, writes nothing' {
+            $cmdFile = Join-Path $PSScriptRoot '..\uninstall.cmd'
+            $line = 'set "ProgramData={0}" && set "APPDATA={1}" && "{2}" -WhatIf' -f $fakePd, $fakeAd, $cmdFile
+            $out = & cmd.exe /d /c $line 2>&1 | Out-String
+            Assert-Equal $LASTEXITCODE 0 $out
+            Assert-True $out.Contains('--restore-bios') "the wrapper ran uninstall.ps1: $out"
+            Assert-True $out.Contains('WhatIf: nothing was changed') $out
+            Assert-Equal @(Get-ChildItem -LiteralPath $fake -Recurse -Force).Count 2 'only the two empty folders may exist'
+        }
     }
 } finally { Remove-Item -LiteralPath $fake -Recurse -Force -ErrorAction SilentlyContinue }
 
