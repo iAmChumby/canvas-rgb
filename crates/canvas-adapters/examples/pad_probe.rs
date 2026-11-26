@@ -79,6 +79,9 @@ fn personality_note(personality: Personality) -> &'static str {
              it) but the receiver's DInput descriptor has no 0x81 output report, so there is no \
              vendor channel to read the profile through"
         }
+        Personality::Bluetooth => {
+            "the pad is on Bluetooth LE: it reads through its HID gamepad collection (the buttons, paddles, sticks, triggers and battery), and there is no vendor channel to read the profile through (#566)"
+        }
     }
 }
 

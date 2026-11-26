@@ -174,6 +174,9 @@ pub(super) fn open_pad_vendor(
                 "the pad is in its DInput personality, which has no vendor channel to read the                  profile through",
             ));
         }
+        Personality::Bluetooth => {
+            return Err(refuse(super::BLUETOOTH_NO_SETTINGS));
+        }
         Personality::XInput => {}
     }
     match opener.open_vendor(personality) {

@@ -8520,6 +8520,18 @@
           "type": "boolean",
           "optional": false,
           "meaning": "True when the adapter has the device open."
+        },
+        {
+          "name": "battery",
+          "type": "number or null",
+          "optional": true,
+          "meaning": "The battery in percent, when an open device's own input reports carry it. Read passively from a device that is already open: nothing is sent to get it"
+        },
+        {
+          "name": "charging",
+          "type": "boolean",
+          "optional": true,
+          "meaning": "True while the device charges, false while it does not; `null` with no battery"
         }
       ]
     },

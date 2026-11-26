@@ -69,7 +69,7 @@ the last value.
   status events, maps numbers to `PropertyDef`s and writes through the gate in section 3.
 
 **`eightbitdo_ultimate2/`: the same split for a controller.** `codec.rs` holds the framing, the
-CRC and the profile image. `mod.rs` handles three personalities (XInput, idle receiver, DInput),
+CRC and the profile image. `mod.rs` handles four personalities (XInput, idle receiver, DInput, Bluetooth),
 each with its own product id, and reports which one the pad is showing.
 
 ## 3. The shared pattern
@@ -187,6 +187,50 @@ From `CLAUDE.md` in the repo root:
 - **Credit the people whose protocol work you used.** Add a `NOTICE` line and a `docs/thanks.md`
   paragraph. The X6 is credited in `NOTICE` lines 31 to 34 and `docs/thanks.md` lines 24 to 27.
   The 8BitDo is credited in `NOTICE` lines 36 to 40 and `docs/thanks.md` lines 29 to 35.
+
+## 7a. 8BitDo Ultimate 2 over Bluetooth (#566)
+
+Over Bluetooth the pad pairs as a **Bluetooth LE** device and talks HID over GATT. It shows the
+DInput product id, `2DC8:6012`, so the adapter tells it from a pad on a cable by the collection's
+path: Windows' HID-over-GATT path for this pad carries the HID service's GUID, `00001812-0000-1000-8000-00805f9b34fb`
+(`is_bluetooth_path` in `crates/canvas-adapters/src/eightbitdo_ultimate2/mod.rs`). That is
+`Personality::Bluetooth`.
+
+What the link carries, from the 2026-11-26 capture (one press of every button, read-only):
+
+| Bytes | Field |
+|---|---|
+| 0 | report id `0x01`; every report is 34 bytes, about 120 a second |
+| 1 | hat, low four bits: 0..7 clockwise from up, `0x0f` centred |
+| 2-5 | left stick X, Y, right stick X, Y; `0x7f` centred, full range 0..255 |
+| 6, 7 | right trigger, left trigger, 0..255 |
+| 8 | A `0x01`, B `0x02`, PR `0x04`, X `0x08`, Y `0x10`, PL `0x20`, LB `0x40`, RB `0x80` |
+| 9 | LT `0x01`, RT `0x02` (as buttons), Select (Back) `0x04`, Start `0x08`, L3 `0x20`, R3 `0x40`; Home `0x10` from SDL's layout, not pressed in the capture |
+| 10 | L4 `0x01`, R4 `0x02` |
+| 14 | battery: low seven bits the percent (90 and 83 in the capture); bit 7 charging from SDL's layout, not seen set |
+| 15-26 | motion sensors (they move in every report) |
+
+This is the DInput layout SDL's driver reads, so `codec::decode_dinput` reads it, with the hat
+masked to its low nibble. The whole capture (291 changed reports) is
+`crates/canvas-adapters/tests/fixtures/8bitdo_ble_presses.csv`, and
+`the_whole_bluetooth_press_capture_decodes_in_the_order_pressed_566` replays it: every press lands
+on the bit above in the order pressed, every axis sweeps 0..255. Five of its rows are named in
+`crates/canvas-adapters/src/fake_pad.rs` (`ble_capture`). The editor's controller
+drawing reads the browser's Gamepad API (`app/web/src/lib/padInput.ts`), not this report: whether
+the editor's WebView sees the pad over Bluetooth is UNKNOWN until it is checked with the pad in hand.
+
+The list (`GET /peripherals`) carries the battery of an open pad: `Peripheral::battery` in
+`crates/canvas-daemon/src/peripherals.rs` reads one gamepad report from the already-open collection
+and takes byte 14. Nothing is sent and nothing is opened for it.
+
+**What Bluetooth cannot do.** Windows lists one gamepad collection and nothing on a vendor page,
+so there is no channel for the profile image. The profiles, the button map, the stick and trigger
+ranges, the vibration strengths and the paddle mapping can be read and changed only through the
+2.4G receiver or a USB cable. A settings read over Bluetooth answers with that sentence
+(`BLUETOOTH_NO_SETTINGS`), and nothing is ever sent to the pad. The stick rings (#376) are listed only in
+the XInput personality (`set_pad_present`), so they do not change over Bluetooth either. The pad's non-standard
+GATT service `00010203-0405-0607-0809-0a0b0c0d1912` may be the vendor's config channel over BLE:
+nothing has read it (UNKNOWN), and reading it stays a static-analysis job first.
 
 ## 8. ROYUAN MonsGeek (3151:4015): per-key colours
 

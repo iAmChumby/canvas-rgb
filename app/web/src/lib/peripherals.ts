@@ -6,9 +6,9 @@ import type { ReadProgress } from "@/proto/ReadProgress";
 import type { LoadStage } from "@/components/Loading";
 
 /**
- * A peripheral as the list shows it. The battery is an extra the daemon may add when the
- * device reports one; a daemon that does not send it leaves the field empty and the editor
- * shows no battery.
+ * A peripheral as the list shows it. The battery comes from the daemon's `PeripheralInfo`
+ * (#566) when an open device's input reports carry one; without it the editor shows no
+ * battery. The two fields are repeated here so the shape reads in one place.
  */
 export interface PeripheralRow extends PeripheralInfo {
   battery?: number | null;

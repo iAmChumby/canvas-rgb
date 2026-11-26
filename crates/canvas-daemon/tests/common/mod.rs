@@ -738,6 +738,10 @@ pub struct PeripheralLog {
     pub fail_discover: bool,
     /// Makes this many writes fail with an I/O error (a cable pulled mid-write).
     pub fail_write: u32,
+    /// The battery the fake's input reports carry, for `Peripheral::battery` (#566).
+    pub battery: Option<(u8, bool)>,
+    /// How many times the hub asked the fake for its battery.
+    pub battery_reads: u32,
 }
 
 /// The sink the daemon gave the fake. `ReadSink` has no `Debug`, so the log holds it in here.
@@ -808,6 +812,8 @@ impl Default for FakePeripheral {
         let device = fake_peripheral_id();
         let schema = fake_peripheral_schema(&device);
         let found = vec![PeripheralInfo {
+            battery: None,
+            charging: None,
             id: device.clone(),
             name: "Fake Mouse".into(),
             vendor: "Fake".into(),
@@ -841,6 +847,8 @@ impl Default for FakePeripheral {
             side_effect: None,
             fail_discover: false,
             fail_write: 0,
+            battery: None,
+            battery_reads: 0,
         })))
     }
 }
@@ -1041,6 +1049,12 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
 
 #[async_trait::async_trait]
 impl canvas_daemon::peripherals::Peripheral for FakePeripheral {
+    async fn battery(&mut self) -> Option<(u8, bool)> {
+        let mut log = self.0.lock().unwrap();
+        log.battery_reads += 1;
+        log.battery
+    }
+
     async fn write_effective(&mut self, device: &DeviceId, props: &Props) -> Result<Props, AdapterError> {
         canvas_proto::traits::PeripheralAdapter::write_settings(self, device, props).await?;
         let mut effective = props.clone();

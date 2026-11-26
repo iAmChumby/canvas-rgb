@@ -37,4 +37,13 @@ location: string,
 /**
  * True when the adapter has it open.
  */
-connected: boolean, };
+connected: boolean, 
+/**
+ * The battery in percent, when an open device's own input reports carry it (#566). Read
+ * passively from a device that is already open: nothing is sent to get it.
+ */
+battery?: number | null, 
+/**
+ * True while the device charges, false while it does not; `None` with no battery.
+ */
+charging?: boolean, };

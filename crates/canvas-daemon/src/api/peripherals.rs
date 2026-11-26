@@ -22,9 +22,11 @@ use crate::state::App;
 
 /// `GET /api/v1/peripherals`. Every peripheral the adapters see.
 ///
-/// The enumeration opens nothing: a listed peripheral is not one the daemon may touch.
+/// The enumeration opens nothing: a listed peripheral is not one the daemon may touch. An open
+/// pad's battery comes from its own input reports, read passively (#566).
 pub async fn list_peripherals(State(app): State<Arc<App>>) -> Json<PeripheralsResponse> {
-    let peripherals = app.peripherals.discover().await;
+    let found = app.peripherals.discover().await;
+    let peripherals = app.peripherals.with_batteries(found).await;
     Json(PeripheralsResponse { peripherals })
 }
 
