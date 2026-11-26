@@ -309,16 +309,27 @@ or acts as if a step worked without checking that it did.
   Change. Now the write paths name a setting by its schema label or give a sentence about what to
   pick, the guards name the device's display name and the UI's Change and Read switches, and
   `adapter_failure` turns every adapter error into words through `user_words` while logging the id,
-  zone and link cause. The kept read is keyed by id **and** connection (`location` and `name`), so a
-  different connection cannot borrow the earlier one's sections. Tests:
+  zone and link cause. A write that may have sent bytes keeps the adapter's sentence all the way
+  to the answer: the write paths wrap it in an `Io` whose source is `write_failure::WriteFailure`,
+  which `user_words` reads back, and a bare `Io` during a write says the change may be incomplete
+  and to press Read again (`PARTIAL_WRITE`). The kept read is keyed by id **and** connection
+  (`location` and `name`), so a different connection cannot borrow the earlier one's sections.
+  That key alone was not enough with the page left open: the page now asks for the list again
+  every 10 s (`usePoll`, the rail's `REFRESH_MS` cadence) and, when the selected device's
+  connection changes, drops the loaded detail and asks for the new one, drawing a head with no
+  sections and Change switched off while the answer is on its way. Tests:
   `a_connection_with_no_settings_offers_none_and_says_why_in_plain_words`,
   `a_refused_change_is_in_plain_words_on_the_fake_pad` and
   `a_refused_write_is_in_plain_words_on_the_fake_mouse` (adapters),
   `a_pad_over_bluetooth_says_why_on_a_plain_get_and_offers_no_settings`,
-  `a_failed_read_is_told_in_plain_words`, `write_guards_and_a_missing_device_are_in_plain_words`
-  (`tests/peripherals.rs`), `a_zone_failure_is_told_in_plain_words_by_the_shared_helper`
-  (`peripherals.rs`), `app/web/src/views/__tests__/PeripheralNoSettings.test.tsx` and
-  `app/web/src/views/__tests__/PeripheralConnectionCache.test.tsx`. Sibling search: the other
+  `a_failed_read_is_told_in_plain_words`, `write_guards_and_a_missing_device_are_in_plain_words`,
+  `a_partly_applied_write_says_so_in_the_http_answer_for_both_devices`,
+  `a_refused_write_is_in_plain_words_on_the_http_answer_for_both_devices` and
+  `a_missing_device_is_named_on_one_sentence` (`tests/peripherals.rs`),
+  `a_zone_failure_is_told_in_plain_words_by_the_shared_helper` (`peripherals.rs`),
+  `app/web/src/views/__tests__/PeripheralNoSettings.test.tsx` and
+  `app/web/src/views/__tests__/PeripheralConnectionCache.test.tsx` (both devices; the page stays
+  mounted across the connection change). Sibling search: the other
   peripheral adapter (the mouse) has its messages rewritten; displays and lighting devices report
   their errors through other routes and were left.
 - A second mechanism, same cause: the editor draws a value it never received. A control, a count or a

@@ -8,6 +8,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use canvas_adapters::fake_pad::FakePad;
 use canvas_daemon::api;
 use canvas_daemon::cli::{Api, CliError, Output};
 use canvas_daemon::state::App;

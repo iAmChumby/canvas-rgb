@@ -38,6 +38,7 @@ import { notify } from "@/components/Notify";
 import { UnreadValue } from "@/components/UnreadValue";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
+import { POLL_MS, usePoll } from "@/lib/usePoll";
 import {
   choiceWord,
   isUnread,
@@ -154,6 +155,28 @@ function hasNoSettings(detail: PeripheralDetail): boolean {
 }
 
 /**
+ * The head while the detail of a changed connection is on its way. No sections and Change off:
+ * the earlier connection's controls must not stay on screen for a pad that just moved (#572).
+ * This is a frame, never a cached read: it is not put in `lastRead`.
+ */
+function pendingDetail(row: PeripheralRow): PeripheralDetail {
+  return {
+    info: row,
+    schema: {
+      device: row.id,
+      kind: row.kind,
+      sections: [],
+      read_only: [],
+      unreported: [],
+    } as unknown as PeripheralDetail["schema"],
+    values: {},
+    access: { reads: true, writes: false },
+    problem: "Reading what this connection holds.",
+    read_at_ms: null,
+  } as unknown as PeripheralDetail;
+}
+
+/**
  * What the page is waiting to see change, or null when it is not waiting: values the daemon has
  * not read yet, or a connection with no settings, which the device can leave at any time.
  */
@@ -164,6 +187,9 @@ function waitingFor(detail: PeripheralDetail): string | null {
 
 /** How often the page asks again while it waits. A plain GET never touches the device. */
 export const UNREAD_POLL_MS = 5000;
+
+/** How often the device list is asked again while the page is open, to catch a connection change. */
+export const LIST_POLL_MS = POLL_MS;
 
 /** The clock, ticking every `everyMs`, so "Read 3 min ago" moves on by itself. */
 function useNowMs(everyMs: number): number {
@@ -218,7 +244,7 @@ export function PeripheralsView() {
   const [pickedId, setSelectedId] = useState<string | null>(null);
   // The detail of the device that is picked. It carries the id it belongs to, so a slow answer
   // never lands on the wrong device.
-  const [loaded, setLoaded] = useState<{ id: string; detail: PeripheralDetail } | null>(null);
+  const [loaded, setLoaded] = useState<{ id: string; key: string; detail: PeripheralDetail } | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   // The change that is on the device already, and whose refresh failed: the page says the
   // change was saved, because it was.
@@ -258,13 +284,27 @@ export function PeripheralsView() {
 
   // What this device held when it was read: from this page, or from an earlier visit. While the
   // device is read again these stay on screen, marked as refreshing.
-  const fresh = loaded && loaded.id === selectedId ? loaded.detail : null;
   // The list is the only thing that knows the connection before a detail GET lands. Keying the
   // kept read by it means a pad that moved to a connection with no settings shows no stale
   // sections and no enabled Change while the fresh answer is on its way (#572).
   const listed = selectedId ? (list?.find((row) => row.id === selectedId) ?? null) : null;
-  const detail =
-    fresh ?? (selectedId !== null && listed ? (lastRead.get(cacheKey(selectedId, listed)) ?? null) : null);
+  const connection = listed ? connectionKey(listed) : null;
+  const detailKey = selectedId === null ? null : `${selectedId}\u0000${connection ?? ""}`;
+  const fresh =
+    loaded && loaded.id === selectedId && loaded.key === detailKey ? loaded.detail : null;
+  const kept =
+    selectedId !== null && listed ? (lastRead.get(cacheKey(selectedId, listed)) ?? null) : null;
+  // The connection changed while this page was open and no answer for it has landed. Show the
+  // head with Change off and no sections instead of the other connection's controls. A first
+  // visit, where nothing has ever been read here, keeps the skeleton (#572).
+  const seenBefore =
+    selectedId !== null &&
+    Array.from(lastRead.keys()).some((key) => key.startsWith(`${selectedId}\u0000`));
+  const pending =
+    listed && detailKey !== null && !fresh && !kept && (loaded !== null || seenBefore)
+      ? pendingDetail(listed)
+      : null;
+  const detail = fresh ?? kept ?? pending;
   // The device whose reload is out. It is an id, not a flag: a reload of one device that is
   // still out when another is picked marks only the device it belongs to.
   const [reloadingId, setReloadingId] = useState<string | null>(null);
@@ -333,7 +373,7 @@ export function PeripheralsView() {
       const d = forceRead ? await api.peripheral(id, { fresh: true }) : await api.peripheral(id);
       if (n !== detailRequest.current) return;
       remember(id, d);
-      setLoaded({ id, detail: d });
+      setLoaded({ id, key: cacheKey(id, d.info), detail: d });
       dropUnreadEdits(id, d);
       if (!keepsStaged(id)) setStagedFor(id, {});
       // Read again is the user's own new action on this device: it clears the device's failed
@@ -388,6 +428,9 @@ export function PeripheralsView() {
     return handle;
   }, []);
   useEffect(() => loadList(), [loadList]);
+  // A device can move between its receiver and Bluetooth while the page is open. The list is
+  // the only place that sees it, so ask again on the live-data beat (#572).
+  usePoll(loadList, LIST_POLL_MS);
 
   // The retry: the frame goes back to its placeholder while the list is asked for again, so the
   // button is gone and a second press cannot start a second load.
@@ -400,9 +443,10 @@ export function PeripheralsView() {
 
   useEffect(() => {
     if (!selectedId) return;
-    // The read of a device that is picked again. The counter drops an answer that belongs to
-    // a device that is no longer the one on screen: a slow reload of one device must not put
-    // its error on another.
+    // The read of a device that is picked again, and again when its connection changes: the
+    // id alone is not enough for a pad that moves to Bluetooth while the page is open (#572).
+    // The counter drops an answer that belongs to a device that is no longer the one on screen:
+    // a slow reload of one device must not put its error on another.
     const n = ++detailRequest.current;
     const id = selectedId;
     let stop = false;
@@ -414,7 +458,7 @@ export function PeripheralsView() {
         // lands, so its marker is cleared here, or the device would stay "refreshing" for good.
         setReloadingId(null);
         remember(id, d);
-        setLoaded({ id, detail: d });
+        setLoaded({ id, key: cacheKey(id, d.info), detail: d });
         dropUnreadEdits(id, d);
         if (!keepsStaged(id)) setStagedFor(id, {});
         setDetailError(null);
@@ -432,7 +476,7 @@ export function PeripheralsView() {
     };
     // editsOf / keepsStaged read refs only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, dropUnreadEdits]);
+  }, [selectedId, connection, dropUnreadEdits]);
 
   // "Not read yet": the daemon has read nothing from the device and reads it while the person is
   // away. The page asks again every few seconds with a plain GET (it never touches the device)
@@ -453,7 +497,7 @@ export function PeripheralsView() {
         .then((d) => {
           if (stop || waitingFor(d) === awaiting) return;
           remember(id, d);
-          setLoaded({ id, detail: d });
+          setLoaded({ id, key: cacheKey(id, d.info), detail: d });
           dropUnreadEdits(id, d);
           setDetailError(null);
         })

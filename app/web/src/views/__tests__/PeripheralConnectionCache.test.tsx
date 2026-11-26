@@ -121,6 +121,9 @@ function detail(id: string, info: typeof RECEIVER, withSettings: boolean): Perip
 
 const toggle = (name: string) => screen.getByRole("switch", { name }) as HTMLButtonElement;
 
+// The live-data beat the page uses for its list (exported by PeripheralsView as LIST_POLL_MS).
+const LIST_POLL_MS = 10_000;
+
 beforeEach(() => {
   for (const fn of Object.values(api)) fn.mockReset();
   api.peripheralRead.mockResolvedValue({ stage: "idle", done: 0, total: 0 });
@@ -148,13 +151,38 @@ describe("the kept read of a pad that changes connection", () => {
     render(<PeripheralsView />);
     await tick(50);
     expect(screen.queryByText("Profiles")).toBeNull();
-    const change = screen.queryByRole("switch", { name: "Change settings on the device" }) as HTMLButtonElement | null;
-    expect(change === null || change.disabled).toBe(true);
+    // The switch is there, with the connection's head, but it cannot be pressed while the
+    // answer is on its way (#572). A missing switch would hide a broken head.
+    expect(toggle("Change settings on the device").disabled).toBe(true);
 
     // The fresh answer has no settings: the page says so and keeps Change off.
     await act(async () => { answer(detail(id, BLUETOOTH, false)); });
     expect(screen.queryByText(WHY)).not.toBeNull();
     expect(screen.queryByText("Profiles")).toBeNull();
+    expect(toggle("Change settings on the device").disabled).toBe(true);
+  });
+
+  it("drops the earlier connection while the page stays open and the list is refreshed", async () => {
+    vi.useFakeTimers();
+    const id = "pad:connection-change-live";
+
+    // The pad starts on the receiver, with a read and an enabled Change.
+    api.peripherals.mockResolvedValue({ peripherals: [row(id, RECEIVER)] });
+    api.peripheral.mockResolvedValue(detail(id, RECEIVER, true));
+    render(<PeripheralsView />);
+    await tick(50);
+    expect(screen.queryByText("Profiles")).not.toBeNull();
+    expect(toggle("Change settings on the device").disabled).toBe(false);
+
+    // The pad moves to Bluetooth while the page is mounted. No remount, no visit: the list's
+    // own refresh has to notice the new connection and ask for its detail again (#572).
+    api.peripherals.mockResolvedValue({ peripherals: [row(id, BLUETOOTH)] });
+    api.peripheral.mockResolvedValue(detail(id, BLUETOOTH, false));
+    await tick(LIST_POLL_MS + 50);
+
+    expect(screen.queryByText("Profiles")).toBeNull();
+    expect(screen.queryByText(WHY)).not.toBeNull();
+    // Present and disabled, never merely absent: the head must still say Change is off here.
     expect(toggle("Change settings on the device").disabled).toBe(true);
   });
 });

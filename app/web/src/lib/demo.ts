@@ -2372,7 +2372,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     const id = seg[1] ?? "";
     const device = s.peripherals.find((p) => p.info.id === id);
     if (!device) {
-      fail(404, "not_found", "The peripheral is not connected. Connect it again, then pick it from the list.");
+      fail(404, "not_found", "The device is no longer there. Connect it again, then pick it from the list.");
     }
     const access = s.peripheralAccess[id] ?? { reads: false, writes: false };
     // The stage of the read that is open: answers at once, like the daemon's route.
