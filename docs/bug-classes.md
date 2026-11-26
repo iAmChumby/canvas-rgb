@@ -302,10 +302,23 @@ or acts as if a step worked without checking that it did.
   section, a plain GET answers the reason, and the page switches Change and Read again off. Every
   adapter error a person reads goes through one function, `peripherals::user_words`; an adapter's
   `Protocol` and `Unsupported` text is written for that person, and the technical text goes to the
-  log. Tests: `a_connection_with_no_settings_offers_none_and_says_why_in_plain_words` (adapter),
-  `a_pad_over_bluetooth_says_why_on_a_plain_get_and_offers_no_settings` and
-  `a_failed_read_is_told_in_plain_words` (`tests/peripherals.rs`),
-  `app/web/src/views/__tests__/PeripheralNoSettings.test.tsx`. Sibling search: the other
+  log. The same pass closed three more sights of the class: the 8BitDo and X6 write paths named
+  settings by internal key, debug-quoted mode ids and hex chunks; the API's write guards and the
+  `Zone` arm printed ids and fragments; and the page's kept read was keyed by device id alone, so a
+  pad that moved from receiver to Bluetooth briefly showed the receiver's sections and an enabled
+  Change. Now the write paths name a setting by its schema label or give a sentence about what to
+  pick, the guards name the device's display name and the UI's Change and Read switches, and
+  `adapter_failure` turns every adapter error into words through `user_words` while logging the id,
+  zone and link cause. The kept read is keyed by id **and** connection (`location` and `name`), so a
+  different connection cannot borrow the earlier one's sections. Tests:
+  `a_connection_with_no_settings_offers_none_and_says_why_in_plain_words`,
+  `a_refused_change_is_in_plain_words_on_the_fake_pad` and
+  `a_refused_write_is_in_plain_words_on_the_fake_mouse` (adapters),
+  `a_pad_over_bluetooth_says_why_on_a_plain_get_and_offers_no_settings`,
+  `a_failed_read_is_told_in_plain_words`, `write_guards_and_a_missing_device_are_in_plain_words`
+  (`tests/peripherals.rs`), `a_zone_failure_is_told_in_plain_words_by_the_shared_helper`
+  (`peripherals.rs`), `app/web/src/views/__tests__/PeripheralNoSettings.test.tsx` and
+  `app/web/src/views/__tests__/PeripheralConnectionCache.test.tsx`. Sibling search: the other
   peripheral adapter (the mouse) has its messages rewritten; displays and lighting devices report
   their errors through other routes and were left.
 - A second mechanism, same cause: the editor draws a value it never received. A control, a count or a

@@ -113,19 +113,39 @@ function sameValue(a: PropValue | undefined, b: PropValue): boolean {
 const STAGE_POLL_MS = 300;
 
 /**
- * The last read of each device in this session. A device that is picked again shows these values
- * at once, marked as refreshing, while the new read runs.
+ * The connection a device is on. One pad keeps its id when it moves from the 2.4G receiver to
+ * Bluetooth, but the two connections hold different settings (#572).
+ */
+function connectionKey(info: { name: string; location: string }): string {
+  return `${info.name}\u0000${info.location}`;
+}
+
+/** The cache key of one device on one connection. */
+function cacheKey(id: string, info: { name: string; location: string }): string {
+  return `${id}\u0000${connectionKey(info)}`;
+}
+
+/**
+ * The last read of each device on each connection in this session. A device that is picked again
+ * shows these values at once, marked as refreshing, while the new read runs. A pad that changed
+ * connection must not bring the old connection's sections back.
  */
 const lastRead = new Map<string, PeripheralDetail>();
 
 /**
  * Keeps a device's detail for the next time it is picked. A device nothing was read from is not
  * kept: its "Not read yet" frame is not a read, and showing it as the last read would hide the
- * placeholder the page needs while the daemon answers (#127).
+ * placeholder the page needs while the daemon answers (#127). Changing connection drops the
+ * earlier read too, so a no-settings connection never shows the receiver's controls (#572).
  */
 function remember(id: string, detail: PeripheralDetail): void {
-  if (isUnread(detail)) lastRead.delete(id);
-  else lastRead.set(id, detail);
+  const key = cacheKey(id, detail.info);
+  const prefix = `${id}\u0000`;
+  for (const kept of lastRead.keys()) {
+    if (kept.startsWith(prefix) && kept !== key) lastRead.delete(kept);
+  }
+  if (isUnread(detail)) lastRead.delete(key);
+  else lastRead.set(key, detail);
 }
 
 /** True on a connection that carries no settings: the daemon describes no section for it. */
@@ -239,7 +259,12 @@ export function PeripheralsView() {
   // What this device held when it was read: from this page, or from an earlier visit. While the
   // device is read again these stay on screen, marked as refreshing.
   const fresh = loaded && loaded.id === selectedId ? loaded.detail : null;
-  const detail = fresh ?? (selectedId ? (lastRead.get(selectedId) ?? null) : null);
+  // The list is the only thing that knows the connection before a detail GET lands. Keying the
+  // kept read by it means a pad that moved to a connection with no settings shows no stale
+  // sections and no enabled Change while the fresh answer is on its way (#572).
+  const listed = selectedId ? (list?.find((row) => row.id === selectedId) ?? null) : null;
+  const detail =
+    fresh ?? (selectedId !== null && listed ? (lastRead.get(cacheKey(selectedId, listed)) ?? null) : null);
   // The device whose reload is out. It is an id, not a flag: a reload of one device that is
   // still out when another is picked marks only the device it belongs to.
   const [reloadingId, setReloadingId] = useState<string | null>(null);

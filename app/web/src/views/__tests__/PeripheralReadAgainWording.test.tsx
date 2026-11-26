@@ -76,7 +76,7 @@ function mouse(id: string, read: boolean): PeripheralDetail {
     } as unknown as PeripheralDetail["schema"],
     values: read ? { "dpi-stage-count": { type: "number", value: 6 } } : {},
     access: { reads: true, writes: false },
-    problem: read ? null : "the device's settings have not been read yet",
+    problem: read ? null : "The device's settings have not been read yet.",
     ...(read ? { read_at_ms: Date.now() as unknown as bigint } : {}),
   };
 }

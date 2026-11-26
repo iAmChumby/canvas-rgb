@@ -1726,9 +1726,9 @@ function validateDisplay(pathId: string, config: DisplayConfig): void {
 // ---- peripherals ----
 
 /** The daemon's own words when a peripheral's access is asked for. */
-const READS_OFF = "reads are off for this device";
+const READS_OFF = "Reads are off for this device.";
 /** The daemon's words when reads are on and nothing has been read yet. */
-const NOT_READ_YET = "the device's settings have not been read yet";
+const NOT_READ_YET = "The device's settings have not been read yet.";
 
 /**
  * Checks one value against the property's kind, the way the adapter does: the key must be

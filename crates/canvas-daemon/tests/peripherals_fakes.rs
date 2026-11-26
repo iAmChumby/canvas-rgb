@@ -372,7 +372,7 @@ async fn a_refused_write_is_refused_and_changes_nothing() {
         (
             "an option the property does not have",
             serde_json::json!({ "led-mode": { "type": "choice", "value": "sparkle" } }),
-            "has no option",
+            "does not offer that option",
         ),
         // A choice value is a string: the wrong kind for a number.
         (
@@ -383,7 +383,7 @@ async fn a_refused_write_is_refused_and_changes_nothing() {
         (
             "an unknown key",
             serde_json::json!({ "dpi-stage-99": { "type": "number", "value": 1600.0 } }),
-            "has no setting called dpi-stage-99",
+            "no setting with that name",
         ),
     ] {
         let response = call_json(&router, "PATCH", &path_of(&mouse_id), &props).await;

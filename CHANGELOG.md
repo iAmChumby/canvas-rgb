@@ -12,7 +12,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Peripherals: a controller on Bluetooth, or in DInput mode on the 2.4G receiver, says once and in plain words why its settings cannot be read there and what to do. Change and Read again are switched off on that connection, and the page no longer promises to read the settings later. Other read and write errors are in plain words too, and a mouse that has not been read no longer says it is read while you are away. (#572)
+- Peripherals: a controller on Bluetooth, or in DInput mode on the 2.4G receiver, says once and in plain words why its settings cannot be read there and what to do. Change and Read again are switched off on that connection, and the page no longer promises to read the settings later. A refused change now names the setting by its label instead of its internal key, the write guards name the device and the Change or Read switch, and device failures give a whole sentence with what to do; the keys, ids and protocol bytes go to the log. A pad that moves to a connection with no settings no longer shows the earlier connection's sections or an enabled Change while a fresh answer is on its way, and a mouse that has not been read no longer says it is read while you are away. (#572)
 
 ## [0.19.0] - 2026-11-26
 

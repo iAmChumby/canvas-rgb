@@ -214,7 +214,7 @@ async fn a_get_with_reads_off_never_reads_the_device() {
         .expect("the values are an object")
         .is_empty());
     let problem = body.get("problem").and_then(|v| v.as_str()).unwrap_or_default();
-    assert!(problem.contains("reads are off"), "{problem}");
+    assert!(problem.contains("Reads are off"), "{problem}");
     let log = fake.log();
     assert_eq!(log.reads, 0, "the device is not read");
     assert_eq!(log.connects, 0, "the device is not opened");
@@ -1456,7 +1456,7 @@ async fn the_cli_prints_the_peripherals_and_the_detail() {
     };
     println!("$ canvas-rgb peripherals show {id}\n{text}");
     assert!(text.contains("reads off"), "{text}");
-    assert!(text.contains("reads are off"), "{text}");
+    assert!(text.contains("Reads are off"), "{text}");
     assert!(text.contains("dpi-stage-1"), "{text}");
 
     // With reads on, the detail carries the device's own values.
@@ -1571,6 +1571,66 @@ async fn a_failed_read_is_told_in_plain_words() {
     let problem = body.get("problem").and_then(|v| v.as_str()).unwrap_or_default();
     assert!(!problem.starts_with("io:") && !problem.starts_with("protocol:"), "{problem}");
     assert!(problem.contains("Read again"), "{problem}");
+}
+
+/// #572: the guards on the write path name the device a person knows and the switch to press.
+/// Nothing in an answer is an internal id, a config field or a fragment of a sentence.
+#[tokio::test]
+async fn write_guards_and_a_missing_device_are_in_plain_words() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    let write = r#"{"dpi-stage-1":{"type":"number","value":1600}}"#;
+
+    // Changes are off: the device's display name and the UI's Change switch, not `id`.
+    let path = reads_on(&router, &fake, false).await;
+    let response = call_with_body(&router, "PATCH", &path, write).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    let message = body.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+    assert_eq!(message, "Changes are off for Fake Mouse. Turn on Change first.");
+    assert!(!message.contains(&id), "{message}");
+
+    // The saved access itself: writes need reads, and the UI calls that switch Read.
+    let response = call_with_body(
+        &router,
+        "PUT",
+        &access_path_of(&id),
+        r#"{"reads":false,"writes":true}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(
+        body.get("message").and_then(|m| m.as_str()),
+        Some("Changes need reads as well. Turn on Read first.")
+    );
+
+    // A device that is not in the enumeration: no id in the answer, on a read or a write. Its
+    // saved access is on, so the write gate does not refuse before the missing device is found.
+    let missing_id = "nope:0000:0000";
+    let saved = call_with_body(
+        &router,
+        "PUT",
+        &access_path_of(missing_id),
+        r#"{"reads":true,"writes":true}"#,
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let missing = path_of(missing_id);
+    for response in [
+        call(&router, "GET", &missing).await,
+        call_with_body(&router, "PATCH", &missing, write).await,
+    ] {
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = json(response).await;
+        let message = body.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+        assert_eq!(
+            message,
+            "The peripheral is not connected. Connect it again, then pick it from the list."
+        );
+        assert!(!message.contains(missing_id), "{message}");
+    }
 }
 
 /// A pad whose connection carries no settings: a plain GET already says why, offers no section,

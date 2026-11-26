@@ -450,22 +450,22 @@ fn check_fake_value(
     use canvas_proto::traits::AdapterError;
     let wrong = || {
         AdapterError::Protocol(format!(
-            "the setting {} does not take that kind of value: {value:?}",
-            def.key
+            "{} does not take that kind of value. Pick another value.",
+            def.label
         ))
     };
     match (&def.kind, value) {
         (PropKind::Number { min, max, step, .. }, PropValue::Number(number)) => {
             if *number < *min || *number > *max {
                 return Err(AdapterError::Protocol(format!(
-                    "{} is {number}; it takes {min} to {max}",
-                    def.key
+                    "{} is {number}; it takes {min} to {max}.",
+                    def.label
                 )));
             }
             if *step > 0.0 && ((*number - *min) / *step).fract() != 0.0 {
                 return Err(AdapterError::Protocol(format!(
-                    "{} is {number}; it takes steps of {step}",
-                    def.key
+                    "{} is {number}; it takes steps of {step}.",
+                    def.label
                 )));
             }
             Ok(())
@@ -477,7 +477,10 @@ fn check_fake_value(
             if options.iter().any(|option| option == choice) {
                 Ok(())
             } else {
-                Err(AdapterError::Protocol(format!("{} has no option {choice:?}", def.key)))
+                Err(AdapterError::Protocol(format!(
+                    "{} does not offer that option. Pick one the page offers.",
+                    def.label
+                )))
             }
         }
         (PropKind::Choice { .. }, _) => Err(wrong()),
@@ -548,18 +551,21 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
         }
         if !self.writes_enabled {
             return Err(AdapterError::Unsupported(
-                "config writes are off: turn them on with set_writes_enabled(true) first",
+                "Changes are off for this device. Turn on Change first.",
             ));
         }
         // Every key is checked before anything changes: a refused write changes nothing.
         for (key, value) in props {
             let Some(def) = self.schema.property(key) else {
-                return Err(AdapterError::Protocol(format!(
-                    "the peripheral has no setting called {key}"
-                )));
+                return Err(AdapterError::Protocol(
+                    "This device has no setting with that name. Pick one the page offers.".to_string(),
+                ));
             };
             if !self.schema.is_writable(key) {
-                return Err(AdapterError::Protocol(format!("{key} is read-only")));
+                return Err(AdapterError::Protocol(format!(
+                    "{} cannot be changed.",
+                    def.label
+                )));
             }
             check_fake_value(def, value)?;
         }

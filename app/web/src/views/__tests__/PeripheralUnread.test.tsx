@@ -99,7 +99,7 @@ function mouse(id: string, readAt: number | null): PeripheralDetail {
         }
       : {},
     access: { reads: true, writes: false },
-    problem: read ? null : "the device's settings have not been read yet",
+    problem: read ? null : "The device's settings have not been read yet.",
     // The daemon sends a plain number; the generated type says bigint for a u64.
     ...(read ? { read_at_ms: readAt as unknown as bigint } : {}),
   };

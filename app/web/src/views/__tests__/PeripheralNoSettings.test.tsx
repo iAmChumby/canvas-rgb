@@ -91,7 +91,7 @@ function pad(id: string, over: Partial<PeripheralDetail> = {}, offered = false):
     } as unknown as PeripheralDetail["schema"],
     values: {},
     access: { reads: true, writes: true },
-    problem: offered ? "the device's settings have not been read yet" : WHY,
+    problem: offered ? "The device's settings have not been read yet." : WHY,
     ...over,
   };
 }

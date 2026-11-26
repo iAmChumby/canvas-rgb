@@ -82,10 +82,10 @@ pub const BACKOFF_BASE: Duration = Duration::from_secs(60);
 pub const BACKOFF_CAP_FACTOR: u32 = 30;
 
 /// The message the detail carries when the values are missing because reads are off.
-pub const READS_OFF: &str = "reads are off for this device";
+pub const READS_OFF: &str = "Reads are off for this device.";
 /// The message the detail carries when reads are on but the device has not been read yet: no
 /// read happens on a view open (#127).
-pub const NOT_READ_YET: &str = "the device's settings have not been read yet";
+pub const NOT_READ_YET: &str = "The device's settings have not been read yet.";
 
 /// What Windows says about the person's keyboard and mouse.
 ///
@@ -1735,5 +1735,23 @@ mod tests {
             "the file holds the newer values"
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// #572: the one user-facing helper gives a whole sentence for a zone or link failure. The
+    /// device id, the zone number and the adapter's reason stay in the log, where `adapter_failure`
+    /// puts them.
+    #[test]
+    fn a_zone_failure_is_told_in_plain_words_by_the_shared_helper() {
+        let words = user_words(&AdapterError::Zone {
+            device: DeviceId("8bitdo-ultimate2:2dc8".into()),
+            zone: 3,
+            reason: "reply 0x81 failed crc".into(),
+        });
+        assert_eq!(
+            words,
+            "The device stopped answering. Check that it is switched on and connected, then press Read again."
+        );
+        assert!(!words.contains("2dc8") && !words.contains("0x81"), "{words}");
+        assert!(words.starts_with(char::is_uppercase), "{words}");
     }
 }
