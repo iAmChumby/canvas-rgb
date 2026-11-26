@@ -22,6 +22,14 @@
 //! | XInput (the default) | `2DC8:310B` | yes, usage page `0xFF7A` | through the XInput API | four coarse levels, no percent |
 //! | Idle receiver (no controller linked) | `2DC8:6013` | yes, usage page `0xFFA0` | none | none |
 //! | DInput | `2DC8:6012` | no (third-party: the receiver's DInput descriptor has no `0x81` output report) | the HID gamepad collection | percent and the charging bit |
+//! | Bluetooth (LE) | `2DC8:6012`, HID over GATT | no: Windows lists one gamepad collection and nothing on a vendor page (#566) | the HID gamepad collection, about 120 reports a second | percent and the charging bit |
+//!
+//! Over Bluetooth the pad pairs as a Bluetooth LE device and shows the DInput product id, so the
+//! adapter tells the two apart by the collection's path: a HID-over-GATT path carries the HID
+//! service's GUID ([`HOGP_SERVICE`]). The 2026-11-26 press capture (#566) showed the gamepad
+//! report filled exactly as the DInput layout below says: the hat, the sticks, the triggers, the
+//! buttons, the paddles and the fast bumpers. Without a vendor collection the profiles, the
+//! button map and the stick ranges cannot be read over Bluetooth; the read says so in words.
 //!
 //! The research saw only the XInput personality on this PC (2.2c: "No `6012` node has ever
 //! enumerated on this PC"), and the DInput attempt of 2026-10-17 failed (2.2e). So the DInput
@@ -162,6 +170,9 @@ pub enum Personality {
     XInput,
     /// The pad in the DInput personality (`2DC8:6012`).
     DInput,
+    /// The pad over Bluetooth LE: `2DC8:6012` through HID over GATT, with no vendor collection
+    /// (#566).
+    Bluetooth,
 }
 
 impl Personality {
@@ -170,7 +181,7 @@ impl Personality {
         match self {
             Personality::Idle => codec::PID_IDLE,
             Personality::XInput => codec::PID_XINPUT,
-            Personality::DInput => codec::PID_DINPUT,
+            Personality::DInput | Personality::Bluetooth => codec::PID_DINPUT,
         }
     }
 
@@ -180,6 +191,7 @@ impl Personality {
             Personality::Idle => "2.4G receiver, idle",
             Personality::XInput => "XInput",
             Personality::DInput => "DInput",
+            Personality::Bluetooth => "Bluetooth",
         }
     }
 
@@ -190,8 +202,30 @@ impl Personality {
             Personality::XInput => Some(VENDOR_USAGE_PAGE_XINPUT),
             // The receiver's DInput descriptor has no `0x81` output report (research 5.1).
             Personality::DInput => None,
+            // Over Bluetooth Windows lists the gamepad collection alone (#566).
+            Personality::Bluetooth => None,
         }
     }
+
+    /// True when the pad's input comes through the HID gamepad collection: the DInput
+    /// personality and Bluetooth.
+    pub const fn reads_gamepad_collection(self) -> bool {
+        matches!(self, Personality::DInput | Personality::Bluetooth)
+    }
+}
+
+/// The GUID of the Bluetooth HID service (`0x1812`). Windows puts it in the path of every
+/// HID-over-GATT collection, which is how a pad over Bluetooth is told from one on a cable.
+pub const HOGP_SERVICE: &str = "00001812-0000-1000-8000-00805f9b34fb";
+
+/// What a settings read answers over Bluetooth (#566): the link carries the pad's input and
+/// battery, and no vendor channel.
+pub const BLUETOOTH_NO_SETTINGS: &str = "Over Bluetooth the pad sends its buttons, sticks, triggers and battery only. \
+Its profiles, button map and stick ranges can be read and changed through the 2.4G receiver or a USB cable.";
+
+/// True when a HID path is a HID-over-GATT (Bluetooth LE) collection.
+pub fn is_bluetooth_path(path: &[u8]) -> bool {
+    String::from_utf8_lossy(path).to_ascii_lowercase().contains(HOGP_SERVICE)
 }
 
 // ------------------------------------------------------------------------------------ transport
@@ -263,6 +297,10 @@ trait HidSource: crate::attack_shark_x6::hid_cache::Scan {
     fn find_path(&self, product_id: u16, usage_page: u16, usage: u16) -> Option<std::ffi::CString>;
     /// True when any collection has this product id.
     fn has_product(&self, product_id: u16) -> bool;
+    /// True when a collection with this product id is a HID-over-GATT (Bluetooth LE) one.
+    fn has_bluetooth_product(&self, _product_id: u16) -> bool {
+        false
+    }
     /// Opens a vendor collection.
     fn open_vendor_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn VendorTransport>, String>;
     /// Opens a gamepad collection.
@@ -285,6 +323,14 @@ impl HidSource for hidapi::HidApi {
 
     fn has_product(&self, product_id: u16) -> bool {
         self.device_list().any(|d| d.product_id() == product_id)
+    }
+
+    fn has_bluetooth_product(&self, product_id: u16) -> bool {
+        self.device_list().any(|d| {
+            d.vendor_id() == VENDOR_ID
+                && d.product_id() == product_id
+                && is_bluetooth_path(d.path().to_bytes())
+        })
     }
 
     fn open_vendor_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn VendorTransport>, String> {
@@ -342,8 +388,11 @@ impl<S: HidSource> Opener for HidOpener<S> {
             if api.find_path(PRODUCT_ID_XINPUT, VENDOR_USAGE_PAGE_XINPUT, VENDOR_USAGE).is_some() {
                 out.push(Personality::XInput);
             }
-            // The DInput personality: the pad's own product id.
-            if api.has_product(PRODUCT_ID_DINPUT) {
+            // The pad over Bluetooth: the DInput product id on a HID-over-GATT path (#566).
+            // Otherwise the DInput personality: the pad's own product id, on a cable.
+            if api.has_bluetooth_product(PRODUCT_ID_DINPUT) {
+                out.push(Personality::Bluetooth);
+            } else if api.has_product(PRODUCT_ID_DINPUT) {
                 out.push(Personality::DInput);
             }
             // The idle receiver: the vendor collection on the other vendor page.
@@ -360,6 +409,10 @@ impl<S: HidSource> Opener for HidOpener<S> {
         &self,
         personality: Personality,
     ) -> Result<Option<Box<dyn VendorTransport>>, String> {
+        // Over Bluetooth there is no vendor collection to look for (#566).
+        if personality == Personality::Bluetooth {
+            return Ok(None);
+        }
         // The DInput personality has no vendor collection of its own; the wired pad in DInput
         // mode may still have one on the vendor page.
         let pages: &[u16] = match personality.vendor_usage_page() {
@@ -384,7 +437,7 @@ impl<S: HidSource> Opener for HidOpener<S> {
         // personality the pad is an Xbox 360 class device and its input comes through the XInput
         // API, and the HID view Windows shows for it (IG_00) carries the Xbox report, not the
         // DInput one.
-        if personality != Personality::DInput {
+        if !personality.reads_gamepad_collection() {
             return Ok(None);
         }
         self.cache.with_retry(|api| {
@@ -1272,13 +1325,18 @@ impl EightBitDoUltimate2 {
     pub fn info(&self) -> PeripheralInfo {
         let personality = self.personality.unwrap_or(Personality::XInput);
         PeripheralInfo {
+            battery: None,
+            charging: None,
             id: self.device_id(),
             name: format!("{DISPLAY_NAME} ({})", personality.label()),
             vendor: MANUFACTURER.into(),
             kind: PeripheralKind::GameController,
             adapter: ADAPTER_NAME.into(),
             serial: String::new(),
-            location: format!("hid:{VENDOR_ID:04x}:{:04x}", personality.product_id()),
+            location: match personality {
+                Personality::Bluetooth => format!("ble:{VENDOR_ID:04x}:{:04x}", personality.product_id()),
+                _ => format!("hid:{VENDOR_ID:04x}:{:04x}", personality.product_id()),
+            },
             connected: self.vendor.is_open() || self.gamepad.is_some(),
         }
     }
@@ -1432,12 +1490,16 @@ impl EightBitDoUltimate2 {
     }
 
     /// Why the adapter cannot talk to the pad.
+    ///
+    /// Over Bluetooth the answer is [`BLUETOOTH_NO_SETTINGS`], the sentence the Peripherals view
+    /// shows in place of the settings (#566).
     fn not_connected(&self) -> AdapterError {
         match self.personality {
             Some(Personality::DInput) => refuse(
                 "the DInput personality has no vendor channel (the receiver's DInput descriptor \
                  has no 0x81 output report, research 5.1), so the profile image cannot be read",
             ),
+            Some(Personality::Bluetooth) => refuse(BLUETOOTH_NO_SETTINGS),
             Some(Personality::Idle) => refuse(
                 "the receiver is idle: no controller is linked, so it cannot answer the profile \
                  read",
@@ -1958,7 +2020,8 @@ mod tests {
             personality: Personality,
         ) -> Result<Option<Box<dyn VendorTransport>>, String> {
             let mut s = self.0.lock().unwrap();
-            if s.personalities.is_empty() {
+            // Over Bluetooth the real opener finds no vendor collection (#566).
+            if s.personalities.is_empty() || personality == Personality::Bluetooth {
                 return Ok(None);
             }
             s.opens += 1;
@@ -1970,7 +2033,7 @@ mod tests {
             personality: Personality,
         ) -> Result<Option<Box<dyn InputTransport>>, String> {
             let s = self.0.lock().unwrap();
-            if s.personalities.is_empty() || personality != Personality::DInput {
+            if s.personalities.is_empty() || !personality.reads_gamepad_collection() {
                 return Ok(None);
             }
             Ok(Some(Box::new(FakeGamepad(self.0.clone()))))
@@ -2326,6 +2389,38 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------------- the events
+
+    #[test]
+    fn a_bluetooth_path_carries_the_hid_service_guid_566() {
+        // The interface path Windows gives the pad's HID-over-GATT collection, and a cable's.
+        let ble = br"\?\hid#{00001812-0000-1000-8000-00805f9b34fb}_dev_vid&022dc8_pid&6012_rev&0001_e417d8b9f404#b&2a97c917&0&000f#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let upper = br"\?\HID#{00001812-0000-1000-8000-00805F9B34FB}_Dev_VID&022dc8_PID&6012";
+        let cable = br"\?\hid#vid_2dc8&pid_6012&mi_00#8&1234&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        assert!(is_bluetooth_path(ble));
+        assert!(is_bluetooth_path(upper), "the match ignores case");
+        assert!(!is_bluetooth_path(cable));
+    }
+
+    #[tokio::test]
+    async fn over_bluetooth_the_pad_reports_its_battery_and_says_why_settings_are_unavailable_566() {
+        use crate::fake_pad::ble_capture;
+        let (mut a, s) = rig();
+        s.lock().unwrap().personalities = vec![Personality::Bluetooth];
+        s.lock().unwrap().gamepad.push_back(ble_capture::REST.to_vec());
+        a.connect().await.expect("the gamepad collection opens over Bluetooth");
+
+        let info = a.info();
+        assert!(info.name.ends_with("(Bluetooth)"), "{}", info.name);
+        assert_eq!(info.location, "ble:2dc8:6012");
+        assert!(info.connected);
+
+        let events = a.read_events(10).await.unwrap();
+        assert_eq!(events, vec![PeripheralEvent::Battery { level: Some(90), charging: false }]);
+
+        let err = a.read_settings(&a.device_id()).await.unwrap_err();
+        assert!(matches!(&err, AdapterError::Protocol(m) if m == BLUETOOTH_NO_SETTINGS), "{err:?}");
+        assert!(s.lock().unwrap().sent.is_empty(), "nothing is sent to the pad over Bluetooth");
+    }
 
     #[tokio::test]
     async fn the_dinput_personality_reports_the_battery_and_the_paddles() {
@@ -2818,6 +2913,7 @@ mod tests {
         static SCANS: Cell<u32> = const { Cell::new(0) };
         static STALE_OPENS: Cell<u32> = const { Cell::new(0) };
         static PLUGGED: Cell<bool> = const { Cell::new(true) };
+        static ON_BLUETOOTH: Cell<bool> = const { Cell::new(false) };
     }
 
     struct CountingApi {
@@ -2865,6 +2961,10 @@ mod tests {
             self.plugged && product_id == PRODUCT_ID_DINPUT
         }
 
+        fn has_bluetooth_product(&self, product_id: u16) -> bool {
+            self.has_product(product_id) && ON_BLUETOOTH.with(Cell::get)
+        }
+
         fn open_vendor_at(&self, _p: &std::ffi::CStr) -> Result<Box<dyn VendorTransport>, String> {
             if stale_open() {
                 return Err("the path is gone".into());
@@ -2891,11 +2991,23 @@ mod tests {
         SCANS.with(|s| s.set(0));
         STALE_OPENS.with(|s| s.set(0));
         PLUGGED.with(|s| s.set(true));
+        ON_BLUETOOTH.with(|s| s.set(false));
         HidOpener { cache: HidCache::with_ttl(Duration::from_secs(3600)) }
     }
 
     fn scans() -> u32 {
         SCANS.with(Cell::get)
+    }
+
+    #[test]
+    fn a_6012_pad_on_a_hid_over_gatt_path_is_the_bluetooth_personality_566() {
+        let o = opener();
+        assert_eq!(o.personalities(), vec![Personality::DInput], "6012 on a cable is DInput");
+        let o = opener();
+        ON_BLUETOOTH.with(|s| s.set(true));
+        assert_eq!(o.personalities(), vec![Personality::Bluetooth]);
+        assert!(o.open_vendor(Personality::Bluetooth).unwrap().is_none(), "no vendor channel over Bluetooth");
+        assert!(o.open_gamepad(Personality::Bluetooth).unwrap().is_some(), "the gamepad collection opens");
     }
 
     #[test]

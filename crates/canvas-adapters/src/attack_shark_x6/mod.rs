@@ -977,6 +977,8 @@ impl AttackSharkX6 {
     /// fakes mode can report the same shape without opening anything (#243).
     pub fn info(&self) -> PeripheralInfo {
         PeripheralInfo {
+            battery: None,
+            charging: None,
             id: self.device_id(),
             name: DISPLAY_NAME.into(),
             vendor: MANUFACTURER.into(),

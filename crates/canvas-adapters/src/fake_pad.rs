@@ -397,6 +397,42 @@ impl Opener for FakePad {
     }
 }
 
+/// Gamepad reports of the real pad over Bluetooth LE (#566): 34 bytes each, report id `0x01`,
+/// read from its HID-over-GATT collection on 2026-11-26 while Luke pressed each button in turn.
+/// Bytes 15..26 are the motion sensors and move in every report; byte 14 is the battery (90 %,
+/// then 83 %, not charging).
+pub mod ble_capture {
+    /// Hands off: the hat centred (`0x0f`), the sticks at `0x7f`, nothing pressed, 90 %.
+    pub const REST: [u8; 34] = hex34("010f7f7f7f7f00000000000012605a6308dffece0d0f00faff180000000000000000");
+    /// A pressed (byte 8, `0x01`), 83 %.
+    pub const A: [u8; 34] = hex34("010f7f7f7f7f000001000000126053d8094e000b0d62003300220000000000000000");
+    /// The left back paddle, PL (byte 8, `0x20`).
+    pub const LEFT_PADDLE: [u8; 34] = hex34("010f7f7f7f7f000020000000126053b8096ffff50c2e00b8012e0000000000000000");
+    /// The fast bumper L4 (byte 10, `0x01`).
+    pub const L4: [u8; 34] = hex34("010f7f7f7f7f0000000001001260532c100b015402780046ff940000000000000000");
+    /// LT fully pulled: the left trigger axis (byte 7) at `0xff` and the LT bit (byte 9, `0x01`).
+    pub const LT: [u8; 34] = hex34("010f7f7f7f7f00ff00010000126053ac0a2a001c0d3601e4ffe2ff00000000000000");
+
+    const fn hex34(text: &str) -> [u8; 34] {
+        const fn nibble(c: u8) -> u8 {
+            match c {
+                b'0'..=b'9' => c - b'0',
+                b'a'..=b'f' => c - b'a' + 10,
+                _ => panic!("not a hex digit"),
+            }
+        }
+        let b = text.as_bytes();
+        assert!(b.len() == 68, "a capture row is 34 bytes");
+        let mut out = [0u8; 34];
+        let mut i = 0;
+        while i < 34 {
+            out[i] = nibble(b[2 * i]) << 4 | nibble(b[2 * i + 1]);
+            i += 1;
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -114,6 +114,15 @@ pub struct PeripheralInfo {
     pub location: String,
     /// True when the adapter has it open.
     pub connected: bool,
+    /// The battery in percent, when an open device's own input reports carry it (#566). Read
+    /// passively from a device that is already open: nothing is sent to get it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub battery: Option<u8>,
+    /// True while the device charges, false while it does not; `None` with no battery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub charging: Option<bool>,
 }
 
 /// `GET /peripherals`.

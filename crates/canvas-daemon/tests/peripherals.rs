@@ -1536,3 +1536,24 @@ async fn the_cli_refuses_writes_without_reads() {
     assert!(error.to_string().contains("reads"), "{error}");
     assert!(api.calls.lock().unwrap().is_empty(), "nothing is asked for");
 }
+
+
+/// #566: an open pad whose input reports carry its battery shows it in the list, and a device
+/// that is not open is never asked.
+#[tokio::test]
+async fn the_list_shows_the_battery_of_an_open_device_and_asks_no_closed_one() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    fake.0.lock().unwrap().battery = Some((83, false));
+
+    // Reads are off: the device is not open, so the list asks it nothing.
+    let closed = json(call(&router, "GET", routes::PERIPHERALS).await).await;
+    assert_eq!(closed.pointer("/peripherals/0/battery"), None, "{closed}");
+    assert_eq!(fake.log().battery_reads, 0, "a closed device is not asked for its battery");
+
+    reads_on(&router, &fake, false).await;
+    let open = json(call(&router, "GET", routes::PERIPHERALS).await).await;
+    assert_eq!(open.pointer("/peripherals/0/battery").and_then(|v| v.as_u64()), Some(83), "{open}");
+    assert_eq!(open.pointer("/peripherals/0/charging"), Some(&serde_json::Value::Bool(false)), "{open}");
+    assert_eq!(fake.log().reads, 0, "the battery comes from input reports, not a settings read");
+}

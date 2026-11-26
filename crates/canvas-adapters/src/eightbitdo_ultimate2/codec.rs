@@ -954,13 +954,15 @@ pub fn analyse_run(samples: &[Sample]) -> XInputRun {
 /// The DInput input report, as far as the research names its fields (section 7.1, the SDL driver).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DInputReport {
-    /// The hat switch, 0..7 with 8 for centred.
+    /// The hat switch, 0..7 clockwise from up; anything above 7 is centred (`0x0f` over
+    /// Bluetooth, #566). The low four bits of byte 1: the descriptor pads the other four.
     pub hat: u8,
     /// The buttons of byte 8: A (`0x01`), B (`0x02`), X (`0x08`), Y (`0x10`), L1 (`0x40`), R1
     /// (`0x80`), the right paddle (`0x04`) and the left paddle (`0x20`).
     pub buttons: u8,
     /// The buttons of byte 9: Home (`0x10`), Back (`0x04`), Start (`0x08`), L3 (`0x20`), R3
-    /// (`0x40`).
+    /// (`0x40`), and the triggers as buttons, LT (`0x01`) and RT (`0x02`), which the 2026-11-26
+    /// Bluetooth capture showed set with the trigger axes (#566).
     pub buttons2: u8,
     /// The buttons of byte 10: the fast bumpers L4 (`0x01`) and R4 (`0x02`).
     pub buttons3: u8,
@@ -1003,7 +1005,7 @@ pub fn decode_dinput(report: &[u8]) -> Result<DInputReport, String> {
         return Err(format!("the DInput report is {} bytes, not 11", report.len()));
     }
     Ok(DInputReport {
-        hat: report[1],
+        hat: report[1] & 0x0F,
         buttons: report[8],
         buttons2: report[9],
         buttons3: report[10],
@@ -1950,4 +1952,19 @@ mod tests {
             prev = s;
         }
     }
+
+    #[test]
+    fn the_bluetooth_capture_decodes_as_the_dinput_layout_566() {
+        use crate::fake_pad::ble_capture;
+        let rest = decode_dinput(&ble_capture::REST).unwrap();
+        assert_eq!((rest.hat, rest.buttons, rest.buttons2, rest.buttons3), (0x0f, 0, 0, 0));
+        assert_eq!((rest.battery, rest.charging), (Some(90), false));
+        let a = decode_dinput(&ble_capture::A).unwrap();
+        assert_eq!((a.buttons, a.battery), (0x01, Some(83)), "A, at 83 %");
+        assert!(decode_dinput(&ble_capture::LEFT_PADDLE).unwrap().left_paddle());
+        assert!(decode_dinput(&ble_capture::L4).unwrap().l4());
+        let lt = decode_dinput(&ble_capture::LT).unwrap();
+        assert_eq!((ble_capture::LT[7], lt.buttons2), (0xff, 0x01), "the left trigger axis and its bit");
+    }
+
 }

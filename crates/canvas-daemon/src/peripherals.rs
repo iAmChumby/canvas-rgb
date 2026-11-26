@@ -252,6 +252,14 @@ pub trait Peripheral: PeripheralAdapter + canvas_adapters::resume::ResumeBehavio
         true
     }
 
+    /// The battery and whether it charges, from the device's own input reports, when the
+    /// device is open (#566). Passive: nothing is sent to the device. The default is `None`:
+    /// an adapter whose battery does not travel in its input reports (the X6 asks for it with a
+    /// feature request) keeps it, so listing the devices never sends anything.
+    async fn battery(&mut self) -> Option<(u8, bool)> {
+        None
+    }
+
     /// Writes the settings and returns the values the device holds for them afterwards. An
     /// adapter whose device changes keys it was not asked to (a mode that forces a brightness,
     /// a count that turns stages off) overrides this and returns those too, so the hub can keep
@@ -298,11 +306,32 @@ impl Peripheral for canvas_adapters::attack_shark_x6::AttackSharkX6 {
     }
 }
 
+#[async_trait::async_trait]
 impl Peripheral for canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2 {
     fn set_config_writes(&mut self, on: bool) {
         self.set_writes_enabled(on);
     }
+
+    /// The battery byte of the gamepad report (DInput on a cable, and Bluetooth, #566): the pad
+    /// sends that report on its own, about 120 times a second over Bluetooth, so one short read
+    /// of an open collection finds it. In the XInput personality there is no percent.
+    async fn battery(&mut self) -> Option<(u8, bool)> {
+        if !self.is_connected() {
+            return None;
+        }
+        let events = self.read_events(BATTERY_READ_MS).await.ok()?;
+        events.into_iter().rev().find_map(|event| match event {
+            canvas_proto::peripheral::PeripheralEvent::Battery { level: Some(level), charging } => {
+                Some((level, charging))
+            }
+            _ => None,
+        })
+    }
 }
+
+/// How long the list waits for one gamepad report when it asks an open pad for its battery.
+/// At 120 reports a second (Bluetooth) one arrives within about 8 ms.
+pub const BATTERY_READ_MS: i32 = 30;
 
 /// The adapters the daemon has, and the last enumeration.
 pub struct PeripheralHub {
@@ -664,6 +693,27 @@ impl PeripheralHub {
         };
         if dropped {
             self.save_kept().await;
+        }
+        found
+    }
+
+    /// The listed devices with their battery, for the ones that are open and whose adapter reads
+    /// it from the device's own input reports ([`Peripheral::battery`], #566). Nothing is sent
+    /// and nothing is opened: a device that is not open keeps no battery.
+    pub async fn with_batteries(&self, mut found: Vec<PeripheralInfo>) -> Vec<PeripheralInfo> {
+        let mut adapters = self.adapters.lock().await;
+        for info in found.iter_mut() {
+            if let Ok((index, _)) = owner_of(&mut adapters, &info.id).await {
+                // The adapter's own state, not the cached list's: the list is up to
+                // `DISCOVERY_CACHE` old.
+                if !adapters[index].is_connected() {
+                    continue;
+                }
+                if let Some((level, charging)) = adapters[index].battery().await {
+                    info.battery = Some(level);
+                    info.charging = Some(charging);
+                }
+            }
         }
         found
     }
@@ -1236,6 +1286,8 @@ mod tests {
 
         async fn discover(&mut self) -> Result<Vec<PeripheralInfo>, AdapterError> {
             Ok(vec![PeripheralInfo {
+                battery: None,
+                charging: None,
                 id: self.id.clone(),
                 name: "Held Mouse".into(),
                 vendor: "fake".into(),
