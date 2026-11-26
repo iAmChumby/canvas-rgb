@@ -738,6 +738,9 @@ pub struct PeripheralLog {
     pub fail_discover: bool,
     /// Makes this many writes fail with an I/O error (a cable pulled mid-write).
     pub fail_write: u32,
+    /// A person-written refusal from the adapter, sent back on the next write before any bytes
+    /// reach the device. The adapter's own refusal is already in words (#572).
+    pub write_refusal: Option<String>,
     /// The battery the fake's input reports carry, for `Peripheral::battery` (#566).
     pub battery: Option<(u8, bool)>,
     /// How many times the hub asked the fake for its battery.
@@ -847,6 +850,7 @@ impl Default for FakePeripheral {
             side_effect: None,
             fail_discover: false,
             fail_write: 0,
+            write_refusal: None,
             battery: None,
             battery_reads: 0,
         })))
@@ -1034,6 +1038,9 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
                 return Err(AdapterError::Protocol(format!("{} cannot be changed.", def.label)));
             }
             check_prop_value(def, value)?;
+        }
+        if let Some(words) = log.write_refusal.take() {
+            return Err(AdapterError::Protocol(words));
         }
         if log.fail_write > 0 {
             log.fail_write -= 1;

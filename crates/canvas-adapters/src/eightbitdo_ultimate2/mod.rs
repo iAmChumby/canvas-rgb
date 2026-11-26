@@ -777,13 +777,13 @@ fn unreported() -> Vec<String> {
 /// Why a property cannot be written yet.
 fn read_only_reason(key: &str) -> &'static str {
     if key == KEY_ACTIVE_PROFILE {
-        "the controller changes it with its own profile button"
+        "The controller changes it with its own profile button."
     } else if key.starts_with(KEY_BUTTON_PREFIX) || key.contains("vibration") {
-        "canvas-rgb can only show it"
+        "It is shown for information only; canvas-rgb cannot write it."
     } else if key.contains("in-use") {
-        "this is the vendor app's mark of a record in use, not a setting"
+        "This is the vendor app's mark of a record in use, not a setting."
     } else {
-        "canvas-rgb cannot change it yet"
+        "Changing it is not supported yet."
     }
 }
 
@@ -1655,7 +1655,7 @@ impl EightBitDoUltimate2 {
             };
             if !schema.is_writable(key) {
                 return Err(refuse(format!(
-                    "{} cannot be changed: {}.",
+                    "{} cannot be changed. {}",
                     def.label,
                     read_only_reason(key)
                 )));
@@ -1677,9 +1677,13 @@ impl EightBitDoUltimate2 {
         let Some(result) = result else {
             return Err(self.not_connected());
         };
-        // A session that went wrong may have sent chunks: it is an I/O failure for the caller,
-        // which then treats the pad as changed by an unknown amount.
-        result.map_err(|e| AdapterError::Io(std::io::Error::other(e.to_string())))
+        // A session that went wrong may have sent chunks. Keep the sentence written for the
+        // person (#572): the hub still treats it as a link failure (and drops what it kept),
+        // but the API now answers with these words instead of "the device stopped answering".
+        result.map_err(|e| match e {
+            AdapterError::Protocol(message) => crate::write_failure::write_failure(message),
+            other => other,
+        })
     }
 
     /// The pad applies the map of the profile it is on, so only that profile's paddles are

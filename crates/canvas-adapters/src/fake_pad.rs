@@ -137,6 +137,8 @@ struct State {
     scribble_on_commit: Option<usize>,
     /// On the next commit the pad drops the write: the image goes back to what it was.
     drop_next_commit: bool,
+    /// Fail the next report the vendor side sends.
+    fail_next_report: bool,
     /// The image as it was before the writes since the last commit.
     before_write: Option<Vec<u8>>,
 }
@@ -204,6 +206,11 @@ impl FakePad {
     /// The pad applies the next `n` write chunks and does not acknowledge them.
     pub fn silence_next_write_acks(&self, n: usize) {
         self.lock().silent_write_acks = n;
+    }
+
+    /// The next report the pad is sent fails, as a vendor write that the pad refused (#572).
+    pub fn refuse_next_report(&self) {
+        self.lock().fail_next_report = true;
     }
 
     /// The pad acknowledges every write chunk and every commit and keeps none of the bytes.
@@ -288,6 +295,10 @@ impl VendorTransport for FakePadVendor {
     fn send_report(&mut self, data: &[u8]) -> Result<(), String> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.sent.push(data.to_vec());
+        if s.fail_next_report {
+            s.fail_next_report = false;
+            return Err("the pad refused the report".to_string());
+        }
         let Some(word) = config_word(data) else {
             return Ok(());
         };

@@ -328,13 +328,13 @@ fn join_error(e: tokio::task::JoinError) -> AdapterError {
 /// Why a property cannot be written yet.
 fn read_only_reason(key: &str) -> &'static str {
     if key.starts_with("button-") {
-        "canvas-rgb does not know which physical button it is"
+        "Which physical button it is has not been mapped."
     } else if key == KEY_ACTIVE_STAGE {
-        "the mouse changes it with its own DPI button"
+        "The mouse changes it with its own DPI button."
     } else if key == KEY_PROFILE {
-        "the mouse holds one profile"
+        "The mouse holds one profile."
     } else {
-        "canvas-rgb cannot change it yet"
+        "Changing it is not supported yet."
     }
 }
 
@@ -1603,7 +1603,7 @@ impl AttackSharkX6 {
             };
             if !schema.is_writable(key) {
                 return Err(refuse(format!(
-                    "{} cannot be changed: {}.",
+                    "{} cannot be changed. {}",
                     def.label,
                     read_only_reason(key)
                 )));
@@ -1642,11 +1642,13 @@ impl AttackSharkX6 {
                 }
                 tracing::info!(bytes = packet.len(), raw = %hex(packet), "the X6 write goes out");
                 if let Err(e) = config.send_feature(packet) {
-                    // An I/O failure with bytes possibly sent: the caller treats the device as
-                    // changed by an unknown amount (it keeps nothing it held before).
-                    result = Err(AdapterError::Io(std::io::Error::other(format!(
-                        "the X6 write failed: {e}"
-                    ))));
+                    // Bytes may have reached the mouse: the hub drops what it kept. The words
+                    // go to the API answer whole; the technical failure goes only to the log
+                    // (#572).
+                    tracing::warn!(error = %e, "the X6 write stopped before it was confirmed");
+                    result = Err(crate::write_failure::write_failure(
+                        "The mouse stopped answering during the change. The change may be only partly on the mouse. Press Read again to see what it holds.",
+                    ));
                     break;
                 }
             }

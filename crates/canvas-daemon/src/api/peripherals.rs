@@ -17,12 +17,13 @@ use canvas_proto::traits::AdapterError;
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
-use crate::peripherals::{user_words, NOT_READ_YET, READS_OFF};
+use crate::peripherals::{no_longer_there, user_words, NOT_READ_YET, READS_OFF};
 use crate::state::App;
 
-/// A request named a device the adapters do not see. The id belongs in the log, not in an answer
-/// a person reads (#572).
-const NOT_HERE: &str = "The peripheral is not connected. Connect it again, then pick it from the list.";
+/// A link failure during a write may have left the device only partly changed. A plain
+/// "stopped answering" is not enough then: the person has to know to press Read again (#572).
+const PARTIAL_WRITE: &str =
+    "The device stopped answering during the change. The change may be incomplete. Press Read again to see what the device holds.";
 
 /// The name a person knows a device by, for a refusal that names it (#572).
 fn name_of(info: Option<&PeripheralInfo>) -> String {
@@ -71,7 +72,7 @@ pub async fn get_peripheral(
     let access = app.store.read().await.peripherals.access(&device);
     let info = find_info(&app, &device)
         .await
-        .ok_or_else(|| ApiFailure::not_found(NOT_HERE.to_string()))?;
+        .ok_or_else(|| ApiFailure::not_found(no_longer_there("The device")))?;
     let (schema, unavailable) =
         app.peripherals.describe_reach(&device).await.map_err(adapter_failure)?;
     let (values, problem, read_at_ms) = if let Some(why) = unavailable {
@@ -127,9 +128,11 @@ pub async fn patch_peripheral(
         )));
     }
     if info.is_none() {
-        return Err(ApiFailure::not_found(NOT_HERE.to_string()));
+        return Err(ApiFailure::not_found(no_longer_there("The device")));
     }
-    app.peripherals.write(&device, &props).await.map_err(adapter_failure)?;
+    // A write failure is told in the adapter's own words when it has them, and with the
+    // partial-change warning when the link failed mid-write (#572).
+    app.peripherals.write(&device, &props).await.map_err(write_failure)?;
     tracing::info!(
         device = %id,
         keys = ?props.keys().collect::<Vec<_>>(),
@@ -168,7 +171,9 @@ pub async fn put_peripheral_access(
         |store, ()| {
             crate::peripherals::save(&store.home, &store.peripherals).map_err(|e| {
                 tracing::warn!(error = %e, "the peripheral access could not be saved");
-                ApiFailure::internal("The change could not be saved. Check the log for details.")
+                ApiFailure::internal(
+                    "The change could not be saved. In Settings, choose Open logs folder to see why.",
+                )
             })
         },
     )
@@ -230,6 +235,24 @@ fn adapter_failure(error: AdapterError) -> ApiFailure {
     // the read path. The id, the zone and the link error belong in the log, not in the answer
     // (#572).
     let message = user_words(&error);
+    failure_with(error, message)
+}
+
+/// The words for an adapter error from a write. An adapter that wrote a sentence for the person
+/// keeps it; a bare `Io` may have left the device partly changed, so it also says to press Read
+/// again (#572).
+fn write_failure(error: AdapterError) -> ApiFailure {
+    let message = match &error {
+        AdapterError::Io(_) if canvas_adapters::write_failure::write_words(&error).is_none() => {
+            PARTIAL_WRITE.to_string()
+        }
+        _ => user_words(&error),
+    };
+    failure_with(error, message)
+}
+
+/// The status of an adapter failure, with the message already written for the person.
+fn failure_with(error: AdapterError, message: String) -> ApiFailure {
     match error {
         AdapterError::UnknownDevice(id) => {
             tracing::warn!(device = %id.0, "the peripheral is not here");

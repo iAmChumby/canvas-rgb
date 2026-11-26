@@ -1161,6 +1161,13 @@ async fn owner_of(
     Err(AdapterError::UnknownDevice(device.clone()))
 }
 
+/// One sentence for a device the adapters no longer see, on the read path as on the write
+/// path. The caller that knows the display name passes it in; otherwise the generic name is
+/// used, so the two paths cannot disagree (#572).
+pub fn no_longer_there(name: &str) -> String {
+    format!("{name} is no longer there. Connect it again, then pick it from the list.")
+}
+
 /// What a person is told when a device fails them: what happened and what they can do. An
 /// adapter's refusal is already written for them; the technical text of a link failure goes to
 /// the log, where the caller puts it.
@@ -1171,12 +1178,15 @@ pub fn user_words(error: &AdapterError) -> String {
         AdapterError::NotConnected => "The device is not connected. Check that it is switched on and \
             plugged in or paired, then press Read again."
             .to_string(),
-        AdapterError::UnknownDevice(_) => {
-            "The device is no longer there. Connect it again, then reopen this page.".to_string()
+        AdapterError::UnknownDevice(_) => no_longer_there("The device"),
+        // A write carries its own sentence through the `Io` wrapper (see `write_failure`).
+        // Other link and zone failures get the same plain words on a read as on a write.
+        AdapterError::Io(_) | AdapterError::Zone { .. } => {
+            canvas_adapters::write_failure::write_words(error).map(str::to_string).unwrap_or_else(|| {
+                "The device stopped answering. Check that it is switched on and connected, then press Read again."
+                    .to_string()
+            })
         }
-        AdapterError::Io(_) | AdapterError::Zone { .. } => "The device stopped answering. Check that \
-            it is switched on and connected, then press Read again."
-            .to_string(),
     }
 }
 
