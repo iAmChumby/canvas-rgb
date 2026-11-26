@@ -1953,6 +1953,70 @@ mod tests {
         }
     }
 
+    /// The whole 2026-11-26 Bluetooth press capture (#566), replayed through the decoder: every
+    /// button lands on the bit the layout names, in the order it was pressed.
+    #[test]
+    fn the_whole_bluetooth_press_capture_decodes_in_the_order_pressed_566() {
+        let text = include_str!("../../tests/fixtures/8bitdo_ble_presses.csv");
+        let reports: Vec<Vec<u8>> = text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(|l| {
+                let hex = l.split_once(',').expect("ms,report").1;
+                hex.split(' ').map(|b| u8::from_str_radix(b, 16).expect("hex")).collect()
+            })
+            .collect();
+        assert_eq!(reports.len(), 291);
+        assert!(reports.iter().all(|r| r.len() == 34 && r[0] == 0x01), "34-byte reports, id 0x01");
+
+        // Every rising edge of a button bit, as (byte, bit), in order.
+        let mut pressed = Vec::new();
+        let mut hats = Vec::new();
+        let mut prev = decode_dinput(&reports[0]).unwrap();
+        for r in &reports[1..] {
+            let now = decode_dinput(r).unwrap();
+            for (byte, was, is) in [(8, prev.buttons, now.buttons), (9, prev.buttons2, now.buttons2), (10, prev.buttons3, now.buttons3)] {
+                for bit in 0..8 {
+                    let m = 1u8 << bit;
+                    if is & m != 0 && was & m == 0 {
+                        pressed.push((byte, m));
+                    }
+                }
+            }
+            if now.hat != prev.hat && now.hat <= 7 {
+                hats.push(now.hat);
+            }
+            prev = now;
+        }
+        assert_eq!(
+            pressed,
+            vec![
+                (8, 0x01), (8, 0x02), (8, 0x08), (8, 0x10), // A B X Y
+                (8, 0x40), (8, 0x80), // LB RB
+                (9, 0x01), (9, 0x02), // LT RT, as buttons
+                (8, 0x20), (8, 0x04), // PL PR
+                (10, 0x01), (10, 0x02), // L4 R4
+                (9, 0x20), (9, 0x40), // L3 R3
+                (9, 0x04), (9, 0x08), // Select (Back), Start
+            ]
+        );
+        assert_eq!(hats, vec![0, 4, 6, 2], "d-pad up, down, left, right");
+
+        // Every axis swept its whole range; the right trigger is byte 6, the left byte 7.
+        for axis in 2..=7 {
+            let lo = reports.iter().map(|r| r[axis]).min().unwrap();
+            let hi = reports.iter().map(|r| r[axis]).max().unwrap();
+            assert_eq!((lo, hi), (0, 255), "axis byte {axis}");
+        }
+        let first = |byte: usize| reports.iter().position(|r| r[byte] > 0x40).unwrap();
+        assert!(first(7) < first(6), "LT (pressed first) moves byte 7, RT byte 6");
+
+        let batteries: std::collections::BTreeSet<_> =
+            reports.iter().map(|r| decode_dinput(r).unwrap().battery.unwrap()).collect();
+        assert_eq!(batteries.into_iter().collect::<Vec<_>>(), vec![83, 90]);
+        assert!(reports.iter().all(|r| !decode_dinput(r).unwrap().charging), "not charging");
+    }
+
     #[test]
     fn the_bluetooth_capture_decodes_as_the_dinput_layout_566() {
         use crate::fake_pad::ble_capture;

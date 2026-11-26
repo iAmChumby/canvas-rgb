@@ -812,8 +812,8 @@ impl Default for FakePeripheral {
         let device = fake_peripheral_id();
         let schema = fake_peripheral_schema(&device);
         let found = vec![PeripheralInfo {
-                battery: None,
-                charging: None,
+            battery: None,
+            charging: None,
             id: device.clone(),
             name: "Fake Mouse".into(),
             vendor: "Fake".into(),

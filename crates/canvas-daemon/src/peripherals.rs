@@ -312,9 +312,11 @@ impl Peripheral for canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2 {
         self.set_writes_enabled(on);
     }
 
-    /// The battery byte of the gamepad report (DInput on a cable, and Bluetooth, #566): the pad
-    /// sends that report on its own, about 120 times a second over Bluetooth, so one short read
-    /// of an open collection finds it. In the XInput personality there is no percent.
+    /// The battery byte of the gamepad report (DInput on a cable, and Bluetooth, #566). Over
+    /// Bluetooth the pad sends that report on its own, about 120 times a second (the 2026-11-26
+    /// capture), so one short read of an open collection finds it. Whether the cable sends it
+    /// unprompted too is UNKNOWN: if it sends only on change, a list may show no battery. In the
+    /// XInput personality there is no percent.
     async fn battery(&mut self) -> Option<(u8, bool)> {
         if !self.is_connected() {
             return None;
@@ -700,8 +702,13 @@ impl PeripheralHub {
     /// The listed devices with their battery, for the ones that are open and whose adapter reads
     /// it from the device's own input reports ([`Peripheral::battery`], #566). Nothing is sent
     /// and nothing is opened: a device that is not open keeps no battery.
+    ///
+    /// The list never waits for a device: while a read or a write holds the adapters, the list
+    /// is answered at once without batteries, and the next one has them.
     pub async fn with_batteries(&self, mut found: Vec<PeripheralInfo>) -> Vec<PeripheralInfo> {
-        let mut adapters = self.adapters.lock().await;
+        let Ok(mut adapters) = self.adapters.try_lock() else {
+            return found;
+        };
         for info in found.iter_mut() {
             if let Ok((index, _)) = owner_of(&mut adapters, &info.id).await {
                 // The adapter's own state, not the cached list's: the list is up to

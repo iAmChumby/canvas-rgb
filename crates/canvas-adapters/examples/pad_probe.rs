@@ -80,7 +80,7 @@ fn personality_note(personality: Personality) -> &'static str {
              vendor channel to read the profile through"
         }
         Personality::Bluetooth => {
-            "the pad is on Bluetooth LE: it reads through its HID gamepad collection (the buttons,              paddles, sticks, triggers and battery), and there is no vendor channel to read the              profile through (#566)"
+            "the pad is on Bluetooth LE: it reads through its HID gamepad collection (the buttons, paddles, sticks, triggers and battery), and there is no vendor channel to read the profile through (#566)"
         }
     }
 }

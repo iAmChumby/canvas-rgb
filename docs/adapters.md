@@ -192,7 +192,7 @@ From `CLAUDE.md` in the repo root:
 
 Over Bluetooth the pad pairs as a **Bluetooth LE** device and talks HID over GATT. It shows the
 DInput product id, `2DC8:6012`, so the adapter tells it from a pad on a cable by the collection's
-path: every HID-over-GATT path carries the HID service's GUID, `00001812-0000-1000-8000-00805f9b34fb`
+path: Windows' HID-over-GATT path for this pad carries the HID service's GUID, `00001812-0000-1000-8000-00805f9b34fb`
 (`is_bluetooth_path` in `crates/canvas-adapters/src/eightbitdo_ultimate2/mod.rs`). That is
 `Personality::Bluetooth`.
 
@@ -205,13 +205,17 @@ What the link carries, from the 2026-11-26 capture (one press of every button, r
 | 2-5 | left stick X, Y, right stick X, Y; `0x7f` centred, full range 0..255 |
 | 6, 7 | right trigger, left trigger, 0..255 |
 | 8 | A `0x01`, B `0x02`, PR `0x04`, X `0x08`, Y `0x10`, PL `0x20`, LB `0x40`, RB `0x80` |
-| 9 | LT `0x01`, RT `0x02` (as buttons), Select `0x04`, Start `0x08`, Home `0x10`, L3 `0x20`, R3 `0x40` |
+| 9 | LT `0x01`, RT `0x02` (as buttons), Select (Back) `0x04`, Start `0x08`, L3 `0x20`, R3 `0x40`; Home `0x10` from SDL's layout, not pressed in the capture |
 | 10 | L4 `0x01`, R4 `0x02` |
-| 14 | battery: low seven bits the percent, bit 7 charging |
+| 14 | battery: low seven bits the percent (90, then 83 in the capture); bit 7 charging from SDL's layout, not seen set |
 | 15-26 | motion sensors (they move in every report) |
 
-This is the DInput layout SDL's driver reads, so `codec::decode_dinput` reads it unchanged. The
-reports are in `crates/canvas-adapters/src/fake_pad.rs` (`ble_capture`). The editor's controller
+This is the DInput layout SDL's driver reads, so `codec::decode_dinput` reads it, with the hat
+masked to its low nibble. The whole capture (291 changed reports) is
+`crates/canvas-adapters/tests/fixtures/8bitdo_ble_presses.csv`, and
+`the_whole_bluetooth_press_capture_decodes_in_the_order_pressed_566` replays it: every press lands
+on the bit above in the order pressed, every axis sweeps 0..255. Five of its rows are named in
+`crates/canvas-adapters/src/fake_pad.rs` (`ble_capture`). The editor's controller
 drawing reads the browser's Gamepad API (`app/web/src/lib/padInput.ts`), not this report: whether
 the editor's WebView sees the pad over Bluetooth is UNKNOWN until it is checked with the pad in hand.
 
@@ -223,8 +227,8 @@ and takes byte 14. Nothing is sent and nothing is opened for it.
 so there is no channel for the profile image. The profiles, the button map, the stick and trigger
 ranges, the vibration strengths and the paddle mapping can be read and changed only through the
 2.4G receiver or a USB cable. A settings read over Bluetooth answers with that sentence
-(`BLUETOOTH_NO_SETTINGS`), and nothing is ever sent to the pad. The stick rings (#376) are written
-through the same vendor channel, so they do not change over Bluetooth either. The pad's non-standard
+(`BLUETOOTH_NO_SETTINGS`), and nothing is ever sent to the pad. The stick rings (#376) are listed only in
+the XInput personality (`set_pad_present`), so they do not change over Bluetooth either. The pad's non-standard
 GATT service `00010203-0405-0607-0809-0a0b0c0d1912` may be the vendor's config channel over BLE:
 nothing has read it (UNKNOWN), and reading it stays a static-analysis job first.
 

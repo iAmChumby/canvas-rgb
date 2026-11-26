@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
-- Peripherals: the 8BitDo Ultimate 2 is recognised over Bluetooth. The Peripherals view names it "(Bluetooth)" and shows its battery while its reads are on. Its profiles, button map and stick ranges can be changed only through the 2.4G receiver or a USB cable, and the view says so in words instead of showing a failed read. (#566)
+- Peripherals: the 8BitDo Ultimate 2 is recognised over Bluetooth. The Peripherals view names it "(Bluetooth)" and shows its battery while its reads are on. Its profiles, button map and stick ranges can be changed only through the 2.4G receiver or a USB cable, and the read's message now says that in plain words. (#566)
 
 ## [0.19.0] - 2026-11-26
 

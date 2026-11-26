@@ -1537,6 +1537,9 @@ impl EightBitDoUltimate2 {
         }
         self.check_writable_profile(props)?;
         let packets = self.plan(props)?;
+        // A pad that moved to Bluetooth since it was opened still has the old vendor handle:
+        // rebind first, as a read does, so a write never goes out on a channel the pad left (#566).
+        self.rebind_if_personality_changed().await?;
         if !self.vendor.is_open() {
             return Err(self.not_connected());
         }
@@ -2420,6 +2423,21 @@ mod tests {
         let err = a.read_settings(&a.device_id()).await.unwrap_err();
         assert!(matches!(&err, AdapterError::Protocol(m) if m == BLUETOOTH_NO_SETTINGS), "{err:?}");
         assert!(s.lock().unwrap().sent.is_empty(), "nothing is sent to the pad over Bluetooth");
+    }
+
+    #[tokio::test]
+    async fn a_write_after_the_pad_moved_to_bluetooth_sends_nothing_566() {
+        let (mut a, s) = rig();
+        a.set_writes_enabled(true);
+        a.connect().await.unwrap();
+        let id = a.device_id();
+        a.read_settings(&id).await.expect("the XInput pad reads");
+        let sent_before = s.lock().unwrap().sent.len();
+        // The pad leaves the receiver for Bluetooth; the old vendor handle is still open.
+        s.lock().unwrap().personalities = vec![Personality::Bluetooth];
+        let err = a.write_settings(&id, &number(&[("profile-1-stick-left-start", 20.0)])).await.unwrap_err();
+        assert!(matches!(&err, AdapterError::Protocol(m) if m == BLUETOOTH_NO_SETTINGS), "{err:?}");
+        assert_eq!(s.lock().unwrap().sent.len(), sent_before, "nothing goes out on the old channel");
     }
 
     #[tokio::test]
