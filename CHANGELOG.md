@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- Docs: `docs/privacy.md` lists, in plain words and with file-by-file evidence, everything that leaves the PC — the daily update check, the optional experimental feed, the signed installer, the OpenRGB download during setup — and everything that stays local. (#581)
+
 ## [0.20.0] - 2026-11-26
 
 ### Added
