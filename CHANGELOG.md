@@ -16,7 +16,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Peripherals: the Attack Shark X6 is no longer read in the background while you are away. Waking the mouse during that read could knock it off its receiver until the receiver was plugged in again. The mouse is now read only when you press Read again. (#567)
-- Peripherals: after the Attack Shark X6's receiver is plugged in again, the next read finds it. Before, every read failed with "the device is not connected" until the daemon restarted. (#568)
+- Peripherals: after the Attack Shark X6's receiver is plugged in again, the mouse can be read again: the first read meets the old connection, fails once and closes it, and the read after it finds the receiver. Before, every read failed with "the device is not connected" until the daemon restarted. (#568)
 - Installer: the developer setup starts the tray when it finishes, instead of leaving it closed until the next sign-in. (#555)
 - Installer: a silent update installed by hand brings the tray back afterwards. (#552)
 - Editor: with `CANVAS_RGB_HOME` set, the editor reads the API token from that folder, the same one the daemon writes it to, instead of the default folder (where it got 401s). (#543)

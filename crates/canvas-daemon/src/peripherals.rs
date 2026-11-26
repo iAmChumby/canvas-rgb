@@ -288,10 +288,11 @@ impl Peripheral for canvas_adapters::attack_shark_x6::AttackSharkX6 {
         AttackSharkX6::set_read_sink(self, sink);
     }
 
-    /// No (#567). The background read lands on an idle mouse, and the person coming back wakes
-    /// it in the middle of the burst of feature requests: on 2026-11-26 the receiver answered
-    /// out of order and the mouse lost its link until the receiver was replugged. The person's
-    /// own **Read again** is the only read: they are at the mouse, so it is awake.
+    /// No (#567). The background read lands on an idle mouse, and the person coming back can
+    /// wake it in the middle of the burst of feature requests. On 2026-11-26 such a read got the
+    /// previous report's frame back for each request, and the receiver was replugged 81 s later
+    /// (whether every drop has this cause is UNKNOWN). The person's own **Read again** is the
+    /// only read: they are at the mouse, so it is awake.
     fn background_reads(&self) -> bool {
         false
     }

@@ -373,6 +373,22 @@ or acts as if a step worked without checking that it did.
   - The daemon's other files (`config.toml`, `scenes.json`, the effects folder) are user data in the
     user's own folder: no secret, and no restricted ACL to keep.
 
+- [#534](https://github.com/iAmChumby/canvas-rgb/issues/534) and
+  [#568](https://github.com/iAmChumby/canvas-rgb/issues/568): a replugged device kept its dead
+  link, and the code went on as if it still worked. In #568 the Attack Shark X6's `read_report`
+  (`crates/canvas-adapters/src/attack_shark_x6/mod.rs`) wrapped every failed HID call as a
+  protocol refusal, so the hub, which closes a device only on `AdapterError::Io` or `NotConnected`
+  (`device_failure` in `crates/canvas-daemon/src/peripherals.rs`), kept the dead handle for 17
+  hours. Fixed: a failed HID call is `ReadFailure::Transport`, the pass sends nothing more on it,
+  and a read with nothing back is `Io`. Tests on the fake receiver:
+  `a_dead_handle_is_an_io_error_and_the_pass_stops_568`,
+  `a_handle_that_dies_mid_pass_keeps_what_was_read_568` and
+  `a_replug_while_waiting_for_the_mouse_to_wake_is_io_not_asleep_568`; the hub's close and reopen
+  after `Io` is asserted in `a_failed_read_drops_the_kept_values` (`tests/peripherals.rs`).
+  Sibling search: the 8BitDo adapter already maps link failures to `Io` (`io_failure`); the
+  ROYUAN keyboard (`royuan.rs`) and the CHIONE display (`chione.rs`) still report a failed HID
+  write as `Protocol`, filed as their own issue with this label.
+
 ### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away
 
 An effect file is a small HTML document: a head with tags and a body with a script. The
