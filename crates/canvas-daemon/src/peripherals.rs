@@ -313,8 +313,9 @@ impl Peripheral for canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2 {
     }
 
     /// The battery byte of the gamepad report (DInput on a cable, and Bluetooth, #566). Over
-    /// Bluetooth the pad sends that report on its own, about 120 times a second (the 2026-11-26
-    /// capture), so one short read of an open collection finds it. Whether the cable sends it
+    /// Bluetooth the pad sends that report on its own, about 120 times a second (the unfiltered
+    /// 2026-11-25 run on #566: 3610 reports in 30 s), so one short read of an open collection
+    /// finds it. Whether the cable sends it
     /// unprompted too is UNKNOWN: if it sends only on change, a list may show no battery. In the
     /// XInput personality there is no percent.
     async fn battery(&mut self) -> Option<(u8, bool)> {
@@ -371,6 +372,9 @@ pub struct PeripheralHub {
     kept_writer: Arc<tokio::sync::Mutex<()>>,
     /// What Windows (or a test's fake) says about the person's keyboard and mouse.
     idle: Arc<dyn InputIdle>,
+    /// The last battery each open device reported (#566), served while a device read holds the
+    /// adapters so the list never waits.
+    batteries: std::sync::Mutex<BTreeMap<DeviceId, (u8, bool)>>,
 }
 
 /// The values kept for one device, and the adapter that read them.
@@ -600,6 +604,7 @@ impl PeripheralHub {
             kept_path,
             kept_writer: Arc::new(tokio::sync::Mutex::new(())),
             idle,
+            batteries: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -704,9 +709,16 @@ impl PeripheralHub {
     /// and nothing is opened: a device that is not open keeps no battery.
     ///
     /// The list never waits for a device: while a read or a write holds the adapters, the list
-    /// is answered at once without batteries, and the next one has them.
+    /// is answered at once with each device's last battery reading.
     pub async fn with_batteries(&self, mut found: Vec<PeripheralInfo>) -> Vec<PeripheralInfo> {
         let Ok(mut adapters) = self.adapters.try_lock() else {
+            let last = self.batteries.lock().unwrap_or_else(|e| e.into_inner());
+            for info in found.iter_mut() {
+                if let Some(&(level, charging)) = last.get(&info.id) {
+                    info.battery = Some(level);
+                    info.charging = Some(charging);
+                }
+            }
             return found;
         };
         for info in found.iter_mut() {
@@ -714,11 +726,20 @@ impl PeripheralHub {
                 // The adapter's own state, not the cached list's: the list is up to
                 // `DISCOVERY_CACHE` old.
                 if !adapters[index].is_connected() {
+                    self.batteries.lock().unwrap_or_else(|e| e.into_inner()).remove(&info.id);
                     continue;
                 }
-                if let Some((level, charging)) = adapters[index].battery().await {
-                    info.battery = Some(level);
-                    info.charging = Some(charging);
+                let reading = adapters[index].battery().await;
+                let mut last = self.batteries.lock().unwrap_or_else(|e| e.into_inner());
+                match reading {
+                    Some((level, charging)) => {
+                        info.battery = Some(level);
+                        info.charging = Some(charging);
+                        last.insert(info.id.clone(), (level, charging));
+                    }
+                    None => {
+                        last.remove(&info.id);
+                    }
                 }
             }
         }
@@ -1350,12 +1371,34 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl Peripheral for HeldPeripheral {
         fn set_config_writes(&mut self, _on: bool) {}
 
         fn set_read_sink(&mut self, sink: Option<ReadSink>) {
             *self.sink.lock().unwrap() = sink;
         }
+
+        async fn battery(&mut self) -> Option<(u8, bool)> {
+            Some((77, false))
+        }
+    }
+
+    /// #566: a list made while a device read holds the adapters does not wait for it, and it
+    /// still shows the battery the device last reported.
+    #[tokio::test]
+    async fn a_list_during_a_device_read_answers_at_once_with_the_last_battery_566() {
+        let id = DeviceId("held:battery".into());
+        let hub = PeripheralHub::new(vec![Box::new(HeldPeripheral::new(id.clone()))]);
+        hub.apply(&id, PeripheralAccess { reads: true, writes: false }).await.unwrap();
+        let found = hub.discover().await;
+        assert_eq!(hub.with_batteries(found.clone()).await[0].battery, Some(77));
+
+        let _read = hub.adapters.lock().await; // what a device read holds
+        let during = tokio::time::timeout(Duration::from_secs(1), hub.with_batteries(found))
+            .await
+            .expect("the list does not wait for the device read");
+        assert_eq!(during[0].battery, Some(77), "the last reading is served");
     }
 
     /// The check of the flag and the write of the stage are one step: a report that arrives after

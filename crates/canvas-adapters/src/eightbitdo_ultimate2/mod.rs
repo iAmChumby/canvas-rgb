@@ -1535,11 +1535,16 @@ impl EightBitDoUltimate2 {
             }
             check_value(def, value)?;
         }
+        // A pad that moved to Bluetooth since it was opened still has the old vendor handle and
+        // the old profile image: rebind first, as a read does, so a write is never planned from
+        // that image nor sent on a channel the pad left (#566). Over Bluetooth it is refused in
+        // words, before anything else.
+        self.rebind_if_personality_changed().await?;
+        if self.personality == Some(Personality::Bluetooth) {
+            return Err(refuse(BLUETOOTH_NO_SETTINGS));
+        }
         self.check_writable_profile(props)?;
         let packets = self.plan(props)?;
-        // A pad that moved to Bluetooth since it was opened still has the old vendor handle:
-        // rebind first, as a read does, so a write never goes out on a channel the pad left (#566).
-        self.rebind_if_personality_changed().await?;
         if !self.vendor.is_open() {
             return Err(self.not_connected());
         }

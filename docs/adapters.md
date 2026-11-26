@@ -207,7 +207,7 @@ What the link carries, from the 2026-11-26 capture (one press of every button, r
 | 8 | A `0x01`, B `0x02`, PR `0x04`, X `0x08`, Y `0x10`, PL `0x20`, LB `0x40`, RB `0x80` |
 | 9 | LT `0x01`, RT `0x02` (as buttons), Select (Back) `0x04`, Start `0x08`, L3 `0x20`, R3 `0x40`; Home `0x10` from SDL's layout, not pressed in the capture |
 | 10 | L4 `0x01`, R4 `0x02` |
-| 14 | battery: low seven bits the percent (90, then 83 in the capture); bit 7 charging from SDL's layout, not seen set |
+| 14 | battery: low seven bits the percent (90 and 83 in the capture); bit 7 charging from SDL's layout, not seen set |
 | 15-26 | motion sensors (they move in every report) |
 
 This is the DInput layout SDL's driver reads, so `codec::decode_dinput` reads it, with the hat
