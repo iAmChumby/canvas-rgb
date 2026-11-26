@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-26
+
 ### Added
 
 - Docs: the website has developer documentation at /docs: a getting-started guide for the local API (the token, the guards and how to check the listener before sending it), a page for each of the 66 API routes with its request, answer, fields and a tested example, a page for each CLI command with its flags and exit codes, and a guide to writing effects. Agents can read every page as Markdown, with `llms.txt` and `llms-full.txt` at the site root. `canvas-rgb scenes set --help` now says it takes a scene's name or id. (#540)
@@ -481,7 +483,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.16.0...v0.17.0
