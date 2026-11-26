@@ -292,6 +292,14 @@ export function PeripheralsView() {
   const detailKey = selectedId === null ? null : `${selectedId}\u0000${connection ?? ""}`;
   // A detail this page fetched is authoritative even when the list row is a tick behind it:
   // the no-settings poll can land a connection change before the next list refresh (#572).
+  // When the list moves the device to another connection, the answer for the earlier one goes in
+  // this render, before anything is painted: dropping it in the fetch effect left one frame of the
+  // earlier sections and an enabled Change on screen (#572).
+  const [shownKey, setShownKey] = useState(detailKey);
+  if (shownKey !== detailKey) {
+    setShownKey(detailKey);
+    if (shownKey !== null && loaded !== null && loaded.id === selectedId) setLoaded(null);
+  }
   const fresh = loaded && loaded.id === selectedId ? loaded.detail : null;
   const kept =
     selectedId !== null && listed ? (lastRead.get(cacheKey(selectedId, listed)) ?? null) : null;
@@ -403,7 +411,9 @@ export function PeripheralsView() {
   const listStop = useRef<(() => void) | null>(null);
   const [listBusy, setListBusy] = useState(false);
 
-  const loadList = useCallback(() => {
+  // `background` is the poll's tick: its failure keeps the list on screen and says nothing, and the
+  // next tick asks again (as the rail's count does). Only the first load and "Try again" report.
+  const loadList = useCallback((background = false) => {
     let stop = false;
     const handle = () => {
       stop = true;
@@ -424,7 +434,7 @@ export function PeripheralsView() {
         setSaveErrors((prev) => keepLive(prev, live));
       })
       .catch((e: unknown) => {
-        if (!stop) setListError(messageOf(e));
+        if (!stop && !background) setListError(messageOf(e));
       })
       .finally(() => {
         if (!stop) setListBusy(false);
@@ -434,7 +444,10 @@ export function PeripheralsView() {
   useEffect(() => loadList(), [loadList]);
   // A device can move between its receiver and Bluetooth while the page is open. The list is
   // the only place that sees it, so ask again on the live-data beat (#572).
-  usePoll(loadList, LIST_POLL_MS);
+  const pollList = useCallback(() => {
+    loadList(true);
+  }, [loadList]);
+  usePoll(pollList, LIST_POLL_MS);
 
   // The retry: the frame goes back to its placeholder while the list is asked for again, so the
   // button is gone and a second press cannot start a second load.

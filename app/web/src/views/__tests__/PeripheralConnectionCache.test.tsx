@@ -185,4 +185,46 @@ describe("the kept read of a pad that changes connection", () => {
     // Present and disabled, never merely absent: the head must still say Change is off here.
     expect(toggle("Change settings on the device").disabled).toBe(true);
   });
+
+  it("holds the head with Change off on an open page while the new connection's answer is out", async () => {
+    vi.useFakeTimers();
+    const id = "pad:connection-change-held";
+
+    api.peripherals.mockResolvedValue({ peripherals: [row(id, RECEIVER)] });
+    api.peripheral.mockResolvedValue(detail(id, RECEIVER, true));
+    render(<PeripheralsView />);
+    await tick(50);
+    expect(toggle("Change settings on the device").disabled).toBe(false);
+
+    // The list refresh sees Bluetooth; the detail GET for it is held back.
+    let answer: (d: PeripheralDetail) => void = () => {};
+    api.peripherals.mockResolvedValue({ peripherals: [row(id, BLUETOOTH)] });
+    api.peripheral.mockImplementation(() => new Promise<PeripheralDetail>((resolve) => { answer = resolve; }));
+    await tick(LIST_POLL_MS + 50);
+
+    expect(screen.queryByText("Profiles")).toBeNull();
+    expect(toggle("Change settings on the device").disabled).toBe(true);
+
+    await act(async () => { answer(detail(id, BLUETOOTH, false)); });
+    expect(screen.queryByText(WHY)).not.toBeNull();
+    expect(toggle("Change settings on the device").disabled).toBe(true);
+  });
+
+  it("keeps the device on screen when a background list refresh fails", async () => {
+    vi.useFakeTimers();
+    const id = "pad:list-poll-fails";
+
+    api.peripherals.mockResolvedValue({ peripherals: [row(id, RECEIVER)] });
+    api.peripheral.mockResolvedValue(detail(id, RECEIVER, true));
+    render(<PeripheralsView />);
+    await tick(50);
+    expect(screen.queryByText("Profiles")).not.toBeNull();
+
+    // One poll fails: the page keeps the list and the device's settings and shows no error frame.
+    api.peripherals.mockRejectedValue(new Error("The daemon did not answer."));
+    await tick(LIST_POLL_MS + 50);
+    expect(screen.queryByText("The daemon did not answer.")).toBeNull();
+    expect(screen.queryByText("Profiles")).not.toBeNull();
+    expect(toggle("Change settings on the device").disabled).toBe(false);
+  });
 });

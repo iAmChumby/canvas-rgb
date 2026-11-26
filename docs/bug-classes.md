@@ -325,11 +325,13 @@ or acts as if a step worked without checking that it did.
   `a_failed_read_is_told_in_plain_words`, `write_guards_and_a_missing_device_are_in_plain_words`,
   `a_partly_applied_write_says_so_in_the_http_answer_for_both_devices`,
   `a_refused_write_is_in_plain_words_on_the_http_answer_for_both_devices` and
-  `a_missing_device_is_named_on_one_sentence` (`tests/peripherals.rs`),
+  `a_missing_device_is_named_on_one_sentence` (`tests/peripherals.rs`; the two write-answer tests drive
+  the fake peripheral, so the mouse adapter's own sentence is covered only by its adapter unit test),
   `a_zone_failure_is_told_in_plain_words_by_the_shared_helper` (`peripherals.rs`),
   `app/web/src/views/__tests__/PeripheralNoSettings.test.tsx` and
-  `app/web/src/views/__tests__/PeripheralConnectionCache.test.tsx` (both devices; the page stays
-  mounted across the connection change). Sibling search: the other
+  `app/web/src/views/__tests__/PeripheralConnectionCache.test.tsx` (the page stays mounted across the
+  connection change, with the new answer held back too, and a failed background list refresh keeps
+  the page). Sibling search: the other
   peripheral adapter (the mouse) has its messages rewritten; displays and lighting devices report
   their errors through other routes and were left.
 - A second mechanism, same cause: the editor draws a value it never received. A control, a count or a
