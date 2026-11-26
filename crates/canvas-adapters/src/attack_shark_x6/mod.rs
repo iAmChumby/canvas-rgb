@@ -179,7 +179,7 @@ const GRANT_ATTEMPTS: u32 = 2;
 /// it over the dongle (research 3.3: "A sleeping mouse cannot receive config over the dongle;
 /// the vendor UI shows `sleep_device_text` ("Device Sleep!") and retries"). The daemon shows a
 /// protocol message as it is, so this reaches the user word for word.
-pub const ASLEEP: &str = "the mouse is asleep: move it and try again";
+pub const ASLEEP: &str = "The mouse is asleep. Move it, then try again.";
 
 /// A read the mouse answered no part of.
 const NOTHING_READ: &str =
@@ -384,15 +384,20 @@ fn check_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError>
             if options.iter().any(|o| o == c) {
                 Ok(())
             } else {
-                Err(refuse(format!("{} has no option {c:?}.", def.label)))
+                Err(refuse(format!("{} does not offer that option. Pick one the page offers.", def.label)))
             }
         }
         (PropKind::Color { .. }, PropValue::Color(_)) => Ok(()),
         (PropKind::Bool { .. }, PropValue::Bool(_)) => Ok(()),
         (PropKind::Hue { .. }, PropValue::Hue(_)) => Ok(()),
         (PropKind::Angle { .. }, PropValue::Angle(_)) => Ok(()),
-        _ => Err(refuse(format!("{} does not take that kind of value.", def.label))),
+        _ => Err(wrong_kind(&def.label)),
     }
+}
+
+/// A value of the wrong shape: name the setting by its label, never by its internal key (#572).
+fn wrong_kind(label: &str) -> AdapterError {
+    refuse(format!("{label} does not take that kind of value. Pick another value."))
 }
 
 // ------------------------------------------------------------------------------------ transport
@@ -1252,11 +1257,13 @@ impl AttackSharkX6 {
     fn plan_dpi(&self, props: &Props) -> Result<Vec<u8>, AdapterError> {
         if self.cache.dpi_stale {
             return Err(refuse(
-                "the DPI button was pressed since the DPI settings were read; press Read again to read the device first",
+                "The mouse's DPI changed on the device since it was last read. Press Read again, then make your change.",
             ));
         }
         let Some(frame) = self.cache.dpi.clone() else {
-            return Err(refuse("the DPI settings have not been read yet; read the device first"));
+            return Err(refuse(
+                "The mouse's DPI settings have not been read yet. Press Read again, then make your change.",
+            ));
         };
         let mut frame = frame;
         let mut stages = codec::stages_of(&frame);
@@ -1296,7 +1303,9 @@ impl AttackSharkX6 {
     /// The lighting frame a batch of changes needs.
     fn plan_light(&self, props: &Props) -> Result<Vec<u8>, AdapterError> {
         let Some(frame) = self.cache.light.clone() else {
-            return Err(refuse("the lighting settings have not been read yet; read the device first"));
+            return Err(refuse(
+                "The mouse's lighting settings have not been read yet. Press Read again, then make your change.",
+            ));
         };
         let mut frame = frame;
         // The brightness only exists in the modes that take it: the static mode (index 1) and the
@@ -1307,17 +1316,16 @@ impl AttackSharkX6 {
             Some(PropValue::Choice(id)) => codec::LED_MODES
                 .iter()
                 .position(|m| *m == id)
-                .ok_or_else(|| refuse(format!("no LED mode {id:?}")))? as u8,
+                .ok_or_else(|| {
+                    tracing::warn!(mode = %id, "the mouse was asked for an LED mode it does not have");
+                    refuse("canvas-rgb does not know that LED mode. Pick a mode the page offers.")
+                })? as u8,
             _ => frame[3] >> 4,
         };
         if props.contains_key(KEY_LED_BRIGHTNESS) && !codec::mode_takes_brightness(mode) {
-            let named = match codec::LED_MODES.get(usize::from(mode)).copied() {
-                Some(name) => format!("{name:?}"),
-                None => format!("{mode}"),
-            };
-            return Err(refuse(format!(
-                "the LED mode {named} does not take a brightness; only the static mode does"
-            )));
+            return Err(refuse(
+                "This lighting mode does not take a brightness. Only Static does; pick Static or clear the brightness.",
+            ));
         }
         if props.contains_key(KEY_LED_MODE) && !codec::mode_takes_brightness(mode) {
             // The vendor app sends the constant 8 with every mode change, so the brightness byte
@@ -1329,7 +1337,10 @@ impl AttackSharkX6 {
             let index = codec::LED_MODES
                 .iter()
                 .position(|m| *m == id)
-                .ok_or_else(|| refuse(format!("no LED mode {id:?}")))?;
+                .ok_or_else(|| {
+                    tracing::warn!(mode = %id, "the mouse was asked for an LED mode it does not have");
+                    refuse("canvas-rgb does not know that LED mode. Pick a mode the page offers.")
+                })?;
             change.mode = Some(index as u8);
         }
         if let Some(PropValue::Color(colour)) = props.get(KEY_LED_COLOUR) {
@@ -1586,7 +1597,9 @@ impl AttackSharkX6 {
         let schema = self.schema();
         for (key, value) in props {
             let Some(def) = schema.property(key) else {
-                return Err(refuse(format!("The mouse has no setting called {key}.")));
+                return Err(refuse(
+                    "This mouse has no setting with that name. Pick one the page offers.",
+                ));
             };
             if !schema.is_writable(key) {
                 return Err(refuse(format!(
@@ -2774,7 +2787,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("read the device first")), "{err:?}");
+        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("Press Read again")), "{err:?}");
         assert_eq!(s.lock().unwrap().sent.len(), before);
     }
 
@@ -2790,7 +2803,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting called dpi-stage-99")),
+            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting with that name") && !m.contains("dpi-stage-99")),
             "{err:?}"
         );
         // The lift-off distance is not a property of this mouse: the firmware never carries it.
@@ -2799,10 +2812,73 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting called lift-off")),
+            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting with that name") && !m.contains("lift-off")),
             "{err:?}"
         );
         assert_eq!(s.lock().unwrap().sent.len(), before);
+    }
+
+    /// #572: the write-plan refusals say what happened and what to do, without debug-quoted ids.
+    #[tokio::test]
+    async fn a_refused_write_is_in_plain_words_on_the_fake_mouse() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        a.set_writes_enabled(true);
+        let before = s.lock().unwrap().sent.len();
+
+        // DPI has not been read at all.
+        let err = a
+            .write_settings(&a.device_id(), &number(&[("dpi-stage-1", 1600.0)]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert_eq!(message, "The mouse's DPI settings have not been read yet. Press Read again, then make your change.");
+
+        a.read_settings(&a.device_id()).await.unwrap();
+        // The DPI button moved the active stage behind the daemon's back, and no frame was read
+        // back yet: the stale flag is the first thing the write plan sees.
+        a.cache.dpi = None;
+        a.cache.dpi_stale = true;
+        let err = a
+            .write_settings(&a.device_id(), &number(&[("dpi-stage-1", 1600.0)]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert_eq!(message, "The mouse's DPI changed on the device since it was last read. Press Read again, then make your change.");
+
+        // Lighting has not been read; this fake answers both reports on one read, so clear it.
+        a.cache.light = None;
+        let err = a
+            .write_settings(&a.device_id(), &choice(&[("led-mode", "off")]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert_eq!(message, "The mouse's lighting settings have not been read yet. Press Read again, then make your change.");
+
+        // An LED mode id is a technical detail: the log has it, the person gets a choice to make.
+        a.read_settings(&a.device_id()).await.unwrap();
+        let err = a
+            .write_settings(&a.device_id(), &choice(&[("led-mode", "sparkle")]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert!(!message.contains("sparkle"), "{message}");
+        assert!(message.contains("Pick a mode the page offers"), "{message}");
+
+        // A brightness in a mode that ignores it: no debug-quoted mode name.
+        let err = a
+            .write_settings(
+                &a.device_id(),
+                &props_of(&[
+                    ("led-mode", PropValue::Choice("breathing".into())),
+                    ("led-brightness", PropValue::Number(5.0)),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert_eq!(message, "This lighting mode does not take a brightness. Only Static does; pick Static or clear the brightness.");
+        assert_eq!(s.lock().unwrap().sent.len(), before, "no refused change reached the mouse");
     }
 
     #[tokio::test]
@@ -2835,8 +2911,8 @@ mod tests {
             (number(&[("debounce-ms", 5.0)]), "steps of 2"),
             (number(&[("dpi-stage-1", 75.0)]), "steps of 50"),
             (number(&[("sleep-after-min", 31.0)]), "takes 0.5 to 30"),
-            (choice(&[("polling", "4000")]), "no option"),
-            (choice(&[("led-mode", "rainbow")]), "no option"),
+            (choice(&[("polling", "4000")]), "does not offer that option"),
+            (choice(&[("led-mode", "rainbow")]), "does not offer that option"),
         ] {
             let err = a.write_settings(&a.device_id(), &props).await.unwrap_err();
             assert!(matches!(&err, AdapterError::Protocol(m) if m.contains(why)), "{err:?} (wanted {why})");

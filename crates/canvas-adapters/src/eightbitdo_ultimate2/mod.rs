@@ -804,15 +804,25 @@ fn check_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError>
             if options.iter().any(|o| o == c) {
                 Ok(())
             } else {
-                Err(refuse(format!("{} has no option {c:?}.", def.label)))
+                Err(refuse(format!("{} does not offer that option. Pick one the page offers.", def.label)))
             }
         }
         (PropKind::Color { .. }, PropValue::Color(_)) => Ok(()),
         (PropKind::Bool { .. }, PropValue::Bool(_)) => Ok(()),
         (PropKind::Hue { .. }, PropValue::Hue(_)) => Ok(()),
         (PropKind::Angle { .. }, PropValue::Angle(_)) => Ok(()),
-        _ => Err(refuse(format!("{} does not take that kind of value.", def.label))),
+        _ => Err(wrong_kind(&def.label)),
     }
+}
+
+/// A value of the wrong shape: name the setting by its label, never by its internal key (#572).
+fn wrong_kind(label: &str) -> AdapterError {
+    refuse(format!("{label} does not take that kind of value. Pick another value."))
+}
+
+/// A write the pad refused to take: the detail is in the log (#572).
+fn refused_write() -> AdapterError {
+    refuse("The controller did not take the change. Check that it is connected, then try again.")
 }
 
 fn refuse(message: impl Into<String>) -> AdapterError {
@@ -932,10 +942,10 @@ fn read_image_raw(
             tracing::warn!(offset = offset, attempt, "{}", last);
         }
         let Some(data) = chunk else {
-            return Err(refuse(format!(
-                "the pad did not answer the read request for chunk {offset:#x} of the profile \
-                 image: {last}"
-            )));
+            tracing::warn!(offset = format!("{offset:#x}"), reason = %last, "the pad did not answer a read request");
+            return Err(refuse(
+                "The controller did not answer, so its settings were not read. Press Read again.",
+            ));
         };
         img.extend_from_slice(&data);
         if img.len() < codec::IMAGE_LEN {
@@ -959,20 +969,20 @@ fn await_ack(
 ) -> Result<(), AdapterError> {
     for _ in 0..POLLS {
         let mut buf = [0u8; codec::REPORT_LEN];
-        let n = vendor
-            .read_input(&mut buf, pace.poll_ms)
-            .map_err(|e| refuse(format!("the reply to the {what} failed: {e}")))?;
+        let n = vendor.read_input(&mut buf, pace.poll_ms).map_err(|e| {
+            tracing::warn!(what, error = %e, "the pad's acknowledgement could not be read");
+            refuse("The controller stopped answering during the change. Check that it is connected, then press Read again.")
+        })?;
         if n == 0 {
             continue;
         }
         return codec::parse_ack_reply(&buf[..n], want).map_err(|why| {
-            refuse(format!(
-                "the pad's reply to the {what} was wrong: {why}; reply: {}",
-                codec::hex(&buf[..n])
-            ))
+            tracing::warn!(what, reason = %why, reply = %codec::hex(&buf[..n]), "the pad's acknowledgement was wrong");
+            refuse("The controller sent an unexpected answer during the change. Press Read again to see what it holds.")
         });
     }
-    Err(refuse(format!("the pad did not reply to the {what}")))
+    tracing::warn!(what, "the pad sent no acknowledgement");
+    refuse("The controller did not answer the change. Press Read again to see what it holds.")
 }
 
 /// Throws away anything the pad has already queued (a late answer to `Reportstate`), so it
@@ -1006,35 +1016,41 @@ fn write_session(
         return Ok(());
     };
     let outcome = (|| -> Result<(), AdapterError> {
-        vendor
-            .send_report(&codec::report_state_request(0))
-            .map_err(|e| refuse(format!("Reportstate(0) failed: {e}")))?;
+        vendor.send_report(&codec::report_state_request(0)).map_err(|e| {
+            tracing::warn!(error = %e, "the pad refused the start of a write session");
+            refused_write()
+        })?;
         std::thread::sleep(pace.session_pause);
         drain_input(vendor, pace);
         for (i, packet) in writes.iter().enumerate() {
             tracing::info!(raw = %codec::hex(packet), "the pad write goes out");
-            vendor
-                .send_report(packet)
-                .map_err(|e| refuse(format!("the pad write failed: {e}")))?;
+            vendor.send_report(packet).map_err(|e| {
+                tracing::warn!(error = %e, "the pad refused a write chunk");
+                refused_write()
+            })?;
             await_ack(vendor, pace, codec::REQ_WRITE, &format!("write chunk {}", i + 1))?;
         }
         std::thread::sleep(pace.write_pause);
         tracing::info!(raw = %codec::hex(commit), "the pad commit goes out");
-        vendor
-            .send_report(commit)
-            .map_err(|e| refuse(format!("the commit failed: {e}")))?;
+        vendor.send_report(commit).map_err(|e| {
+            tracing::warn!(error = %e, "the pad refused the write commit");
+            refused_write()
+        })?;
         await_ack(vendor, pace, codec::REQ_COMMIT, "commit").map_err(|e| {
-            refuse(format!(
-                "{e}; the write chunk(s) went out and the pad may hold them uncommitted"
-            ))
+            tracing::warn!(error = %e, "the write went out but the commit was not confirmed");
+            refuse("The change may be only partly on the controller. Press Read again to see what it holds.")
         })
     })();
     std::thread::sleep(pace.session_pause);
-    let closing = vendor
-        .send_report(&codec::report_state_request(1))
-        .map_err(|e| refuse(format!("Reportstate(1) failed: {e}")));
+    let closing = vendor.send_report(&codec::report_state_request(1)).map_err(|e| {
+        tracing::warn!(error = %e, "the pad refused the end of a write session");
+        refused_write()
+    });
     match (outcome, closing) {
-        (Err(e), Err(c)) => Err(refuse(format!("{e}; also {c}"))),
+        (Err(e), Err(c)) => {
+            tracing::warn!(closing = %c, "the pad also refused the end of the write session");
+            Err(e)
+        }
         (Err(e), Ok(())) => Err(e),
         (Ok(()), Err(c)) => Err(c),
         (Ok(()), Ok(())) => Ok(()),
@@ -1633,7 +1649,9 @@ impl EightBitDoUltimate2 {
         let schema = self.schema();
         for (key, value) in props {
             let Some(def) = schema.property(key) else {
-                return Err(refuse(format!("The controller has no setting called {key}.")));
+                return Err(refuse(
+                    "This controller has no setting with that name. Pick one the page offers.",
+                ));
             };
             if !schema.is_writable(key) {
                 return Err(refuse(format!(
@@ -1686,6 +1704,14 @@ impl EightBitDoUltimate2 {
         Ok(())
     }
 
+    /// The label a person knows a setting by, for the messages about their changes (#572).
+    fn label_of(&self, key: &str) -> String {
+        self.schema()
+            .property(key)
+            .map(|def| def.label.clone())
+            .unwrap_or_else(|| "This setting".to_string())
+    }
+
     /// The packets a batch of changes needs: one field write per record or map entry, then the
     /// commit.
     fn plan(&self, props: &Props) -> Result<Vec<Vec<u8>>, AdapterError> {
@@ -1698,7 +1724,7 @@ impl EightBitDoUltimate2 {
         for (key, value) in props {
             if let Some((profile, slot)) = paddle_slot(key) {
                 let PropValue::Choice(target) = value else {
-                    return Err(refuse(format!("{key} does not take that kind of value")));
+                    return Err(wrong_kind(&self.label_of(key)));
                 };
                 let (at, entry) = codec::patched_map_entry(image, profile, slot, target)
                     .map_err(|why| {
@@ -1711,7 +1737,7 @@ impl EightBitDoUltimate2 {
                 continue;
             }
             let PropValue::Number(n) = value else {
-                return Err(refuse(format!("{key} does not take that kind of value")));
+                return Err(wrong_kind(&self.label_of(key)));
             };
             let (at, record) =
                 codec::patched_record(image, key, *n).map_err(not_in_profile)?;
@@ -2742,7 +2768,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting called")),
+            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting with that name")),
             "{err:?}"
         );
         let err = a
@@ -2750,10 +2776,39 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting called")),
+            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting with that name")),
             "{err:?}"
         );
         assert_eq!(s.lock().unwrap().sent.len(), before);
+    }
+
+    /// #572: a refusal a person reads names what they can pick, not the schema's internal key.
+    #[tokio::test]
+    async fn a_refused_change_is_in_plain_words_on_the_fake_pad() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        a.read_settings(&a.device_id()).await.unwrap();
+        a.set_writes_enabled(true);
+        let before = s.lock().unwrap().sent.len();
+        let err = a
+            .write_settings(&a.device_id(), &number(&[("profile-3-paddle-1", 20.0)]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert!(message.starts_with(char::is_uppercase), "{message}");
+        assert!(!message.contains("profile-"), "{message}");
+        assert!(message.contains("Paddle 1 (P1)"), "{message}");
+        assert!(message.contains("Pick another value"), "{message}");
+
+        let err = a
+            .write_settings(&a.device_id(), &number(&[("profile-9-paddle-1", 20.0)]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert!(message.starts_with(char::is_uppercase), "{message}");
+        assert!(!message.contains("profile-"), "{message}");
+        assert!(message.contains("Pick one the page offers"), "{message}");
+        assert_eq!(s.lock().unwrap().sent.len(), before, "nothing reaches the pad");
     }
 
     #[tokio::test]
