@@ -82,10 +82,10 @@ pub const BACKOFF_BASE: Duration = Duration::from_secs(60);
 pub const BACKOFF_CAP_FACTOR: u32 = 30;
 
 /// The message the detail carries when the values are missing because reads are off.
-pub const READS_OFF: &str = "reads are off for this device";
+pub const READS_OFF: &str = "Reads are off for this device.";
 /// The message the detail carries when reads are on but the device has not been read yet: no
 /// read happens on a view open (#127).
-pub const NOT_READ_YET: &str = "the device's settings have not been read yet";
+pub const NOT_READ_YET: &str = "The device's settings have not been read yet.";
 
 /// What Windows says about the person's keyboard and mouse.
 ///
@@ -240,6 +240,13 @@ pub trait Peripheral: PeripheralAdapter + canvas_adapters::resume::ResumeBehavio
     /// Turns config writes on or off. Nothing is written to the hardware while they are off.
     fn set_config_writes(&mut self, on: bool);
 
+    /// Why the device's settings cannot be read or changed over its current connection, in words
+    /// for the person; `None` when they can. Metadata only: it comes from the last enumeration.
+    /// An adapter that answers here also describes a schema with no sections.
+    fn settings_unavailable(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Where this adapter reports the stage of a read, for the adapters whose read takes long
     /// enough to be worth reporting. An adapter that reports nothing keeps this default, and its
     /// read shows as one stage.
@@ -310,6 +317,11 @@ impl Peripheral for canvas_adapters::attack_shark_x6::AttackSharkX6 {
 impl Peripheral for canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2 {
     fn set_config_writes(&mut self, on: bool) {
         self.set_writes_enabled(on);
+    }
+
+    /// Bluetooth, and DInput with no vendor channel, carry no settings.
+    fn settings_unavailable(&self) -> Option<&'static str> {
+        canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::settings_unavailable(self)
     }
 
     /// The battery byte of the gamepad report (DInput on a cable, and Bluetooth, #566). Over
@@ -755,6 +767,18 @@ impl PeripheralHub {
         Ok(schema)
     }
 
+    /// What the device has, as [`PeripheralHub::describe`] answers, and why its settings cannot
+    /// be reached over its connection when they cannot ([`Peripheral::settings_unavailable`]).
+    /// Both come from one hold of the adapters, so they agree. No device is opened.
+    pub async fn describe_reach(
+        &self,
+        device: &DeviceId,
+    ) -> Result<(PeripheralSchema, Option<&'static str>), AdapterError> {
+        let mut adapters = self.adapters.lock().await;
+        let (index, schema) = owner_of(&mut adapters, device).await?;
+        Ok((schema, adapters[index].settings_unavailable()))
+    }
+
     /// The device's settings, read from the device now. This is the only path that touches a
     /// device: the person's **Read again** (`?fresh=true`) and the idle background refresh.
     ///
@@ -1135,6 +1159,35 @@ async fn owner_of(
         }
     }
     Err(AdapterError::UnknownDevice(device.clone()))
+}
+
+/// One sentence for a device the adapters no longer see, on the read path as on the write
+/// path. The caller that knows the display name passes it in; otherwise the generic name is
+/// used, so the two paths cannot disagree (#572).
+pub fn no_longer_there(name: &str) -> String {
+    format!("{name} is no longer there. Connect it again, then pick it from the list.")
+}
+
+/// What a person is told when a device fails them: what happened and what they can do. An
+/// adapter's refusal is already written for them; the technical text of a link failure goes to
+/// the log, where the caller puts it.
+pub fn user_words(error: &AdapterError) -> String {
+    match error {
+        AdapterError::Protocol(message) => message.clone(),
+        AdapterError::Unsupported(message) => (*message).to_string(),
+        AdapterError::NotConnected => "The device is not connected. Check that it is switched on and \
+            plugged in or paired, then press Read again."
+            .to_string(),
+        AdapterError::UnknownDevice(_) => no_longer_there("The device"),
+        // A write carries its own sentence through the `Io` wrapper (see `write_failure`).
+        // Other link and zone failures get the same plain words on a read as on a write.
+        AdapterError::Io(_) | AdapterError::Zone { .. } => {
+            canvas_adapters::write_failure::write_words(error).map(str::to_string).unwrap_or_else(|| {
+                "The device stopped answering. Check that it is switched on and connected, then press Read again."
+                    .to_string()
+            })
+        }
+    }
 }
 
 /// True when the error means the device is gone or the link failed, not that the request was
@@ -1692,5 +1745,23 @@ mod tests {
             "the file holds the newer values"
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// #572: the one user-facing helper gives a whole sentence for a zone or link failure. The
+    /// device id, the zone number and the adapter's reason stay in the log, where `adapter_failure`
+    /// puts them.
+    #[test]
+    fn a_zone_failure_is_told_in_plain_words_by_the_shared_helper() {
+        let words = user_words(&AdapterError::Zone {
+            device: DeviceId("8bitdo-ultimate2:2dc8".into()),
+            zone: 3,
+            reason: "reply 0x81 failed crc".into(),
+        });
+        assert_eq!(
+            words,
+            "The device stopped answering. Check that it is switched on and connected, then press Read again."
+        );
+        assert!(!words.contains("2dc8") && !words.contains("0x81"), "{words}");
+        assert!(words.starts_with(char::is_uppercase), "{words}");
     }
 }

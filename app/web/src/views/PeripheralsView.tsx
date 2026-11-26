@@ -11,6 +11,7 @@ import {
   GameController,
   Keyboard,
   Mouse,
+  Prohibit,
 } from "@phosphor-icons/react";
 import { Button, Swap } from "@/components/Button";
 import { Chip } from "@/components/Chip";
@@ -37,6 +38,7 @@ import { notify } from "@/components/Notify";
 import { UnreadValue } from "@/components/UnreadValue";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
+import { POLL_MS, usePoll } from "@/lib/usePoll";
 import {
   choiceWord,
   isUnread,
@@ -112,23 +114,82 @@ function sameValue(a: PropValue | undefined, b: PropValue): boolean {
 const STAGE_POLL_MS = 300;
 
 /**
- * The last read of each device in this session. A device that is picked again shows these values
- * at once, marked as refreshing, while the new read runs.
+ * The connection a device is on. One pad keeps its id when it moves from the 2.4G receiver to
+ * Bluetooth, but the two connections hold different settings (#572).
+ */
+function connectionKey(info: { name: string; location: string }): string {
+  return `${info.name}\u0000${info.location}`;
+}
+
+/** The cache key of one device on one connection. */
+function cacheKey(id: string, info: { name: string; location: string }): string {
+  return `${id}\u0000${connectionKey(info)}`;
+}
+
+/**
+ * The last read of each device on each connection in this session. A device that is picked again
+ * shows these values at once, marked as refreshing, while the new read runs. A pad that changed
+ * connection must not bring the old connection's sections back.
  */
 const lastRead = new Map<string, PeripheralDetail>();
 
 /**
  * Keeps a device's detail for the next time it is picked. A device nothing was read from is not
  * kept: its "Not read yet" frame is not a read, and showing it as the last read would hide the
- * placeholder the page needs while the daemon answers (#127).
+ * placeholder the page needs while the daemon answers (#127). Changing connection drops the
+ * earlier read too, so a no-settings connection never shows the receiver's controls (#572).
  */
 function remember(id: string, detail: PeripheralDetail): void {
-  if (isUnread(detail)) lastRead.delete(id);
-  else lastRead.set(id, detail);
+  const key = cacheKey(id, detail.info);
+  const prefix = `${id}\u0000`;
+  for (const kept of lastRead.keys()) {
+    if (kept.startsWith(prefix) && kept !== key) lastRead.delete(kept);
+  }
+  if (isUnread(detail)) lastRead.delete(key);
+  else lastRead.set(key, detail);
 }
 
-/** How often the page asks again, in the "Not read yet" state. A plain GET never touches the device. */
+/** True on a connection that carries no settings: the daemon describes no section for it. */
+function hasNoSettings(detail: PeripheralDetail): boolean {
+  return detail.schema.sections.length === 0;
+}
+
+/**
+ * The head while the detail of a changed connection is on its way. No sections and Change off:
+ * the earlier connection's controls must not stay on screen for a pad that just moved (#572).
+ * This is a frame, never a cached read: it is not put in `lastRead`.
+ */
+function pendingDetail(row: PeripheralRow): PeripheralDetail {
+  return {
+    info: row,
+    schema: {
+      device: row.id,
+      kind: row.kind,
+      sections: [],
+      read_only: [],
+      unreported: [],
+    } as unknown as PeripheralDetail["schema"],
+    values: {},
+    access: { reads: true, writes: false },
+    problem: "Reading what this connection holds.",
+    read_at_ms: null,
+  } as unknown as PeripheralDetail;
+}
+
+/**
+ * What the page is waiting to see change, or null when it is not waiting: values the daemon has
+ * not read yet, or a connection with no settings, which the device can leave at any time.
+ */
+function waitingFor(detail: PeripheralDetail): string | null {
+  if (hasNoSettings(detail)) return `no-settings:${detail.info.name}:${detail.problem ?? ""}`;
+  return isUnread(detail) && detail.problem === NOT_READ_YET_PROBLEM ? "unread" : null;
+}
+
+/** How often the page asks again while it waits. A plain GET never touches the device. */
 export const UNREAD_POLL_MS = 5000;
+
+/** How often the device list is asked again while the page is open, to catch a connection change. */
+export const LIST_POLL_MS = POLL_MS;
 
 /** The clock, ticking every `everyMs`, so "Read 3 min ago" moves on by itself. */
 function useNowMs(everyMs: number): number {
@@ -183,7 +244,7 @@ export function PeripheralsView() {
   const [pickedId, setSelectedId] = useState<string | null>(null);
   // The detail of the device that is picked. It carries the id it belongs to, so a slow answer
   // never lands on the wrong device.
-  const [loaded, setLoaded] = useState<{ id: string; detail: PeripheralDetail } | null>(null);
+  const [loaded, setLoaded] = useState<{ id: string; key: string; detail: PeripheralDetail } | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   // The change that is on the device already, and whose refresh failed: the page says the
   // change was saved, because it was.
@@ -223,8 +284,36 @@ export function PeripheralsView() {
 
   // What this device held when it was read: from this page, or from an earlier visit. While the
   // device is read again these stay on screen, marked as refreshing.
+  // The list is the only thing that knows the connection before a detail GET lands. Keying the
+  // kept read by it means a pad that moved to a connection with no settings shows no stale
+  // sections and no enabled Change while the fresh answer is on its way (#572).
+  const listed = selectedId ? (list?.find((row) => row.id === selectedId) ?? null) : null;
+  const connection = listed ? connectionKey(listed) : null;
+  const detailKey = selectedId === null ? null : `${selectedId}\u0000${connection ?? ""}`;
+  // A detail this page fetched is authoritative even when the list row is a tick behind it:
+  // the no-settings poll can land a connection change before the next list refresh (#572).
+  // When the list moves the device to another connection, the answer for the earlier one goes in
+  // this render, before anything is painted: dropping it in the fetch effect left one frame of the
+  // earlier sections and an enabled Change on screen (#572).
+  const [shownKey, setShownKey] = useState(detailKey);
+  if (shownKey !== detailKey) {
+    setShownKey(detailKey);
+    if (shownKey !== null && loaded !== null && loaded.id === selectedId) setLoaded(null);
+  }
   const fresh = loaded && loaded.id === selectedId ? loaded.detail : null;
-  const detail = fresh ?? (selectedId ? (lastRead.get(selectedId) ?? null) : null);
+  const kept =
+    selectedId !== null && listed ? (lastRead.get(cacheKey(selectedId, listed)) ?? null) : null;
+  // The connection changed while this page was open and no answer for it has landed. Show the
+  // head with Change off and no sections instead of the other connection's controls. A first
+  // visit, where nothing has ever been read here, keeps the skeleton (#572).
+  const seenBefore =
+    selectedId !== null &&
+    Array.from(lastRead.keys()).some((key) => key.startsWith(`${selectedId}\u0000`));
+  const pending =
+    listed && detailKey !== null && !fresh && !kept && (loaded !== null || seenBefore)
+      ? pendingDetail(listed)
+      : null;
+  const detail = fresh ?? kept ?? pending;
   // The device whose reload is out. It is an id, not a flag: a reload of one device that is
   // still out when another is picked marks only the device it belongs to.
   const [reloadingId, setReloadingId] = useState<string | null>(null);
@@ -235,6 +324,9 @@ export function PeripheralsView() {
   // The number of the read that is on its way. An answer that is older than the newest one is
   // dropped: a slow reload of one device must not put its error on another.
   const detailRequest = useRef(0);
+  // The connection the last detail fetch was for. A new one drops the detail on screen, so a
+  // pad that moved while the page was open cannot keep the earlier connection's sections (#572).
+  const fetchedKey = useRef<string | null>(null);
 
   // A Read again that is out: a second press while it runs is the same read, not another one.
   const rereading = useRef(false);
@@ -293,7 +385,7 @@ export function PeripheralsView() {
       const d = forceRead ? await api.peripheral(id, { fresh: true }) : await api.peripheral(id);
       if (n !== detailRequest.current) return;
       remember(id, d);
-      setLoaded({ id, detail: d });
+      setLoaded({ id, key: cacheKey(id, d.info), detail: d });
       dropUnreadEdits(id, d);
       if (!keepsStaged(id)) setStagedFor(id, {});
       // Read again is the user's own new action on this device: it clears the device's failed
@@ -319,7 +411,9 @@ export function PeripheralsView() {
   const listStop = useRef<(() => void) | null>(null);
   const [listBusy, setListBusy] = useState(false);
 
-  const loadList = useCallback(() => {
+  // `background` is the poll's tick: its failure keeps the list on screen and says nothing, and the
+  // next tick asks again (as the rail's count does). Only the first load and "Try again" report.
+  const loadList = useCallback((background = false) => {
     let stop = false;
     const handle = () => {
       stop = true;
@@ -340,7 +434,7 @@ export function PeripheralsView() {
         setSaveErrors((prev) => keepLive(prev, live));
       })
       .catch((e: unknown) => {
-        if (!stop) setListError(messageOf(e));
+        if (!stop && !background) setListError(messageOf(e));
       })
       .finally(() => {
         if (!stop) setListBusy(false);
@@ -348,6 +442,12 @@ export function PeripheralsView() {
     return handle;
   }, []);
   useEffect(() => loadList(), [loadList]);
+  // A device can move between its receiver and Bluetooth while the page is open. The list is
+  // the only place that sees it, so ask again on the live-data beat (#572).
+  const pollList = useCallback(() => {
+    loadList(true);
+  }, [loadList]);
+  usePoll(pollList, LIST_POLL_MS);
 
   // The retry: the frame goes back to its placeholder while the list is asked for again, so the
   // button is gone and a second press cannot start a second load.
@@ -360,9 +460,12 @@ export function PeripheralsView() {
 
   useEffect(() => {
     if (!selectedId) return;
-    // The read of a device that is picked again. The counter drops an answer that belongs to
-    // a device that is no longer the one on screen: a slow reload of one device must not put
-    // its error on another.
+    // The read of a device that is picked again, and again when its connection changes: the
+    // id alone is not enough for a pad that moves to Bluetooth while the page is open (#572).
+    // The counter drops an answer that belongs to a device that is no longer the one on screen:
+    // a slow reload of one device must not put its error on another.
+    if (fetchedKey.current !== null && fetchedKey.current !== detailKey) setLoaded(null);
+    fetchedKey.current = detailKey;
     const n = ++detailRequest.current;
     const id = selectedId;
     let stop = false;
@@ -374,7 +477,7 @@ export function PeripheralsView() {
         // lands, so its marker is cleared here, or the device would stay "refreshing" for good.
         setReloadingId(null);
         remember(id, d);
-        setLoaded({ id, detail: d });
+        setLoaded({ id, key: cacheKey(id, d.info), detail: d });
         dropUnreadEdits(id, d);
         if (!keepsStaged(id)) setStagedFor(id, {});
         setDetailError(null);
@@ -392,16 +495,17 @@ export function PeripheralsView() {
     };
     // editsOf / keepsStaged read refs only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, dropUnreadEdits]);
+  }, [selectedId, connection, dropUnreadEdits]);
 
   // "Not read yet": the daemon has read nothing from the device and reads it while the person is
   // away. The page asks again every few seconds with a plain GET (it never touches the device)
   // and stops when values arrive, the device changes or the page goes away (#127).
   // Only while the daemon itself says it has not read the device yet: after a failed Read again
-  // the page shows the error and does not poll.
-  const awaitingIdleRead = detail !== null && isUnread(detail) && detail.problem === NOT_READ_YET_PROBLEM;
+  // the page shows the error and does not poll. A connection with no settings is asked about the
+  // same way, so the page follows the device to one that has them.
+  const awaiting = detail === null ? null : waitingFor(detail);
   useEffect(() => {
-    if (!selectedId || !awaitingIdleRead) return;
+    if (!selectedId || awaiting === null) return;
     const id = selectedId;
     let stop = false;
     const timer = setInterval(() => {
@@ -410,9 +514,9 @@ export function PeripheralsView() {
       api
         .peripheral(id)
         .then((d) => {
-          if (stop || (isUnread(d) && d.problem === NOT_READ_YET_PROBLEM)) return;
+          if (stop || waitingFor(d) === awaiting) return;
           remember(id, d);
-          setLoaded({ id, detail: d });
+          setLoaded({ id, key: cacheKey(id, d.info), detail: d });
           dropUnreadEdits(id, d);
           setDetailError(null);
         })
@@ -424,7 +528,7 @@ export function PeripheralsView() {
       stop = true;
       clearInterval(timer);
     };
-  }, [selectedId, awaitingIdleRead, dropUnreadEdits]);
+  }, [selectedId, awaiting, dropUnreadEdits]);
 
   // An edit for a key the latest read did not carry is dropped, not shown as read (#276): the
   // page offers no control for an unread setting, so the edit can only be left from an earlier
@@ -710,20 +814,28 @@ function PeripheralDetail({
   const reads = detail.access.reads;
   const isController = detail.schema.kind === "game_controller";
   const isMouse = detail.schema.kind === "mouse";
+  // No settings on this connection: one frame says why, in the daemon's words, and nothing that
+  // reads or changes a setting can be pressed. The saved access is left as it is.
+  const noSettings = hasNoSettings(detail);
   // Nothing was read yet: a frame that says so replaces the controls (no setting is made up).
-  const unread = isUnread(detail);
+  const unread = !noSettings && isUnread(detail);
   // Reads off: the daemon has read nothing and will read nothing until Read is turned on, so the
   // controls have no values to show and stand behind a frame that says what reading does (#264).
-  const readsOff = !reads;
-  const showsSettings = !unread && !readsOff;
+  const readsOff = !noSettings && !reads;
+  const showsSettings = !noSettings && !unread && !readsOff;
   const noun = nounOf(info.kind);
   // The "Read again" tooltip (#374). Only the mouse's read is known to hitch: it is five report
   // exchanges with the pointer's own reports among them. The pad's read is 36 chunks of its
   // profile image with no pointer in it, so the pad's tooltip promises the read and no more
   // (#387).
-  const readAgainWords = isMouse
+  const readAgainWords = noSettings
+    ? `The ${noun}'s settings cannot be read over this connection.`
+    : isMouse
     ? `Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself. The ${noun} may stutter briefly while it reads.`
     : `Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself.`;
+  const readWords = noSettings
+    ? `Opens the ${noun}. Its settings cannot be read over this connection.`
+    : `Opens the ${noun} and asks for its settings. It changes nothing on the ${noun}.`;
   const nowMs = useNowMs(30_000);
   const readAt = detail.read_at_ms == null ? null : Number(detail.read_at_ms);
   const ago = readAt === null ? null : readAgo(readAt, nowMs);
@@ -822,8 +934,8 @@ function PeripheralDetail({
             <span
               className="rd-peri-readat"
               data-role="read-at"
-              data-stale={reads && ago?.stale ? "true" : "false"}
-              data-empty={reads && (ago || unread) ? "false" : "true"}
+              data-stale={!noSettings && reads && ago?.stale ? "true" : "false"}
+              data-empty={!noSettings && reads && (ago || unread) ? "false" : "true"}
             >
               {/* The third wording is never shown: it holds the width of the longest one. */}
               <Swap
@@ -832,7 +944,7 @@ function PeripheralDetail({
                 shown={reads && ago ? ago.text : undefined}
               />
             </span>
-            <Tooltip label={`Opens the ${noun} and asks for its settings. It changes nothing on the ${noun}.`} className="rd-peri-tip">
+            <Tooltip label={readWords} className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Read</span>
                 <Toggle
@@ -862,32 +974,52 @@ function PeripheralDetail({
                   size="sm"
                   variant={unread ? "primary" : "default"}
                   icon={<ArrowsClockwise size={16} />}
-                  disabled={!reads || reading}
+                  disabled={noSettings || !reads || reading}
                   onClick={onReadAgain}
                 >
                   Read again
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip label={`Lets canvas-rgb change the settings on the ${noun}.`} className="rd-peri-tip">
+            <Tooltip
+              label={
+                noSettings
+                  ? `The ${noun}'s settings cannot be changed over this connection.`
+                  : `Lets canvas-rgb change the settings on the ${noun}.`
+              }
+              className="rd-peri-tip"
+            >
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Change</span>
                 <Toggle
                   label="Change settings on the device"
-                  checked={writes}
-                  disabled={!reads}
+                  checked={!noSettings && writes}
+                  disabled={noSettings || !reads}
                   onChange={(v) => onAccess({ writes: v })}
                 />
               </span>
             </Tooltip>
           </div>
         </div>
-        {detail.problem && !(unread && detail.problem === NOT_READ_YET_PROBLEM) && !(readsOff && detail.problem === READS_OFF_PROBLEM) && (
+        {detail.problem && !noSettings && !(unread && detail.problem === NOT_READ_YET_PROBLEM) && !(readsOff && detail.problem === READS_OFF_PROBLEM) && (
           <p className="rule rule-warn" data-role="problem">
             {detail.problem}
           </p>
         )}
       </Panel>
+
+      {noSettings && (
+        <Panel className="rd-peri-unread">
+          <div className="rd-peri-unread-body" data-role="no-settings">
+            <span className="rd-peri-unread-icon" aria-hidden="true">
+              <Prohibit size={22} />
+            </span>
+            <p className="rd-peri-unread-text">
+              {detail.problem ?? `The ${noun}'s settings cannot be read or changed over this connection.`}
+            </p>
+          </div>
+        </Panel>
+      )}
 
       {unread && (
         <Panel className="rd-peri-unread">
@@ -896,7 +1028,10 @@ function PeripheralDetail({
               <ClockCountdown size={22} />
             </span>
             <p className="rd-peri-unread-text">
-              {`Not read yet. The ${noun}'s settings are read while you are away. Press Read again to read them now.`}
+              {/* The mouse is never read in the background (#567), so its frame promises no read. */}
+              {isMouse
+                ? `Not read yet. Press Read again to read the ${noun}'s settings.`
+                : `Not read yet. The ${noun}'s settings are read while you are away. Press Read again to read them now.`}
             </p>
           </div>
         </Panel>

@@ -1726,9 +1726,9 @@ function validateDisplay(pathId: string, config: DisplayConfig): void {
 // ---- peripherals ----
 
 /** The daemon's own words when a peripheral's access is asked for. */
-const READS_OFF = "reads are off for this device";
+const READS_OFF = "Reads are off for this device.";
 /** The daemon's words when reads are on and nothing has been read yet. */
-const NOT_READ_YET = "the device's settings have not been read yet";
+const NOT_READ_YET = "The device's settings have not been read yet.";
 
 /**
  * Checks one value against the property's kind, the way the adapter does: the key must be
@@ -1736,23 +1736,23 @@ const NOT_READ_YET = "the device's settings have not been read yet";
  */
 export function checkPeripheralValue(device: DemoPeripheral, key: string, value: PropValue): void {
   const def = device.schema.sections.flatMap((s) => s.properties).find((p) => p.key === key);
-  if (!def) fail(422, "validation", `the device has no setting called ${key}`);
+  if (!def) fail(422, "validation", "This device has no setting with that name. Pick one the page offers.");
   if (device.schema.read_only.includes(key)) {
-    fail(422, "validation", `${key} is read-only: this adapter cannot write it yet`);
+    fail(422, "validation", `${def.label} cannot be changed.`);
   }
   const kind = def.kind;
   if (kind.type === "number" && value.type === "number") {
     if (value.value < kind.min || value.value > kind.max) {
-      fail(422, "validation", `${key} is ${value.value}; it takes ${kind.min} to ${kind.max}`);
+      fail(422, "validation", `${def.label} is ${value.value}; it takes ${kind.min} to ${kind.max}.`);
     }
     if (kind.step > 0 && ((value.value - kind.min) / kind.step) % 1 !== 0) {
-      fail(422, "validation", `${key} is ${value.value}; it takes steps of ${kind.step}`);
+      fail(422, "validation", `${def.label} is ${value.value}; it takes steps of ${kind.step}.`);
     }
     return;
   }
   if (kind.type === "choice" && value.type === "choice") {
     if (!kind.options.includes(value.value)) {
-      fail(422, "validation", `${key} has no option ${value.value}`);
+      fail(422, "validation", `${def.label} does not offer that option. Pick one the page offers.`);
     }
     return;
   }
@@ -1767,7 +1767,7 @@ export function checkPeripheralValue(device: DemoPeripheral, key: string, value:
   // A saved number for an angle reads as the same degrees (clamped to 0..360, as the old
   // number reader did).
   if (kind.type === "angle" && value.type === "number" && Number.isFinite(value.value)) return;
-  fail(422, "validation", `${key} does not take that kind of value`);
+  fail(422, "validation", `${def.label} does not take that kind of value. Pick another value.`);
 }
 
 // ---- effect import ----
@@ -2371,7 +2371,9 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     }
     const id = seg[1] ?? "";
     const device = s.peripherals.find((p) => p.info.id === id);
-    if (!device) fail(404, "not_found", `no peripheral with the id ${id}`);
+    if (!device) {
+      fail(404, "not_found", "The device is no longer there. Connect it again, then pick it from the list.");
+    }
     const access = s.peripheralAccess[id] ?? { reads: false, writes: false };
     // The stage of the read that is open: answers at once, like the daemon's route.
     if (seg.length === 3 && seg[2] === "read" && method === "GET") return readProgressNow(id);
@@ -2397,7 +2399,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         if (readsDevice) {
           // A mouse that is asleep answers nothing: the adapter says so.
           if (scenario().has("asleep") && device.info.kind === "mouse") {
-            detail.problem = "the mouse is asleep: move it and try again";
+            detail.problem = "The mouse is asleep. Move it, then try again.";
           } else {
             detail.values = reportedValues(device.values);
             keptReads.set(id, Date.now());
@@ -2419,10 +2421,10 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     }
     if (seg.length === 2 && method === "PATCH") {
       if (!access.writes) {
-        fail(422, "validation", `config writes are off for ${id}: turn them on before writing`);
+        fail(422, "validation", `Changes are off for ${device.info.name}. Turn on Change first.`);
       }
       if (!access.reads) {
-        fail(422, "validation", `config writes need reads for ${id}: turn reads on before writing`);
+        fail(422, "validation", `Changes need reads for ${device.info.name}. Turn on Read first.`);
       }
       const props = body as Props;
       for (const [key, value] of Object.entries(props)) {
@@ -2434,7 +2436,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     if (seg.length === 3 && seg[2] === "access" && method === "PUT") {
       const next = body as PeripheralAccess;
       if (next.writes && !next.reads) {
-        fail(422, "validation", "config writes need reads: turn reads on too");
+        fail(422, "validation", "Changes need reads as well. Turn on Read first.");
       }
       // Only a change of `reads` forgets the kept values; the first access after a start is not a
       // change, and a change of `writes` keeps them (as the daemon's `apply` does).

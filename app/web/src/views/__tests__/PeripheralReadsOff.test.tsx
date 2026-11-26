@@ -121,7 +121,7 @@ function mouse(id: string, reads: boolean, readAt: number | null): PeripheralDet
             profile: { type: "choice", value: "1" },
           },
     access: { reads, writes: false },
-    problem: readAt === null ? (reads ? "the device's settings have not been read yet" : "reads are off for this device") : null,
+    problem: readAt === null ? (reads ? "The device's settings have not been read yet." : "Reads are off for this device.") : null,
     // The daemon sends a number; the generated type says bigint for a u64.
     ...(readAt === null ? {} : { read_at_ms: readAt as unknown as bigint }),
   };
@@ -186,7 +186,7 @@ function pad(id: string, reads: boolean, readAt: number | null): PeripheralDetai
             "profile-1-stick-left-start": { type: "number", value: 7 },
           },
     access: { reads, writes: false },
-    problem: readAt === null ? (reads ? "the device's settings have not been read yet" : "reads are off for this device") : null,
+    problem: readAt === null ? (reads ? "The device's settings have not been read yet." : "Reads are off for this device.") : null,
     ...(readAt === null ? {} : { read_at_ms: readAt as unknown as bigint }),
   };
 }

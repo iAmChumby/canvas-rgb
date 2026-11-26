@@ -12,6 +12,7 @@ pub mod openrgb;
 mod protocol;
 pub mod resume;
 pub mod royuan;
+pub mod write_failure;
 pub mod zones;
 
 #[cfg(test)]

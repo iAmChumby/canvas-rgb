@@ -50,7 +50,7 @@ afterEach(() => {
 });
 
 const NOT_READ_TEXT =
-  "Not read yet. The mouse's settings are read while you are away. Press Read again to read them now.";
+  "Not read yet. Press Read again to read the mouse's settings.";
 
 /** A mouse with a DPI section; `readAt` is when the daemon read it (Unix ms), or null for never. */
 function mouse(id: string, readAt: number | null): PeripheralDetail {
@@ -99,7 +99,7 @@ function mouse(id: string, readAt: number | null): PeripheralDetail {
         }
       : {},
     access: { reads: true, writes: false },
-    problem: read ? null : "the device's settings have not been read yet",
+    problem: read ? null : "The device's settings have not been read yet.",
     // The daemon sends a plain number; the generated type says bigint for a u64.
     ...(read ? { read_at_ms: readAt as unknown as bigint } : {}),
   };

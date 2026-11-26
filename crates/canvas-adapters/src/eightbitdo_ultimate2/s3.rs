@@ -351,7 +351,7 @@ mod tests {
         pad.silence_next_commits(1);
         let r = drive(&pad, ByteOrder::Bgr, Ok(()), Ok(()));
         let err = r.result.unwrap_err().to_string();
-        assert!(err.contains("commit"), "{err}");
+        assert!(err.contains("partly on the controller"), "{err}");
         assert!(err.contains("read back as saved"), "{err}");
         assert_eq!(pad.image(), r.backups[0].image, "the pad's image is the backup again");
         assert!(r.held_image.is_none(), "no wait after a failed write");
@@ -363,7 +363,7 @@ mod tests {
         pad.silence_next_write_acks(1);
         let r = drive(&pad, ByteOrder::Bgr, Ok(()), Ok(()));
         let err = r.result.unwrap_err().to_string();
-        assert!(err.contains("write chunk"), "{err}");
+        assert!(err.contains("did not answer"), "{err}");
         assert_eq!(pad.image(), r.backups[0].image, "the half-written record was put back");
     }
 

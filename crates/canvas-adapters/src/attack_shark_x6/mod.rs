@@ -99,7 +99,7 @@
 //! The test mouse sleeps after half a minute (its own setting) and a sleeping mouse cannot be
 //! reached over the dongle: every read comes back with the grant refused (`0x00`), and the
 //! vendor app shows "Device Sleep!" and retries (research 3.3). That is not a protocol failure,
-//! so it gets its own error: [`ASLEEP`], "the mouse is asleep: move it and try again".
+//! so it gets its own error: [`ASLEEP`], "The mouse is asleep. Move it, then try again."
 //!
 //! Before it gives up, the adapter waits for the mouse to wake: it watches COL03 for the
 //! mouse's own events for up to five seconds (the vendor app's own retry budget per command)
@@ -179,7 +179,17 @@ const GRANT_ATTEMPTS: u32 = 2;
 /// it over the dongle (research 3.3: "A sleeping mouse cannot receive config over the dongle;
 /// the vendor UI shows `sleep_device_text` ("Device Sleep!") and retries"). The daemon shows a
 /// protocol message as it is, so this reaches the user word for word.
-pub const ASLEEP: &str = "the mouse is asleep: move it and try again";
+pub const ASLEEP: &str = "The mouse is asleep. Move it, then try again.";
+
+/// A read the mouse answered no part of.
+const NOTHING_READ: &str =
+    "The mouse did not answer, so its settings were not read. Move it to wake it, then press Read again.";
+
+/// Windows would not open the receiver: why goes to the log.
+fn not_opened(why: String) -> AdapterError {
+    tracing::warn!("the mouse could not be opened: {why}");
+    refuse("Windows could not open the mouse. Close other programs that use it, then press Read again.")
+}
 
 // ---------------------------------------------------------------------------------- property keys
 
@@ -311,20 +321,20 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn join_error(e: tokio::task::JoinError) -> AdapterError {
-    refuse(format!("the X6 blocking task failed: {e}"))
+    tracing::error!("the X6 blocking task failed: {e}");
+    refuse("Something went wrong inside canvas-rgb while it talked to the mouse. Try again.")
 }
 
 /// Why a property cannot be written yet.
 fn read_only_reason(key: &str) -> &'static str {
     if key.starts_with("button-") {
-        "which physical button each firmware slot belongs to is not known yet (research U12)"
+        "Which physical button it is has not been mapped."
     } else if key == KEY_ACTIVE_STAGE {
-        "the mouse changes the active stage with its own DPI button, and the vendor app's device \
-         model lists it as a runtime readout with no write report (research 2)"
+        "The mouse changes it with its own DPI button."
     } else if key == KEY_PROFILE {
-        "the mouse holds one profile and the profile list lives on the host (research 2)"
+        "The mouse holds one profile."
     } else {
-        "this adapter cannot write it yet"
+        "Changing it is not supported yet."
     }
 }
 
@@ -363,10 +373,10 @@ fn check_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError>
     match (&def.kind, value) {
         (PropKind::Number { min, max, step, .. }, PropValue::Number(n)) => {
             if *n < *min || *n > *max {
-                return Err(refuse(format!("{} is {n}; it takes {min} to {max}", def.key)));
+                return Err(refuse(format!("{} is {n}; it takes {min} to {max}.", def.label)));
             }
             if *step > 0.0 && ((*n - *min) / *step).fract() != 0.0 {
-                return Err(refuse(format!("{} is {n}; it takes steps of {step}", def.key)));
+                return Err(refuse(format!("{} is {n}; it takes steps of {step}.", def.label)));
             }
             Ok(())
         }
@@ -374,15 +384,20 @@ fn check_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError>
             if options.iter().any(|o| o == c) {
                 Ok(())
             } else {
-                Err(refuse(format!("{} has no option {c:?}", def.key)))
+                Err(refuse(format!("{} does not offer that option. Pick one the page offers.", def.label)))
             }
         }
         (PropKind::Color { .. }, PropValue::Color(_)) => Ok(()),
         (PropKind::Bool { .. }, PropValue::Bool(_)) => Ok(()),
         (PropKind::Hue { .. }, PropValue::Hue(_)) => Ok(()),
         (PropKind::Angle { .. }, PropValue::Angle(_)) => Ok(()),
-        _ => Err(refuse(format!("{} does not take that kind of value", def.key))),
+        _ => Err(wrong_kind(&def.label)),
     }
+}
+
+/// A value of the wrong shape: name the setting by its label, never by its internal key (#572).
+fn wrong_kind(label: &str) -> AdapterError {
+    refuse(format!("{label} does not take that kind of value. Pick another value."))
 }
 
 // ------------------------------------------------------------------------------------ transport
@@ -1242,11 +1257,13 @@ impl AttackSharkX6 {
     fn plan_dpi(&self, props: &Props) -> Result<Vec<u8>, AdapterError> {
         if self.cache.dpi_stale {
             return Err(refuse(
-                "the DPI button was pressed since the DPI settings were read; press Read again to read the device first",
+                "The mouse's DPI changed on the device since it was last read. Press Read again, then make your change.",
             ));
         }
         let Some(frame) = self.cache.dpi.clone() else {
-            return Err(refuse("the DPI settings have not been read yet; read the device first"));
+            return Err(refuse(
+                "The mouse's DPI settings have not been read yet. Press Read again, then make your change.",
+            ));
         };
         let mut frame = frame;
         let mut stages = codec::stages_of(&frame);
@@ -1262,7 +1279,8 @@ impl AttackSharkX6 {
             let key = stage_key(i);
             if props.contains_key(&key) && i >= count {
                 return Err(refuse(format!(
-                    "{key} is beyond the {count} stages in use; write {KEY_STAGE_COUNT} first"
+                    "DPI stage {} is beyond the {count} stages in use. Raise the stage count first.",
+                    i + 1
                 )));
             }
         }
@@ -1285,7 +1303,9 @@ impl AttackSharkX6 {
     /// The lighting frame a batch of changes needs.
     fn plan_light(&self, props: &Props) -> Result<Vec<u8>, AdapterError> {
         let Some(frame) = self.cache.light.clone() else {
-            return Err(refuse("the lighting settings have not been read yet; read the device first"));
+            return Err(refuse(
+                "The mouse's lighting settings have not been read yet. Press Read again, then make your change.",
+            ));
         };
         let mut frame = frame;
         // The brightness only exists in the modes that take it: the static mode (index 1) and the
@@ -1296,17 +1316,16 @@ impl AttackSharkX6 {
             Some(PropValue::Choice(id)) => codec::LED_MODES
                 .iter()
                 .position(|m| *m == id)
-                .ok_or_else(|| refuse(format!("no LED mode {id:?}")))? as u8,
+                .ok_or_else(|| {
+                    tracing::warn!(mode = %id, "the mouse was asked for an LED mode it does not have");
+                    refuse("canvas-rgb does not know that LED mode. Pick a mode the page offers.")
+                })? as u8,
             _ => frame[3] >> 4,
         };
         if props.contains_key(KEY_LED_BRIGHTNESS) && !codec::mode_takes_brightness(mode) {
-            let named = match codec::LED_MODES.get(usize::from(mode)).copied() {
-                Some(name) => format!("{name:?}"),
-                None => format!("{mode}"),
-            };
-            return Err(refuse(format!(
-                "the LED mode {named} does not take a brightness; only the static mode does"
-            )));
+            return Err(refuse(
+                "This lighting mode does not take a brightness. Only Static does; pick Static or clear the brightness.",
+            ));
         }
         if props.contains_key(KEY_LED_MODE) && !codec::mode_takes_brightness(mode) {
             // The vendor app sends the constant 8 with every mode change, so the brightness byte
@@ -1318,7 +1337,10 @@ impl AttackSharkX6 {
             let index = codec::LED_MODES
                 .iter()
                 .position(|m| *m == id)
-                .ok_or_else(|| refuse(format!("no LED mode {id:?}")))?;
+                .ok_or_else(|| {
+                    tracing::warn!(mode = %id, "the mouse was asked for an LED mode it does not have");
+                    refuse("canvas-rgb does not know that LED mode. Pick a mode the page offers.")
+                })?;
             change.mode = Some(index as u8);
         }
         if let Some(PropValue::Color(colour)) = props.get(KEY_LED_COLOUR) {
@@ -1395,10 +1417,10 @@ impl PeripheralAdapter for AttackSharkX6 {
         let (config, events) = tokio::task::spawn_blocking(move || {
             let config = opener
                 .open_config()
-                .map_err(AdapterError::Protocol)?
+                .map_err(not_opened)?
                 .ok_or(AdapterError::NotConnected)?;
             // The status collection is a bonus: a mouse that only answers the read-back still works.
-            let events = opener.open_events().map_err(AdapterError::Protocol)?;
+            let events = opener.open_events().map_err(not_opened)?;
             Ok::<_, AdapterError>((config, events))
         })
         .await
@@ -1503,9 +1525,10 @@ impl PeripheralAdapter for AttackSharkX6 {
                 Some(ReadFailure::Refused) => refuse(ASLEEP),
                 // A transport failure returned `Io` above; the arm only keeps the match whole.
                 Some(ReadFailure::Transport(why) | ReadFailure::Other(why)) => {
-                    refuse(format!("the mouse answered none of the five read requests: {why}"))
+                    tracing::warn!("the mouse answered none of the five read requests: {why}");
+                    refuse(NOTHING_READ)
                 }
-                None => refuse("the mouse answered none of the five read requests: no answer"),
+                None => refuse(NOTHING_READ),
             });
         }
 
@@ -1547,7 +1570,10 @@ impl AttackSharkX6 {
         .await
         .map_err(join_error)?;
         self.config = Some(config);
-        let frame = frame.map_err(|f| refuse(format!("the DPI settings could not be read before the write: {}", f.message())))?;
+        let frame = frame.map_err(|f| {
+            tracing::warn!("the DPI settings could not be read before the write: {}", f.message());
+            refuse("The mouse's DPI settings could not be read, so nothing was changed. Move the mouse to wake it, then try again.")
+        })?;
         self.store(Kind::Dpi, &frame);
         Ok(())
     }
@@ -1562,7 +1588,7 @@ impl AttackSharkX6 {
         self.check_id(device)?;
         if !self.writes_enabled {
             return Err(AdapterError::Unsupported(
-                "config writes are off: turn them on with set_writes_enabled(true) first",
+                "Changes are turned off for this mouse. Turn Change on, then try again.",
             ));
         }
         if props.is_empty() {
@@ -1571,10 +1597,16 @@ impl AttackSharkX6 {
         let schema = self.schema();
         for (key, value) in props {
             let Some(def) = schema.property(key) else {
-                return Err(refuse(format!("the mouse has no setting called {key}")));
+                return Err(refuse(
+                    "This mouse has no setting with that name. Pick one the page offers.",
+                ));
             };
             if !schema.is_writable(key) {
-                return Err(refuse(format!("{key} is read-only: {}", read_only_reason(key))));
+                return Err(refuse(format!(
+                    "{} cannot be changed. {}",
+                    def.label,
+                    read_only_reason(key)
+                )));
             }
             check_value(def, value)?;
         }
@@ -1610,11 +1642,13 @@ impl AttackSharkX6 {
                 }
                 tracing::info!(bytes = packet.len(), raw = %hex(packet), "the X6 write goes out");
                 if let Err(e) = config.send_feature(packet) {
-                    // An I/O failure with bytes possibly sent: the caller treats the device as
-                    // changed by an unknown amount (it keeps nothing it held before).
-                    result = Err(AdapterError::Io(std::io::Error::other(format!(
-                        "the X6 write failed: {e}"
-                    ))));
+                    // Bytes may have reached the mouse: the hub drops what it kept. The words
+                    // go to the API answer whole; the technical failure goes only to the log
+                    // (#572).
+                    tracing::warn!(error = %e, "the X6 write stopped before it was confirmed");
+                    result = Err(crate::write_failure::write_failure(
+                        "The mouse stopped answering during the change. The change may be only partly on the mouse. Press Read again to see what it holds.",
+                    ));
                     break;
                 }
             }
@@ -2334,7 +2368,7 @@ mod tests {
         a.connect().await.unwrap();
         let err = a.read_settings(&a.device_id()).await.unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("none of the five read requests")),
+            matches!(&err, AdapterError::Protocol(m) if m.contains("settings were not read")),
             "{err:?}"
         );
     }
@@ -2431,7 +2465,7 @@ mod tests {
             "{err:?}: the asleep error is its own message"
         );
         // The message is the instruction, and nothing else.
-        assert_eq!(ASLEEP, "the mouse is asleep: move it and try again");
+        assert_eq!(ASLEEP, "The mouse is asleep. Move it, then try again.");
     }
 
     #[tokio::test]
@@ -2755,7 +2789,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("read the device first")), "{err:?}");
+        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("Press Read again")), "{err:?}");
         assert_eq!(s.lock().unwrap().sent.len(), before);
     }
 
@@ -2771,7 +2805,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting called dpi-stage-99")),
+            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting with that name") && !m.contains("dpi-stage-99")),
             "{err:?}"
         );
         // The lift-off distance is not a property of this mouse: the firmware never carries it.
@@ -2780,10 +2814,78 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting called lift-off")),
+            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting with that name") && !m.contains("lift-off")),
             "{err:?}"
         );
         assert_eq!(s.lock().unwrap().sent.len(), before);
+    }
+
+    /// #572: the write-plan refusals say what happened and what to do, without debug-quoted ids.
+    #[tokio::test]
+    async fn a_refused_write_is_in_plain_words_on_the_fake_mouse() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        a.set_writes_enabled(true);
+
+        // DPI has not been read at all.
+        let err = a
+            .write_settings(&a.device_id(), &number(&[("dpi-stage-1", 1600.0)]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert_eq!(message, "The mouse's DPI settings have not been read yet. Press Read again, then make your change.");
+
+        a.read_settings(&a.device_id()).await.unwrap();
+        // The DPI button moved the active stage behind the daemon's back, and no frame was read
+        // back yet: the stale flag is the first thing the write plan sees.
+        a.cache.dpi = None;
+        a.cache.dpi_stale = true;
+        let err = a
+            .write_settings(&a.device_id(), &number(&[("dpi-stage-1", 1600.0)]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert_eq!(message, "The mouse's DPI changed on the device since it was last read. Press Read again, then make your change.");
+
+        // Lighting has not been read; this fake answers both reports on one read, so clear it.
+        a.cache.light = None;
+        let err = a
+            .write_settings(&a.device_id(), &choice(&[("led-mode", "off")]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert_eq!(message, "The mouse's lighting settings have not been read yet. Press Read again, then make your change.");
+
+        // An LED mode id is a technical detail: the log has it, the person gets a choice to make.
+        a.read_settings(&a.device_id()).await.unwrap();
+        let err = a
+            .write_settings(&a.device_id(), &choice(&[("led-mode", "sparkle")]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert!(!message.contains("sparkle"), "{message}");
+        assert!(message.contains("Pick one the page offers"), "{message}");
+        // The plan's own arm carries the same plain words if it is reached directly.
+        let Err(err) = a.plan(&choice(&[("led-mode", "sparkle")])) else { panic!("a refusal was expected") };
+        let AdapterError::Protocol(message) = err else { panic!("a refusal: {err:?}") };
+        assert!(!message.contains("sparkle"), "{message}");
+        assert!(message.contains("Pick a mode the page offers"), "{message}");
+
+        // A brightness in a mode that ignores it: no debug-quoted mode name.
+        let before = s.lock().unwrap().sent.len();
+        let err = a
+            .write_settings(
+                &a.device_id(),
+                &props_of(&[
+                    ("led-mode", PropValue::Choice("breathing".into())),
+                    ("led-brightness", PropValue::Number(5.0)),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert_eq!(message, "This lighting mode does not take a brightness. Only Static does; pick Static or clear the brightness.");
+        assert_eq!(s.lock().unwrap().sent.len(), before, "no refused change reached the mouse");
     }
 
     #[tokio::test]
@@ -2793,7 +2895,7 @@ mod tests {
         a.read_settings(&a.device_id()).await.unwrap();
         a.set_writes_enabled(true);
         let before = s.lock().unwrap().sent.len();
-        for (key, why) in [("button-1", "read-only"), ("dpi-active-stage", "read-only"), ("profile", "read-only")] {
+        for (key, why) in [("button-1", "cannot be changed"), ("dpi-active-stage", "cannot be changed"), ("profile", "cannot be changed")] {
             let err = a
                 .write_settings(&a.device_id(), &choice(&[(key, "off")]))
                 .await
@@ -2816,8 +2918,8 @@ mod tests {
             (number(&[("debounce-ms", 5.0)]), "steps of 2"),
             (number(&[("dpi-stage-1", 75.0)]), "steps of 50"),
             (number(&[("sleep-after-min", 31.0)]), "takes 0.5 to 30"),
-            (choice(&[("polling", "4000")]), "no option"),
-            (choice(&[("led-mode", "rainbow")]), "no option"),
+            (choice(&[("polling", "4000")]), "does not offer that option"),
+            (choice(&[("led-mode", "rainbow")]), "does not offer that option"),
         ] {
             let err = a.write_settings(&a.device_id(), &props).await.unwrap_err();
             assert!(matches!(&err, AdapterError::Protocol(m) if m.contains(why)), "{err:?} (wanted {why})");
@@ -2886,7 +2988,7 @@ mod tests {
             .write_settings(&a.device_id(), &choice(&[("dpi-active-stage", "3")]))
             .await
             .unwrap_err();
-        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("read-only")), "{err:?}");
+        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("cannot be changed")), "{err:?}");
         assert_eq!(s.lock().unwrap().sent.len(), before);
     }
 

@@ -738,6 +738,9 @@ pub struct PeripheralLog {
     pub fail_discover: bool,
     /// Makes this many writes fail with an I/O error (a cable pulled mid-write).
     pub fail_write: u32,
+    /// A person-written refusal from the adapter, sent back on the next write before any bytes
+    /// reach the device. The adapter's own refusal is already in words (#572).
+    pub write_refusal: Option<String>,
     /// The battery the fake's input reports carry, for `Peripheral::battery` (#566).
     pub battery: Option<(u8, bool)>,
     /// How many times the hub asked the fake for its battery.
@@ -847,6 +850,7 @@ impl Default for FakePeripheral {
             side_effect: None,
             fail_discover: false,
             fail_write: 0,
+            write_refusal: None,
             battery: None,
             battery_reads: 0,
         })))
@@ -867,17 +871,18 @@ impl FakePeripheral {
 
 /// Checks a value against its kind, the way the real adapters do.
 fn check_prop_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError> {
-    let wrong = |value: &PropValue| {
+    let wrong = |_value: &PropValue| {
         AdapterError::Protocol(format!(
-            "the setting {} does not take that kind of value: {value:?}",
-            def.key
+            "{} does not take that kind of value. Pick another value.",
+            def.label
         ))
     };
     match (&def.kind, value) {
         (PropKind::Number { min, max, .. }, PropValue::Number(number)) => {
             if number < min || number > max {
                 return Err(AdapterError::Protocol(format!(
-                    "{number} is outside {min}..={max}"
+                    "{} is {number}; it takes {min} to {max}.",
+                    def.label
                 )));
             }
             Ok(())
@@ -888,7 +893,8 @@ fn check_prop_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterE
         (PropKind::Choice { options, .. }, PropValue::Choice(choice)) => {
             if !options.contains(choice) {
                 return Err(AdapterError::Protocol(format!(
-                    "{choice} is not one of {options:?}"
+                    "{} does not offer that option. Pick one the page offers.",
+                    def.label
                 )));
             }
             Ok(())
@@ -898,14 +904,20 @@ fn check_prop_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterE
         (PropKind::Color { .. }, other) => Err(wrong(other)),
         (PropKind::Hue { .. }, PropValue::Hue(hue)) => {
             if !(0.0..=360.0).contains(hue) {
-                return Err(AdapterError::Protocol(format!("a hue must be 0..=360, got {hue}")));
+                return Err(AdapterError::Protocol(format!(
+                    "{} takes a hue from 0 to 360.",
+                    def.label
+                )));
             }
             Ok(())
         }
         (PropKind::Hue { .. }, other) => Err(wrong(other)),
         (PropKind::Angle { .. }, PropValue::Angle(angle)) => {
             if !(0.0..=360.0).contains(angle) {
-                return Err(AdapterError::Protocol(format!("an angle must be 0..=360, got {angle}")));
+                return Err(AdapterError::Protocol(format!(
+                    "{} takes an angle from 0 to 360.",
+                    def.label
+                )));
             }
             Ok(())
         }
@@ -1008,7 +1020,7 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
         }
         if !log.writes_enabled {
             return Err(AdapterError::Unsupported(
-                "config writes are off: turn them on with set_writes_enabled(true) first",
+                "Changes are off for this device. Turn on Change first.",
             ));
         }
         if props.is_empty() {
@@ -1018,14 +1030,17 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
         // range is refused, and nothing is sent.
         for (key, value) in props {
             let Some(def) = log.schema.property(key) else {
-                return Err(AdapterError::Protocol(format!(
-                    "the device has no setting called {key}"
-                )));
+                return Err(AdapterError::Protocol(
+                    "This device has no setting with that name. Pick one the page offers.".to_string(),
+                ));
             };
             if !log.schema.is_writable(key) {
-                return Err(AdapterError::Protocol(format!("{key} is read-only")));
+                return Err(AdapterError::Protocol(format!("{} cannot be changed.", def.label)));
             }
             check_prop_value(def, value)?;
+        }
+        if let Some(words) = log.write_refusal.take() {
+            return Err(AdapterError::Protocol(words));
         }
         if log.fail_write > 0 {
             log.fail_write -= 1;

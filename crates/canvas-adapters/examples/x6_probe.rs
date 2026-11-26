@@ -210,6 +210,6 @@ mod tests {
     #[test]
     fn the_asleep_error_is_printed_with_its_instruction() {
         // The message the daemon shows as it is: the mouse is asleep, and what to do about it.
-        assert_eq!(ASLEEP, "the mouse is asleep: move it and try again");
+        assert_eq!(ASLEEP, "The mouse is asleep. Move it, then try again.");
     }
 }

@@ -70,13 +70,13 @@ function mouse(id: string, read: boolean): PeripheralDetail {
     schema: {
       device: id,
       kind: "mouse",
-      sections: [],
+      sections: [{ id: "light", title: "Lighting", properties: [] }],
       read_only: [],
       unreported: [],
     } as unknown as PeripheralDetail["schema"],
     values: read ? { "dpi-stage-count": { type: "number", value: 6 } } : {},
     access: { reads: true, writes: false },
-    problem: read ? null : "the device's settings have not been read yet",
+    problem: read ? null : "The device's settings have not been read yet.",
     ...(read ? { read_at_ms: Date.now() as unknown as bigint } : {}),
   };
 }
@@ -97,7 +97,7 @@ function pad(id: string): PeripheralDetail {
     schema: {
       device: id,
       kind: "game_controller",
-      sections: [],
+      sections: [{ id: "light", title: "Lighting", properties: [] }],
       read_only: [],
       unreported: [],
     } as unknown as PeripheralDetail["schema"],
@@ -189,7 +189,7 @@ describe("what the Peripherals page says about a read (#374)", () => {
     api.peripheral.mockResolvedValue(mouse(id, false));
     render(<PeripheralsView />);
     const frame = await screen.findByText(
-      "Not read yet. The mouse's settings are read while you are away. Press Read again to read them now.",
+      "Not read yet. Press Read again to read the mouse's settings.",
     );
     expect(frame.textContent).not.toMatch(/paus/i);
   });

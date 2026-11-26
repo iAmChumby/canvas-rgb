@@ -8,6 +8,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use canvas_adapters::fake_pad::FakePad;
 use canvas_daemon::api;
 use canvas_daemon::cli::{Api, CliError, Output};
 use canvas_daemon::state::App;
@@ -214,7 +215,7 @@ async fn a_get_with_reads_off_never_reads_the_device() {
         .expect("the values are an object")
         .is_empty());
     let problem = body.get("problem").and_then(|v| v.as_str()).unwrap_or_default();
-    assert!(problem.contains("reads are off"), "{problem}");
+    assert!(problem.contains("Reads are off"), "{problem}");
     let log = fake.log();
     assert_eq!(log.reads, 0, "the device is not read");
     assert_eq!(log.connects, 0, "the device is not opened");
@@ -1456,7 +1457,7 @@ async fn the_cli_prints_the_peripherals_and_the_detail() {
     };
     println!("$ canvas-rgb peripherals show {id}\n{text}");
     assert!(text.contains("reads off"), "{text}");
-    assert!(text.contains("reads are off"), "{text}");
+    assert!(text.contains("Reads are off"), "{text}");
     assert!(text.contains("dpi-stage-1"), "{text}");
 
     // With reads on, the detail carries the device's own values.
@@ -1556,4 +1557,260 @@ async fn the_list_shows_the_battery_of_an_open_device_and_asks_no_closed_one() {
     assert_eq!(open.pointer("/peripherals/0/battery").and_then(|v| v.as_u64()), Some(83), "{open}");
     assert_eq!(open.pointer("/peripherals/0/charging"), Some(&serde_json::Value::Bool(false)), "{open}");
     assert_eq!(fake.log().reads, 0, "the battery comes from input reports, not a settings read");
+}
+
+/// What a person reads after a failed Read again says what happened and what to do, and carries
+/// no error-type prefix.
+#[tokio::test]
+async fn a_failed_read_is_told_in_plain_words() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0;
+    call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
+    fake.0.lock().unwrap().fail_read = 1;
+    let body = json(call(&router, "GET", &format!("{}?fresh=true", path_of(&id))).await).await;
+    let problem = body.get("problem").and_then(|v| v.as_str()).unwrap_or_default();
+    assert!(!problem.starts_with("io:") && !problem.starts_with("protocol:"), "{problem}");
+    assert!(problem.contains("Read again"), "{problem}");
+}
+
+/// #572: the guards on the write path name the device a person knows and the switch to press.
+/// Nothing in an answer is an internal id, a config field or a fragment of a sentence.
+#[tokio::test]
+async fn write_guards_and_a_missing_device_are_in_plain_words() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    let write = r#"{"dpi-stage-1":{"type":"number","value":1600}}"#;
+
+    // Changes are off: the device's display name and the UI's Change switch, not `id`.
+    let path = reads_on(&router, &fake, false).await;
+    let response = call_with_body(&router, "PATCH", &path, write).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    let message = body.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+    assert_eq!(message, "Changes are off for Fake Mouse. Turn on Change first.");
+    assert!(!message.contains(&id), "{message}");
+
+    // The saved access itself: writes need reads, and the UI calls that switch Read.
+    let response = call_with_body(
+        &router,
+        "PUT",
+        &access_path_of(&id),
+        r#"{"reads":false,"writes":true}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(
+        body.get("message").and_then(|m| m.as_str()),
+        Some("Changes need reads as well. Turn on Read first.")
+    );
+
+    // A device that is not in the enumeration: no id in the answer, on a read or a write. Its
+    // saved access is on, so the write gate does not refuse before the missing device is found.
+    let missing_id = "nope:0000:0000";
+    let saved = call_with_body(
+        &router,
+        "PUT",
+        &access_path_of(missing_id),
+        r#"{"reads":true,"writes":true}"#,
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let missing = path_of(missing_id);
+    for response in [
+        call(&router, "GET", &missing).await,
+        call_with_body(&router, "PATCH", &missing, write).await,
+    ] {
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = json(response).await;
+        let message = body.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+        assert_eq!(
+            message,
+            "The device is no longer there. Connect it again, then pick it from the list."
+        );
+        assert!(!message.contains(missing_id), "{message}");
+    }
+}
+
+/// A pad whose connection carries no settings: a plain GET already says why, offers no section,
+/// and no read is sent to it, with reads on or off.
+#[tokio::test]
+async fn a_pad_over_bluetooth_says_why_on_a_plain_get_and_offers_no_settings() {
+    use canvas_adapters::eightbitdo_ultimate2::{
+        EightBitDoUltimate2, Personality, BLUETOOTH_NO_SETTINGS,
+    };
+    let pad = canvas_adapters::fake_pad::FakePad::with_image(
+        canvas_adapters::fake_pad::ring_fixture_image(),
+        Personality::Bluetooth,
+    );
+    let adapter = EightBitDoUltimate2::with_opener(Arc::new(pad.clone()));
+    let id = adapter.device_id().0;
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::load_from(&home.path);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(
+        App::with_displays(
+            store,
+            Arc::new(FakeEngine::default()),
+            Box::new(FakeAdapter::default()),
+            TOKEN.to_string(),
+            "0.1.0-test".to_string(),
+            tx,
+            Box::new(canvas_daemon::displays::NoDisplays),
+        )
+        .with_peripherals(vec![Box::new(adapter) as Box<dyn canvas_daemon::peripherals::Peripheral>]),
+    );
+    let router = api::router(app);
+    for reads in [false, true] {
+        if reads {
+            let access = r#"{"reads":true,"writes":true}"#;
+            let put = call_with_body(&router, "PUT", &access_path_of(&id), access).await;
+            assert_eq!(put.status(), StatusCode::OK);
+        }
+        for path in [path_of(&id), format!("{}?fresh=true", path_of(&id))] {
+            let body = json(call(&router, "GET", &path).await).await;
+            assert_eq!(body["problem"], BLUETOOTH_NO_SETTINGS, "reads={reads} {path}");
+            assert_eq!(body["schema"]["sections"], serde_json::json!([]));
+        }
+    }
+    assert!(pad.sent_reports().is_empty(), "nothing is sent to the pad");
+}
+
+/// The app and the id of a fake pad on the receiver, so a write can be tested on the route.
+fn build_pad(pad: FakePad) -> (axum::Router, TempHome, String) {
+    use canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2;
+
+    let adapter = EightBitDoUltimate2::with_opener(Arc::new(pad));
+    let id = adapter.device_id().0;
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::load_from(&home.path);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(
+        App::with_displays(
+            store,
+            Arc::new(FakeEngine::default()),
+            Box::new(FakeAdapter::default()),
+            TOKEN.to_string(),
+            "0.1.0-test".to_string(),
+            tx,
+            Box::new(canvas_daemon::displays::NoDisplays),
+        )
+        .with_peripherals(vec![Box::new(adapter) as Box<dyn canvas_daemon::peripherals::Peripheral>]),
+    );
+    (api::router(app), home, id)
+}
+
+/// Opens a pad on the receiver and reads it once, so a write has a profile to plan from.
+async fn open_and_read_pad(router: &axum::Router, id: &str) -> String {
+    let access = call_with_body(
+        router,
+        "PUT",
+        &access_path_of(id),
+        r#"{"reads":true,"writes":true}"#,
+    )
+    .await;
+    assert_eq!(access.status(), StatusCode::OK);
+    let path = path_of(id);
+    call(router, "GET", &format!("{path}?fresh=true")).await;
+    path
+}
+
+const PADDLE_WRITE: &str = r#"{"profile-3-paddle-1":{"type":"choice","value":"a"}}"#;
+const MOUSE_WRITE: &str = r#"{"dpi-stage-1":{"type":"number","value":1600}}"#;
+const MOUSE_REFUSAL: &str = "The mouse did not take the change. Check that it is connected, then try again.";
+
+/// #572: a link failure during a write has to say the change may be only partly applied, for
+/// both devices. The fake mouse's I/O failure is the X6's shape; the silent pad commit is the
+/// 8BitDo's. Neither answer may turn the person's sentence into "the device stopped answering".
+#[tokio::test]
+async fn a_partly_applied_write_says_so_in_the_http_answer_for_both_devices() {
+    // Mouse: the I/O error has no sentence of its own, so the route adds the warning.
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let path = reads_on(&router, &fake, true).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
+    fake.0.lock().unwrap().fail_write = 1;
+    let response = call_with_body(&router, "PATCH", &path, MOUSE_WRITE).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = json(response).await;
+    let words = body.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+    assert!(words.contains("change may be incomplete"), "{words}");
+    assert!(words.contains("Press Read again"), "{words}");
+    assert!(!words.starts_with("io:"), "{words}");
+
+    // Pad: the adapter's own sentence survives the write path intact.
+    use canvas_adapters::eightbitdo_ultimate2::Personality;
+    use canvas_adapters::fake_pad::{ring_fixture_image, FakePad};
+    let pad = FakePad::with_image(ring_fixture_image(), Personality::XInput);
+    let (router, _home, id) = build_pad(pad.clone());
+    let path = open_and_read_pad(&router, &id).await;
+    pad.silence_commits();
+    let response = call_with_body(&router, "PATCH", &path, PADDLE_WRITE).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = json(response).await;
+    let words = body.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+    assert_eq!(
+        words,
+        "The change may be only partly on the controller. Press Read again to see what it holds."
+    );
+}
+
+/// #572: a refusal written for the person keeps its exact words on the HTTP answer, on both
+/// adapters. The pad's "did not take the change" used to be swallowed by the Io wrapper.
+#[tokio::test]
+async fn a_refused_write_is_in_plain_words_on_the_http_answer_for_both_devices() {
+    // Mouse: the adapter's refusal is already a person-written Protocol error.
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let path = reads_on(&router, &fake, true).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
+    fake.0.lock().unwrap().write_refusal = Some(MOUSE_REFUSAL.to_string());
+    let response = call_with_body(&router, "PATCH", &path, MOUSE_WRITE).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(body.get("message").and_then(|m| m.as_str()), Some(MOUSE_REFUSAL));
+
+    // Pad: a report the pad will not take produces the adapter's "did not take the change".
+    use canvas_adapters::eightbitdo_ultimate2::Personality;
+    use canvas_adapters::fake_pad::{ring_fixture_image, FakePad};
+    let pad = FakePad::with_image(ring_fixture_image(), Personality::XInput);
+    let (router, _home, id) = build_pad(pad.clone());
+    let path = open_and_read_pad(&router, &id).await;
+    pad.refuse_next_report();
+    let response = call_with_body(&router, "PATCH", &path, PADDLE_WRITE).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = json(response).await;
+    assert_eq!(
+        body.get("message").and_then(|m| m.as_str()),
+        Some("The controller did not take the change. Check that it is connected, then try again.")
+    );
+}
+
+/// #572: one text for a gone device, with its name when the caller knows it.
+#[tokio::test]
+async fn a_missing_device_is_named_on_one_sentence() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = "nope:0000:0000";
+    let saved = call_with_body(
+        &router,
+        "PUT",
+        &access_path_of(id),
+        r#"{"reads":true,"writes":true}"#,
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    for response in [
+        call(&router, "GET", &path_of(id)).await,
+        call_with_body(&router, "PATCH", &path_of(id), MOUSE_WRITE).await,
+    ] {
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = json(response).await;
+        assert_eq!(
+            body.get("message").and_then(|m| m.as_str()),
+            Some("The device is no longer there. Connect it again, then pick it from the list.")
+        );
+    }
 }

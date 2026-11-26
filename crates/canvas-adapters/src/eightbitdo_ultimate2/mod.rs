@@ -223,6 +223,32 @@ pub const HOGP_SERVICE: &str = "00001812-0000-1000-8000-00805f9b34fb";
 pub const BLUETOOTH_NO_SETTINGS: &str = "Over Bluetooth the pad sends its buttons, sticks, triggers and battery only. \
 Its profiles, button map and stick ranges can be read and changed through the 2.4G receiver or a USB cable.";
 
+/// What the pad answers in the DInput personality, where it shows no vendor channel.
+pub const DINPUT_NO_SETTINGS: &str = "In DInput mode the pad sends its buttons, sticks, triggers and battery only. \
+To read and change its profiles, button map and stick ranges, switch it to XInput mode and connect it through the 2.4G receiver or a USB cable.";
+
+/// What a read of an idle receiver answers.
+const RECEIVER_IDLE: &str = "The 2.4G receiver is plugged in, but no controller is linked to it. \
+Turn the controller on in 2.4G mode, then press Read again.";
+
+/// A pad that did not answer a read.
+const PAD_SILENT: &str = "The controller did not answer properly, so its settings were not read. \
+Press a button on it to wake it, then press Read again.";
+
+/// A change that does not fit what the pad holds.
+const NOT_IN_PROFILE: &str = "The controller's saved profile does not take that change, so nothing was changed. \
+Press Read again, then check the profile in 8BitDo's own software.";
+
+/// Why a connection carries no settings, when it carries none. `has_vendor` says whether the
+/// opener found a vendor channel for the personality.
+fn no_settings(personality: Personality, has_vendor: bool) -> Option<&'static str> {
+    match personality {
+        Personality::Bluetooth => Some(BLUETOOTH_NO_SETTINGS),
+        Personality::DInput if !has_vendor => Some(DINPUT_NO_SETTINGS),
+        _ => None,
+    }
+}
+
 /// True when a HID path is a HID-over-GATT (Bluetooth LE) collection.
 pub fn is_bluetooth_path(path: &[u8]) -> bool {
     String::from_utf8_lossy(path).to_ascii_lowercase().contains(HOGP_SERVICE)
@@ -249,6 +275,10 @@ pub type OpenedCollections = Vec<(String, Box<dyn InputTransport>)>;
 pub trait Opener: Send + Sync {
     /// Every personality the device is showing, the pad's first.
     fn personalities(&self) -> Vec<Personality>;
+    /// True when `personality` shows a vendor channel. An enumeration: nothing is opened.
+    fn has_vendor(&self, personality: Personality) -> bool {
+        personality.vendor_usage_page().is_some()
+    }
     /// Opens the vendor collection of `personality`. `Ok(None)` when it has none.
     fn open_vendor(&self, personality: Personality) -> Result<Option<Box<dyn VendorTransport>>, String>;
     /// Opens the gamepad collection of `personality`. `Ok(None)` when it has none.
@@ -403,6 +433,23 @@ impl<S: HidSource> Opener for HidOpener<S> {
             Ok((!out.is_empty()).then_some(out))
         });
         found.ok().flatten().unwrap_or_default()
+    }
+
+    fn has_vendor(&self, personality: Personality) -> bool {
+        match personality {
+            Personality::Bluetooth => false,
+            // The wired pad in DInput mode may have a vendor collection on the XInput page, as
+            // `open_vendor` looks for it.
+            Personality::DInput => {
+                let found = self.cache.with_retry(|api| {
+                    let path =
+                        api.find_path(PRODUCT_ID_DINPUT, VENDOR_USAGE_PAGE_XINPUT, VENDOR_USAGE);
+                    Ok(Some(path.is_some()))
+                });
+                found.ok().flatten().unwrap_or(false)
+            }
+            Personality::Idle | Personality::XInput => true,
+        }
     }
 
     fn open_vendor(
@@ -730,17 +777,13 @@ fn unreported() -> Vec<String> {
 /// Why a property cannot be written yet.
 fn read_only_reason(key: &str) -> &'static str {
     if key == KEY_ACTIVE_PROFILE {
-        "the pad changes the active profile with its own button, and no write for it is described \
-         (research 5.4)"
-    } else if key.starts_with(KEY_BUTTON_PREFIX) {
-        "the research's own writer covers the stick and trigger range records only, and a map \
-         write would need an image read that has never run on the pad (research 2.2c and 8)"
-    } else if key.contains("vibration") {
-        "the research's own writer covers the stick and trigger range records only (research 5.3)"
+        "The controller changes it with its own profile button."
+    } else if key.starts_with(KEY_BUTTON_PREFIX) || key.contains("vibration") {
+        "It is shown for information only; canvas-rgb cannot write it."
     } else if key.contains("in-use") {
-        "this is the vendor app's mark of a record in use, not a setting"
+        "This is the vendor app's mark of a record in use, not a setting."
     } else {
-        "this adapter cannot write it yet"
+        "Changing it is not supported yet."
     }
 }
 
@@ -750,10 +793,10 @@ fn check_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError>
     match (&def.kind, value) {
         (PropKind::Number { min, max, step, .. }, PropValue::Number(n)) => {
             if *n < *min || *n > *max {
-                return Err(refuse(format!("{} is {n}; it takes {min} to {max}", def.key)));
+                return Err(refuse(format!("{} is {n}; it takes {min} to {max}.", def.label)));
             }
             if *step > 0.0 && ((*n - *min) / *step).fract() != 0.0 {
-                return Err(refuse(format!("{} is {n}; it takes steps of {step}", def.key)));
+                return Err(refuse(format!("{} is {n}; it takes steps of {step}.", def.label)));
             }
             Ok(())
         }
@@ -761,19 +804,41 @@ fn check_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError>
             if options.iter().any(|o| o == c) {
                 Ok(())
             } else {
-                Err(refuse(format!("{} has no option {c:?}", def.key)))
+                Err(refuse(format!("{} does not offer that option. Pick one the page offers.", def.label)))
             }
         }
         (PropKind::Color { .. }, PropValue::Color(_)) => Ok(()),
         (PropKind::Bool { .. }, PropValue::Bool(_)) => Ok(()),
         (PropKind::Hue { .. }, PropValue::Hue(_)) => Ok(()),
         (PropKind::Angle { .. }, PropValue::Angle(_)) => Ok(()),
-        _ => Err(refuse(format!("{} does not take that kind of value", def.key))),
+        _ => Err(wrong_kind(&def.label)),
     }
+}
+
+/// A value of the wrong shape: name the setting by its label, never by its internal key (#572).
+fn wrong_kind(label: &str) -> AdapterError {
+    refuse(format!("{label} does not take that kind of value. Pick another value."))
+}
+
+/// A write the pad refused to take: the detail is in the log (#572).
+fn refused_write() -> AdapterError {
+    refuse("The controller did not take the change. Check that it is connected, then try again.")
 }
 
 fn refuse(message: impl Into<String>) -> AdapterError {
     AdapterError::Protocol(message.into())
+}
+
+/// A change the codec cannot build from the pad's image: why goes to the log.
+fn not_in_profile(why: String) -> AdapterError {
+    tracing::warn!("the change could not be built from the pad's profile: {why}");
+    refuse(NOT_IN_PROFILE)
+}
+
+/// Windows would not open a collection: why goes to the log.
+fn not_opened(why: String) -> AdapterError {
+    tracing::warn!("the pad could not be opened: {why}");
+    refuse("Windows could not open the controller. Close other programs that use it, then press Read again.")
 }
 
 /// A HID I/O failure (an unplugged pad), as opposed to a pad that is merely silent.
@@ -782,7 +847,8 @@ fn io_failure(message: impl Into<String>) -> AdapterError {
 }
 
 fn join_error(e: tokio::task::JoinError) -> AdapterError {
-    refuse(format!("the pad blocking task failed: {e}"))
+    tracing::error!("the pad blocking task failed: {e}");
+    refuse("Something went wrong inside canvas-rgb while it talked to the controller. Try again.")
 }
 
 // ------------------------------------------------------------------------------------- the timing
@@ -876,10 +942,10 @@ fn read_image_raw(
             tracing::warn!(offset = offset, attempt, "{}", last);
         }
         let Some(data) = chunk else {
-            return Err(refuse(format!(
-                "the pad did not answer the read request for chunk {offset:#x} of the profile \
-                 image: {last}"
-            )));
+            tracing::warn!(offset = format!("{offset:#x}"), reason = %last, "the pad did not answer a read request");
+            return Err(refuse(
+                "The controller did not answer, so its settings were not read. Press Read again.",
+            ));
         };
         img.extend_from_slice(&data);
         if img.len() < codec::IMAGE_LEN {
@@ -903,20 +969,20 @@ fn await_ack(
 ) -> Result<(), AdapterError> {
     for _ in 0..POLLS {
         let mut buf = [0u8; codec::REPORT_LEN];
-        let n = vendor
-            .read_input(&mut buf, pace.poll_ms)
-            .map_err(|e| refuse(format!("the reply to the {what} failed: {e}")))?;
+        let n = vendor.read_input(&mut buf, pace.poll_ms).map_err(|e| {
+            tracing::warn!(what, error = %e, "the pad's acknowledgement could not be read");
+            refuse("The controller stopped answering during the change. Check that it is connected, then press Read again.")
+        })?;
         if n == 0 {
             continue;
         }
         return codec::parse_ack_reply(&buf[..n], want).map_err(|why| {
-            refuse(format!(
-                "the pad's reply to the {what} was wrong: {why}; reply: {}",
-                codec::hex(&buf[..n])
-            ))
+            tracing::warn!(what, reason = %why, reply = %codec::hex(&buf[..n]), "the pad's acknowledgement was wrong");
+            refuse("The controller sent an unexpected answer during the change. Press Read again to see what it holds.")
         });
     }
-    Err(refuse(format!("the pad did not reply to the {what}")))
+    tracing::warn!(what, "the pad sent no acknowledgement");
+    Err(refuse("The controller did not answer the change. Press Read again to see what it holds."))
 }
 
 /// Throws away anything the pad has already queued (a late answer to `Reportstate`), so it
@@ -950,35 +1016,41 @@ fn write_session(
         return Ok(());
     };
     let outcome = (|| -> Result<(), AdapterError> {
-        vendor
-            .send_report(&codec::report_state_request(0))
-            .map_err(|e| refuse(format!("Reportstate(0) failed: {e}")))?;
+        vendor.send_report(&codec::report_state_request(0)).map_err(|e| {
+            tracing::warn!(error = %e, "the pad refused the start of a write session");
+            refused_write()
+        })?;
         std::thread::sleep(pace.session_pause);
         drain_input(vendor, pace);
         for (i, packet) in writes.iter().enumerate() {
             tracing::info!(raw = %codec::hex(packet), "the pad write goes out");
-            vendor
-                .send_report(packet)
-                .map_err(|e| refuse(format!("the pad write failed: {e}")))?;
+            vendor.send_report(packet).map_err(|e| {
+                tracing::warn!(error = %e, "the pad refused a write chunk");
+                refused_write()
+            })?;
             await_ack(vendor, pace, codec::REQ_WRITE, &format!("write chunk {}", i + 1))?;
         }
         std::thread::sleep(pace.write_pause);
         tracing::info!(raw = %codec::hex(commit), "the pad commit goes out");
-        vendor
-            .send_report(commit)
-            .map_err(|e| refuse(format!("the commit failed: {e}")))?;
+        vendor.send_report(commit).map_err(|e| {
+            tracing::warn!(error = %e, "the pad refused the write commit");
+            refused_write()
+        })?;
         await_ack(vendor, pace, codec::REQ_COMMIT, "commit").map_err(|e| {
-            refuse(format!(
-                "{e}; the write chunk(s) went out and the pad may hold them uncommitted"
-            ))
+            tracing::warn!(error = %e, "the write went out but the commit was not confirmed");
+            refuse("The change may be only partly on the controller. Press Read again to see what it holds.")
         })
     })();
     std::thread::sleep(pace.session_pause);
-    let closing = vendor
-        .send_report(&codec::report_state_request(1))
-        .map_err(|e| refuse(format!("Reportstate(1) failed: {e}")));
+    let closing = vendor.send_report(&codec::report_state_request(1)).map_err(|e| {
+        tracing::warn!(error = %e, "the pad refused the end of a write session");
+        refused_write()
+    });
     match (outcome, closing) {
-        (Err(e), Err(c)) => Err(refuse(format!("{e}; also {c}"))),
+        (Err(e), Err(c)) => {
+            tracing::warn!(closing = %c, "the pad also refused the end of the write session");
+            Err(e)
+        }
         (Err(e), Ok(())) => Err(e),
         (Ok(()), Err(c)) => Err(c),
         (Ok(()), Ok(())) => Ok(()),
@@ -1226,6 +1298,8 @@ pub struct EightBitDoUltimate2 {
     opener: Arc<dyn Opener>,
     xinput: Arc<dyn XInputSource>,
     personality: Option<Personality>,
+    /// Why the connection carries no settings, as the last enumeration found it.
+    unavailable: Option<&'static str>,
     /// The personality the open handles were opened for.
     bound: Option<Personality>,
     vendor: VendorHandle,
@@ -1253,6 +1327,7 @@ impl EightBitDoUltimate2 {
             opener: Arc::new(HidOpener::<hidapi::HidApi>::default()),
             xinput: Arc::new(SystemXInput),
             personality: None,
+            unavailable: None,
             bound: None,
             vendor: VendorHandle::new(),
             gamepad: None,
@@ -1267,6 +1342,12 @@ impl EightBitDoUltimate2 {
     /// channel this adapter opens.
     pub fn with_handle(handle: VendorHandle) -> Self {
         Self { vendor: handle, ..Self::new() }
+    }
+
+    /// The adapter over a given opener: the tests of other crates run it on the fake pad. The
+    /// XInput API is still the machine's.
+    pub fn with_opener(opener: Arc<dyn Opener>) -> Self {
+        Self { opener, ..Self::new() }
     }
 
     /// The shared vendor channel. Hand a clone to the ring adapter.
@@ -1289,6 +1370,31 @@ impl EightBitDoUltimate2 {
     /// The personality the pad is showing, when the adapter has found it.
     pub fn personality(&self) -> Option<Personality> {
         self.personality
+    }
+
+    /// Why the pad's settings cannot be read or changed over its current connection, in words
+    /// for the person. `None` when they can, or when no pad has been seen.
+    pub fn settings_unavailable(&self) -> Option<&'static str> {
+        self.unavailable
+    }
+
+    /// Asks the opener which personality comes first, and keeps it together with why it carries
+    /// no settings when it does not. `None` when no pad is there.
+    async fn look(&mut self) -> Result<Option<Personality>, AdapterError> {
+        let opener = self.opener.clone();
+        let seen = tokio::task::spawn_blocking(move || {
+            let first = opener.personalities().first().copied()?;
+            Some((first, no_settings(first, opener.has_vendor(first))))
+        })
+        .await
+        .map_err(join_error)?;
+        if let Some((personality, unavailable)) = seen {
+            self.personality = Some(personality);
+            self.unavailable = unavailable;
+        }
+        let present = seen.map(|(personality, _)| personality);
+        self.vendor.set_pad_present(present == Some(Personality::XInput));
+        Ok(present)
     }
 
     /// The profile image as the last read brought it back, all 1592 bytes.
@@ -1417,12 +1523,17 @@ impl EightBitDoUltimate2 {
             });
         }
 
+        // A connection with no settings offers none: there is nothing to draw or to change.
+        let (sections, read_only, unreported) = match self.unavailable {
+            Some(_) => (Vec::new(), Vec::new(), Vec::new()),
+            None => (sections, read_only(), unreported()),
+        };
         PeripheralSchema {
             device: self.device_id(),
             kind: PeripheralKind::GameController,
             sections,
-            read_only: read_only(),
-            unreported: unreported(),
+            read_only,
+            unreported,
         }
     }
 
@@ -1438,6 +1549,9 @@ impl EightBitDoUltimate2 {
     async fn read_props(&mut self, device: &DeviceId) -> Result<Props, AdapterError> {
         self.check_id(device)?;
         self.rebind_if_personality_changed().await?;
+        if let Some(why) = self.unavailable {
+            return Err(refuse(why));
+        }
         if !self.vendor.is_open() {
             return Err(self.not_connected());
         }
@@ -1459,11 +1573,20 @@ impl EightBitDoUltimate2 {
                     self.gamepad = None;
                     self.image = None;
                     self.bound = None;
+                    return Err(e);
                 }
-                return Err(e);
+                // The chunk and the reply go to the log; the person gets what to do.
+                tracing::warn!("the profile read failed: {e}");
+                return Err(refuse(match self.bound {
+                    Some(Personality::Idle) => RECEIVER_IDLE,
+                    _ => PAD_SILENT,
+                }));
             }
         };
-        let props = props_from_image(&image).map_err(refuse)?;
+        let props = props_from_image(&image).map_err(|why| {
+            tracing::warn!("the profile image could not be decoded: {why}");
+            refuse("The controller sent settings canvas-rgb could not understand. Press Read again.")
+        })?;
         self.image = Some(image);
         Ok(props)
     }
@@ -1475,10 +1598,7 @@ impl EightBitDoUltimate2 {
         if !self.vendor.is_open() && self.gamepad.is_none() {
             return Ok(());
         }
-        let opener = self.opener.clone();
-        let present = tokio::task::spawn_blocking(move || opener.personalities().first().copied())
-            .await
-            .map_err(join_error)?;
+        let present = self.look().await?;
         if present.is_some() && present != self.bound {
             self.vendor.close();
             self.gamepad = None;
@@ -1491,19 +1611,12 @@ impl EightBitDoUltimate2 {
 
     /// Why the adapter cannot talk to the pad.
     ///
-    /// Over Bluetooth the answer is [`BLUETOOTH_NO_SETTINGS`], the sentence the Peripherals view
-    /// shows in place of the settings (#566).
+    /// On a connection with no settings the answer is the sentence the Peripherals view shows in
+    /// place of them ([`BLUETOOTH_NO_SETTINGS`], [`DINPUT_NO_SETTINGS`]).
     fn not_connected(&self) -> AdapterError {
-        match self.personality {
-            Some(Personality::DInput) => refuse(
-                "the DInput personality has no vendor channel (the receiver's DInput descriptor \
-                 has no 0x81 output report, research 5.1), so the profile image cannot be read",
-            ),
-            Some(Personality::Bluetooth) => refuse(BLUETOOTH_NO_SETTINGS),
-            Some(Personality::Idle) => refuse(
-                "the receiver is idle: no controller is linked, so it cannot answer the profile \
-                 read",
-            ),
+        match (self.unavailable, self.personality) {
+            (Some(why), _) => refuse(why),
+            (None, Some(Personality::Idle)) => refuse(RECEIVER_IDLE),
             _ => AdapterError::NotConnected,
         }
     }
@@ -1519,29 +1632,35 @@ impl EightBitDoUltimate2 {
         self.check_id(device)?;
         if !self.writes_enabled {
             return Err(AdapterError::Unsupported(
-                "config writes are off: turn them on with set_writes_enabled(true) first",
+                "Changes are turned off for this controller. Turn Change on, then try again.",
             ));
         }
         if props.is_empty() {
             return Ok(());
         }
+        // A pad that moved to Bluetooth since it was opened still has the old vendor handle and
+        // the old profile image: rebind first, as a read does, so a write is never planned from
+        // that image nor sent on a channel the pad left (#566). A connection with no settings is
+        // refused in words, before anything else.
+        self.rebind_if_personality_changed().await?;
+        if let Some(why) = self.unavailable {
+            return Err(refuse(why));
+        }
         let schema = self.schema();
         for (key, value) in props {
             let Some(def) = schema.property(key) else {
-                return Err(refuse(format!("the pad has no setting called {key}")));
+                return Err(refuse(
+                    "This controller has no setting with that name. Pick one the page offers.",
+                ));
             };
             if !schema.is_writable(key) {
-                return Err(refuse(format!("{key} is read-only: {}", read_only_reason(key))));
+                return Err(refuse(format!(
+                    "{} cannot be changed. {}",
+                    def.label,
+                    read_only_reason(key)
+                )));
             }
             check_value(def, value)?;
-        }
-        // A pad that moved to Bluetooth since it was opened still has the old vendor handle and
-        // the old profile image: rebind first, as a read does, so a write is never planned from
-        // that image nor sent on a channel the pad left (#566). Over Bluetooth it is refused in
-        // words, before anything else.
-        self.rebind_if_personality_changed().await?;
-        if self.personality == Some(Personality::Bluetooth) {
-            return Err(refuse(BLUETOOTH_NO_SETTINGS));
         }
         self.check_writable_profile(props)?;
         let packets = self.plan(props)?;
@@ -1558,9 +1677,13 @@ impl EightBitDoUltimate2 {
         let Some(result) = result else {
             return Err(self.not_connected());
         };
-        // A session that went wrong may have sent chunks: it is an I/O failure for the caller,
-        // which then treats the pad as changed by an unknown amount.
-        result.map_err(|e| AdapterError::Io(std::io::Error::other(e.to_string())))
+        // A session that went wrong may have sent chunks. Keep the sentence written for the
+        // person (#572): the hub still treats it as a link failure (and drops what it kept),
+        // but the API now answers with these words instead of "the device stopped answering".
+        result.map_err(|e| match e {
+            AdapterError::Protocol(message) => crate::write_failure::write_failure(message),
+            other => other,
+        })
     }
 
     /// The pad applies the map of the profile it is on, so only that profile's paddles are
@@ -1575,8 +1698,8 @@ impl EightBitDoUltimate2 {
             let Some((profile, _)) = paddle_slot(key) else { continue };
             if profile != active {
                 return Err(refuse(format!(
-                    "{key} belongs to profile {}, but the pad is on profile {}: only the active \
-                     profile's paddles are written",
+                    "That button belongs to profile {}, but the controller is on profile {}. Only \
+                     the active profile's extra buttons can be changed.",
                     profile + 1,
                     active + 1
                 )));
@@ -1585,36 +1708,50 @@ impl EightBitDoUltimate2 {
         Ok(())
     }
 
+    /// The label a person knows a setting by, for the messages about their changes (#572).
+    fn label_of(&self, key: &str) -> String {
+        self.schema()
+            .property(key)
+            .map(|def| def.label.clone())
+            .unwrap_or_else(|| "This setting".to_string())
+    }
+
     /// The packets a batch of changes needs: one field write per record or map entry, then the
     /// commit.
     fn plan(&self, props: &Props) -> Result<Vec<Vec<u8>>, AdapterError> {
         let Some(image) = self.image.as_ref() else {
-            return Err(refuse("the profile has not been read yet; read the device first"));
+            return Err(refuse(
+                "The settings have not been read yet. Press Read again, then make the change.",
+            ));
         };
         let mut records: Vec<(usize, Vec<u8>)> = Vec::new();
         for (key, value) in props {
             if let Some((profile, slot)) = paddle_slot(key) {
                 let PropValue::Choice(target) = value else {
-                    return Err(refuse(format!("{key} does not take that kind of value")));
+                    return Err(wrong_kind(&self.label_of(key)));
                 };
                 let (at, entry) = codec::patched_map_entry(image, profile, slot, target)
-                    .map_err(refuse)?;
+                    .map_err(|why| {
+                        tracing::warn!("the button map entry could not be built: {why}");
+                        refuse("canvas-rgb cannot give a button that action, so nothing was changed. Pick another one.")
+                    })?;
                 if !records.iter().any(|(a, _)| *a == at) {
                     records.push((at, entry));
                 }
                 continue;
             }
             let PropValue::Number(n) = value else {
-                return Err(refuse(format!("{key} does not take that kind of value")));
+                return Err(wrong_kind(&self.label_of(key)));
             };
-            let (at, record) = codec::patched_record(image, key, *n).map_err(refuse)?;
+            let (at, record) =
+                codec::patched_record(image, key, *n).map_err(not_in_profile)?;
             if !records.iter().any(|(a, _)| *a == at) {
                 records.push((at, record));
             }
         }
         let mut packets = Vec::new();
         for (at, record) in &records {
-            packets.push(codec::write_request(*at, record).map_err(refuse)?);
+            packets.push(codec::write_request(*at, record).map_err(not_in_profile)?);
         }
         packets.push(codec::commit_request());
         Ok(packets)
@@ -1775,20 +1912,13 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
         if self.vendor.is_open() || self.gamepad.is_some() {
             return Ok(());
         }
-        let opener = self.opener.clone();
-        let personalities = tokio::task::spawn_blocking(move || opener.personalities())
-            .await
-            .map_err(join_error)?;
-        let Some(personality) = personalities.first().copied() else {
-            self.vendor.set_pad_present(false);
+        let Some(personality) = self.look().await? else {
             return Err(AdapterError::NotConnected);
         };
-        self.personality = Some(personality);
-        self.vendor.set_pad_present(personality == Personality::XInput);
         let opener = self.opener.clone();
         let (vendor, gamepad) = tokio::task::spawn_blocking(move || {
-            let vendor = opener.open_vendor(personality).map_err(AdapterError::Protocol)?;
-            let gamepad = opener.open_gamepad(personality).map_err(AdapterError::Protocol)?;
+            let vendor = opener.open_vendor(personality).map_err(not_opened)?;
+            let gamepad = opener.open_gamepad(personality).map_err(not_opened)?;
             Ok::<_, AdapterError>((vendor, gamepad))
         })
         .await
@@ -1819,16 +1949,9 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
     }
 
     async fn discover(&mut self) -> Result<Vec<PeripheralInfo>, AdapterError> {
-        let opener = self.opener.clone();
-        let personalities = tokio::task::spawn_blocking(move || opener.personalities())
-            .await
-            .map_err(join_error)?;
-        let Some(personality) = personalities.first().copied() else {
-            self.vendor.set_pad_present(false);
+        if self.look().await?.is_none() {
             return Ok(Vec::new());
-        };
-        self.personality = Some(personality);
-        self.vendor.set_pad_present(personality == Personality::XInput);
+        }
         Ok(vec![self.info()])
     }
 
@@ -2401,9 +2524,12 @@ mod tests {
     #[test]
     fn a_bluetooth_path_carries_the_hid_service_guid_566() {
         // The interface path Windows gives the pad's HID-over-GATT collection, and a cable's.
-        let ble = br"\?\hid#{00001812-0000-1000-8000-00805f9b34fb}_dev_vid&022dc8_pid&6012_rev&0001_e417d8b9f404#b&2a97c917&0&000f#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let ble = br"\?\hid#{00001812-0000-1000-8000-00805f9b34fb}_dev_vid&022dc8_pid&6012_rev&0001_000000000000#b&0000000&0&000f#{4d1e55b2-f16f-11cf-88cb-001111000030}";
         let upper = br"\?\HID#{00001812-0000-1000-8000-00805F9B34FB}_Dev_VID&022dc8_PID&6012";
         let cable = br"\?\hid#vid_2dc8&pid_6012&mi_00#8&1234&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        // The shape hidapi listed for a real pad (the Bluetooth address and instance are made up).
+        let listed = br"\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&122dc8_PID&6012_REV&0001_000000000000#c&0000000&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        assert!(is_bluetooth_path(listed));
         assert!(is_bluetooth_path(ble));
         assert!(is_bluetooth_path(upper), "the match ignores case");
         assert!(!is_bluetooth_path(cable));
@@ -2443,6 +2569,72 @@ mod tests {
         let err = a.write_settings(&id, &number(&[("profile-1-stick-left-start", 20.0)])).await.unwrap_err();
         assert!(matches!(&err, AdapterError::Protocol(m) if m == BLUETOOTH_NO_SETTINGS), "{err:?}");
         assert_eq!(s.lock().unwrap().sent.len(), sent_before, "nothing goes out on the old channel");
+    }
+
+    /// Words only a developer understands: no message a person reads may carry them.
+    fn plain(message: &str) {
+        let lower = message.to_ascii_lowercase();
+        for word in ["research", "descriptor", "0x", "vendor channel", "personality", "report", "chunk", "hid"] {
+            assert!(!lower.contains(word), "{word:?} in {message:?}");
+        }
+    }
+
+    /// A connection that carries no settings offers none: the editor draws no control for it and
+    /// does not promise a later read. The DInput arm is the pad on the receiver, where no vendor
+    /// collection exists.
+    #[tokio::test]
+    async fn a_connection_with_no_settings_offers_none_and_says_why_in_plain_words() {
+        for personality in [Personality::Bluetooth, Personality::DInput] {
+            let (mut a, s) = rig();
+            a.set_writes_enabled(true);
+            s.lock().unwrap().personalities = vec![personality];
+            a.discover().await.unwrap();
+            let id = a.device_id();
+            let schema = a.describe(&id).await.unwrap();
+            assert!(schema.sections.is_empty(), "{personality:?}: {:?}", schema.sections);
+
+            a.connect().await.unwrap();
+            let AdapterError::Protocol(read) = a.read_settings(&id).await.unwrap_err() else {
+                panic!("{personality:?}: the read is refused in words");
+            };
+            plain(&read);
+            assert!(read.contains("2.4G receiver"), "it says what to do: {read}");
+            let AdapterError::Protocol(write) = a
+                .write_settings(&id, &number(&[("profile-1-stick-left-start", 20.0)]))
+                .await
+                .unwrap_err()
+            else {
+                panic!("{personality:?}: the write is refused in words");
+            };
+            assert_eq!(write, read);
+            assert!(s.lock().unwrap().sent.is_empty(), "nothing is sent to the pad");
+
+            // Back on the receiver in XInput the settings are offered again.
+            s.lock().unwrap().personalities = vec![Personality::XInput];
+            a.discover().await.unwrap();
+            assert!(!a.describe(&id).await.unwrap().sections.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pad_that_stays_silent_is_reported_in_plain_words() {
+        for personality in [Personality::XInput, Personality::Idle] {
+            let (mut a, s) = rig();
+            s.lock().unwrap().personalities = vec![personality];
+            s.lock().unwrap().image = Vec::new();
+            a.connect().await.unwrap();
+            let AdapterError::Protocol(message) = a.read_settings(&a.device_id()).await.unwrap_err()
+            else {
+                panic!("a silent pad keeps its handle");
+            };
+            plain(&message);
+            assert!(message.contains("Read again"), "{message}");
+            assert_eq!(
+                message.contains("no controller is linked"),
+                personality == Personality::Idle,
+                "{message}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2564,7 +2756,7 @@ mod tests {
             .write_settings(&a.device_id(), &number(&[("profile-1-stick-left-start", 20.0)]))
             .await
             .unwrap_err();
-        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("read the device first")), "{err:?}");
+        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("Press Read again")), "{err:?}");
         assert_eq!(s.lock().unwrap().sent.len(), before);
     }
 
@@ -2580,7 +2772,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting called")),
+            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting with that name")),
             "{err:?}"
         );
         let err = a
@@ -2588,10 +2780,39 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting called")),
+            matches!(&err, AdapterError::Protocol(m) if m.contains("no setting with that name")),
             "{err:?}"
         );
         assert_eq!(s.lock().unwrap().sent.len(), before);
+    }
+
+    /// #572: a refusal a person reads names what they can pick, not the schema's internal key.
+    #[tokio::test]
+    async fn a_refused_change_is_in_plain_words_on_the_fake_pad() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        a.read_settings(&a.device_id()).await.unwrap();
+        a.set_writes_enabled(true);
+        let before = s.lock().unwrap().sent.len();
+        let err = a
+            .write_settings(&a.device_id(), &number(&[("profile-3-paddle-1", 20.0)]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert!(message.starts_with(char::is_uppercase), "{message}");
+        assert!(!message.contains("profile-"), "{message}");
+        assert!(message.contains("Paddle 1 (P1)"), "{message}");
+        assert!(message.contains("Pick another value"), "{message}");
+
+        let err = a
+            .write_settings(&a.device_id(), &number(&[("profile-9-paddle-1", 20.0)]))
+            .await
+            .unwrap_err();
+        let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
+        assert!(message.starts_with(char::is_uppercase), "{message}");
+        assert!(!message.contains("profile-"), "{message}");
+        assert!(message.contains("Pick one the page offers"), "{message}");
+        assert_eq!(s.lock().unwrap().sent.len(), before, "nothing reaches the pad");
     }
 
     #[tokio::test]
@@ -2610,7 +2831,7 @@ mod tests {
                 .write_settings(&a.device_id(), &Props::from([(key.to_string(), value)]))
                 .await
                 .unwrap_err();
-            assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("read-only")), "{key}: {err:?}");
+            assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("cannot be changed")), "{key}: {err:?}");
         }
         assert_eq!(s.lock().unwrap().sent.len(), before);
     }
@@ -2786,7 +3007,7 @@ mod tests {
             .write_settings(&a.device_id(), &choice(&[("profile-3-paddle-1", "other")]))
             .await
             .unwrap_err();
-        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("not a target")), "{err:?}");
+        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("cannot give a button that action")), "{err:?}");
         assert_eq!(s.lock().unwrap().sent.len(), before);
     }
 
@@ -2847,7 +3068,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Io(m) if m.to_string().contains("wrong") && m.to_string().contains("request word 2")),
+            matches!(&err, AdapterError::Io(m) if m.to_string().contains("unexpected answer") && m.to_string().contains("Press Read again")),
             "{err:?}"
         );
         let sent = s.lock().unwrap().sent[before..].to_vec();
@@ -2866,7 +3087,7 @@ mod tests {
             .write_settings(&a.device_id(), &choice(&[("profile-3-paddle-1", "a")]))
             .await
             .unwrap_err();
-        assert!(matches!(&err, AdapterError::Io(m) if m.to_string().contains("did not reply")), "{err:?}");
+        assert!(matches!(&err, AdapterError::Io(m) if m.to_string().contains("did not answer the change")), "{err:?}");
         let sent = s.lock().unwrap().sent[before..].to_vec();
         assert_eq!(sent.len(), 3);
         assert_eq!(sent[2], codec::report_state_request(1));
@@ -2884,7 +3105,7 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(&err, AdapterError::Io(m) if m.to_string().contains("commit") && m.to_string().contains("uncommitted")),
+                matches!(&err, AdapterError::Io(m) if m.to_string().contains("partly on the controller") && m.to_string().contains("Press Read again")),
                 "{err:?}"
             );
             let sent = s.lock().unwrap().sent[before..].to_vec();
@@ -2937,6 +3158,7 @@ mod tests {
         static STALE_OPENS: Cell<u32> = const { Cell::new(0) };
         static PLUGGED: Cell<bool> = const { Cell::new(true) };
         static ON_BLUETOOTH: Cell<bool> = const { Cell::new(false) };
+        static NO_VENDOR_PAGE: Cell<bool> = const { Cell::new(false) };
     }
 
     struct CountingApi {
@@ -2975,8 +3197,9 @@ mod tests {
     }
 
     impl HidSource for CountingApi {
-        fn find_path(&self, product_id: u16, _page: u16, _usage: u16) -> Option<std::ffi::CString> {
-            (self.plugged && product_id == PRODUCT_ID_DINPUT)
+        fn find_path(&self, product_id: u16, page: u16, _usage: u16) -> Option<std::ffi::CString> {
+            let hidden = page == VENDOR_USAGE_PAGE_XINPUT && NO_VENDOR_PAGE.with(Cell::get);
+            (self.plugged && product_id == PRODUCT_ID_DINPUT && !hidden)
                 .then(|| std::ffi::CString::new("fake/8bitdo").unwrap())
         }
 
@@ -3031,6 +3254,18 @@ mod tests {
         assert_eq!(o.personalities(), vec![Personality::Bluetooth]);
         assert!(o.open_vendor(Personality::Bluetooth).unwrap().is_none(), "no vendor channel over Bluetooth");
         assert!(o.open_gamepad(Personality::Bluetooth).unwrap().is_some(), "the gamepad collection opens");
+    }
+
+    #[test]
+    fn dinput_has_settings_only_where_a_vendor_collection_is_listed_572() {
+        let o = opener();
+        NO_VENDOR_PAGE.with(|s| s.set(false));
+        assert!(o.has_vendor(Personality::DInput), "a cable that lists the vendor page");
+        assert!(!o.has_vendor(Personality::Bluetooth));
+        NO_VENDOR_PAGE.with(|s| s.set(true));
+        let o = opener();
+        assert!(!o.has_vendor(Personality::DInput), "the receiver in DInput mode lists none");
+        NO_VENDOR_PAGE.with(|s| s.set(false));
     }
 
     #[test]
