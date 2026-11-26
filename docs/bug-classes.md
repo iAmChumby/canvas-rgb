@@ -387,7 +387,7 @@ or acts as if a step worked without checking that it did.
   after `Io` is asserted in `a_failed_read_drops_the_kept_values` (`tests/peripherals.rs`).
   Sibling search: the 8BitDo adapter already maps link failures to `Io` (`io_failure`); the
   ROYUAN keyboard (`royuan.rs`) and the CHIONE display (`chione.rs`) still report a failed HID
-  write as `Protocol`, filed as their own issue with this label.
+  write as `Protocol`: [#570](https://github.com/iAmChumby/canvas-rgb/issues/570).
 
 ### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away
 
