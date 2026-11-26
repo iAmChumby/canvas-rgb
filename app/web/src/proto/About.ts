@@ -3,7 +3,7 @@ import type { LastExit } from "./LastExit";
 
 /**
  * The facts Help & About shows and copies (#574). Every field is safe to share as it is: no
- * paths, user or machine names, serials or device ids. The editor scrubs again before copying.
+ * paths, user or machine names, serials or device ids.
  */
 export type About = { 
 /**
@@ -26,10 +26,6 @@ os?: string | null,
  * The service's version from its pipe `Hello`, when the service is connected.
  */
 service_version?: string | null, 
-/**
- * True when the daemon runs elevated (it should not).
- */
-elevated: boolean, 
 /**
  * How the previous run ended (#577).
  */

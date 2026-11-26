@@ -19,6 +19,9 @@ pub mod routes {
     pub const STATUS: &str = "/api/v1/status";
     /// The build and the PC it runs on, for Help & About (#574). Static while the daemon runs.
     pub const ABOUT: &str = "/api/v1/about";
+    /// The shareable report Help & About shows, copies and pre-fills (#574, #575). The daemon builds
+    /// and scrubs it, because only the daemon can read the user, machine and profile names to remove.
+    pub const ABOUT_REPORT: &str = "/api/v1/about/report";
     pub const OUTPUT: &str = "/api/v1/output";
     pub const DEVICES: &str = "/api/v1/devices";
     /// `PATCH` with [`super::PatchZone`].
@@ -313,6 +316,25 @@ pub enum LinkState {
     Down,
 }
 
+/// The text Help & About shows before it is copied, and the bug template fields Report issue fills
+/// (#574, #575). The daemon builds it from an allow-list and scrubs it last (profile path, user name,
+/// machine name, in every spelling), before any length cap. The editor shows and copies `markdown` as
+/// it is and never rebuilds it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AboutReport {
+    /// The whole report as GitHub Markdown: what the preview shows and Copy puts on the clipboard.
+    pub markdown: String,
+    /// The bug template's `version` field.
+    pub version: String,
+    /// The bug template's `windows` field.
+    pub windows: String,
+    /// The bug template's `hardware` field: one line per device, model-level only.
+    pub hardware: String,
+    /// The bug template's `other-rgb-apps` field.
+    pub other_rgb_apps: String,
+}
+
 /// How the daemon's previous run ended (#577). `Unknown` on a first run, or when the marker could not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -324,7 +346,7 @@ pub enum LastExit {
 }
 
 /// The facts Help & About shows and copies (#574). Every field is safe to share as it is: no
-/// paths, user or machine names, serials or device ids. The editor scrubs again before copying.
+/// paths, user or machine names, serials or device ids.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct About {
@@ -346,9 +368,6 @@ pub struct About {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub service_version: Option<String>,
-    /// True when the daemon runs elevated (it should not).
-    #[serde(default)]
-    pub elevated: bool,
     /// How the previous run ended (#577).
     pub last_exit: LastExit,
 }
