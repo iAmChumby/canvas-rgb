@@ -99,7 +99,7 @@
 //! The test mouse sleeps after half a minute (its own setting) and a sleeping mouse cannot be
 //! reached over the dongle: every read comes back with the grant refused (`0x00`), and the
 //! vendor app shows "Device Sleep!" and retries (research 3.3). That is not a protocol failure,
-//! so it gets its own error: [`ASLEEP`], "the mouse is asleep: move it and try again".
+//! so it gets its own error: [`ASLEEP`], "The mouse is asleep. Move it, then try again."
 //!
 //! Before it gives up, the adapter waits for the mouse to wake: it watches COL03 for the
 //! mouse's own events for up to five seconds (the vendor app's own retry budget per command)

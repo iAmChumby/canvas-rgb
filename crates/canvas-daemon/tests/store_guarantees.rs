@@ -387,7 +387,7 @@ async fn a_failed_peripheral_access_save_leaves_the_access_as_it_was() {
     let failed = send(&router, "PUT", &path, r#"{"reads":true,"writes":true}"#).await;
     assert_eq!(failed.0, StatusCode::INTERNAL_SERVER_ERROR, "{}", failed.1);
     assert!(
-        failed.1["message"].as_str().is_some_and(|m| m.starts_with("could not save the peripheral access:")),
+        failed.1["message"].as_str() == Some("The change could not be saved. Check the log for details."),
         "{}",
         failed.1
     );

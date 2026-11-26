@@ -116,7 +116,7 @@ function detail(id: string, info: typeof RECEIVER, withSettings: boolean): Perip
     access: { reads: true, writes: true },
     problem: withSettings ? null : WHY,
     read_at_ms: withSettings ? 1_700_000_000_000 : null,
-  } as PeripheralDetail;
+  } as unknown as PeripheralDetail;
 }
 
 const toggle = (name: string) => screen.getByRole("switch", { name }) as HTMLButtonElement;
