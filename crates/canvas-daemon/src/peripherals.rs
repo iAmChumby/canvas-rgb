@@ -29,6 +29,8 @@
 //! - through `?fresh=true`, the person's own **Read again** (the one stall they ask for);
 //! - in the background, and only after Windows reports no keyboard or mouse input for
 //!   [`PERIPHERAL_IDLE_READ_S`], when the kept values are missing or older than [`KEPT_STALE`].
+//!   An adapter can opt out with [`Peripheral::background_reads`]: the Attack Shark X6 does, so
+//!   it is read only by **Read again** (#567).
 //!
 //! A background read that fails waits (1 minute, doubling to 30) before the next try, so a
 //! mouse that is off or held by its vendor app is not polled every second. The wait ends when a
@@ -243,6 +245,13 @@ pub trait Peripheral: PeripheralAdapter + canvas_adapters::resume::ResumeBehavio
     /// read shows as one stage.
     fn set_read_sink(&mut self, _sink: Option<ReadSink>) {}
 
+    /// May the hub read this adapter's devices in the background, while the person is away
+    /// (#127)? An adapter whose device can be harmed by a read it did not ask for says no, and
+    /// its devices are read only when the person presses **Read again**.
+    fn background_reads(&self) -> bool {
+        true
+    }
+
     /// Writes the settings and returns the values the device holds for them afterwards. An
     /// adapter whose device changes keys it was not asked to (a mode that forces a brightness,
     /// a count that turns stages off) overrides this and returns those too, so the hub can keep
@@ -277,6 +286,14 @@ impl Peripheral for canvas_adapters::attack_shark_x6::AttackSharkX6 {
 
     fn set_read_sink(&mut self, sink: Option<ReadSink>) {
         AttackSharkX6::set_read_sink(self, sink);
+    }
+
+    /// No (#567). The background read lands on an idle mouse, and the person coming back wakes
+    /// it in the middle of the burst of feature requests: on 2026-11-26 the receiver answered
+    /// out of order and the mouse lost its link until the receiver was replugged. The person's
+    /// own **Read again** is the only read: they are at the mouse, so it is awake.
+    fn background_reads(&self) -> bool {
+        false
     }
 }
 
@@ -838,11 +855,12 @@ impl PeripheralHub {
     /// It returns how many devices were read. A read is abandoned before it starts when input
     /// arrived while an earlier device was being read. Nothing on the view-open path calls this.
     pub async fn refresh_idle(&self, devices: &[DeviceId]) -> usize {
-        let needed: Vec<DeviceId> = devices
+        let due: Vec<DeviceId> = devices
             .iter()
             .filter(|device| self.due_for_background_read(device))
             .cloned()
             .collect();
+        let needed = self.background_readable(due).await;
         if needed.is_empty() {
             return 0;
         }
@@ -868,6 +886,25 @@ impl PeripheralHub {
             }
         }
         read
+    }
+
+    /// The devices among these whose adapter allows background reads
+    /// ([`Peripheral::background_reads`]). A device no adapter owns is dropped too. Metadata
+    /// only: `describe` opens nothing.
+    pub async fn background_readable(&self, devices: Vec<DeviceId>) -> Vec<DeviceId> {
+        if devices.is_empty() {
+            return devices;
+        }
+        let mut adapters = self.adapters.lock().await;
+        let mut readable = Vec::with_capacity(devices.len());
+        for device in devices {
+            if let Ok((index, _)) = owner_of(&mut adapters, &device).await {
+                if adapters[index].background_reads() {
+                    readable.push(device);
+                }
+            }
+        }
+        readable
     }
 
     /// Writes the kept values to their file, when the hub has one. A failed save is a warning:
@@ -1111,8 +1148,11 @@ pub fn start_idle_refresh(app: Arc<App>) {
                     .map(|(id, _)| DeviceId(id.clone()))
                     .collect()
             };
-            let wanted: Vec<DeviceId> =
+            let due: Vec<DeviceId> =
                 saved.into_iter().filter(|id| app.peripherals.due_for_background_read(id)).collect();
+            // A device whose adapter opts out (the X6, #567) is never due: it is dropped here, so
+            // the loop does not enumerate every pass for a device it will not read.
+            let wanted = app.peripherals.background_readable(due).await;
             if wanted.is_empty() {
                 continue;
             }

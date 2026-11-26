@@ -658,6 +658,10 @@ enum ReadFailure {
     /// The receiver refused the read: it answered the grant with `0x00`. Every report refused
     /// this way means the mouse is asleep (research 3.3).
     Refused,
+    /// The HID call itself failed: the handle is dead (a replugged receiver gives os error
+    /// 1167, "the device is not connected"). The read is an [`AdapterError::Io`], so the hub
+    /// closes the device and the next read opens the receiver again (#568).
+    Transport(String),
     /// Anything else: the grant never came, the answer was malformed, the checksum failed.
     Other(String),
 }
@@ -669,7 +673,7 @@ impl ReadFailure {
             ReadFailure::Refused => {
                 "the receiver did not grant the read (answered 0x00): the mouse is asleep".into()
             }
-            ReadFailure::Other(why) => why.clone(),
+            ReadFailure::Transport(why) | ReadFailure::Other(why) => why.clone(),
         }
     }
 }
@@ -684,6 +688,8 @@ struct ReadPass {
     /// True when every report was refused the same way: the mouse answered every grant with
     /// `0x00`, which is what a sleeping mouse does.
     all_refused: bool,
+    /// True when a HID call failed: the handle is dead and the pass stopped there (#568).
+    transport_failed: bool,
 }
 
 /// Reads one report: request, grant, answer.
@@ -700,14 +706,14 @@ fn read_report(
         config
             .send_feature(&codec::read_request(kind))
             .map_err(|e| {
-                ReadFailure::Other(format!("the {} read request failed: {e}", kind.reply_id()))
+                ReadFailure::Transport(format!("the {} read request failed: {e}", kind.reply_id()))
             })?;
         std::thread::sleep(pace.grant_wait);
         let mut grant = [0u8; FEATURE_BUFFER_LEN];
         grant[0] = codec::GRANT_REPORT_ID;
         let n = config
             .get_feature(&mut grant)
-            .map_err(|e| ReadFailure::Other(format!("the {} grant read failed: {e}", kind.reply_id())))?;
+            .map_err(|e| ReadFailure::Transport(format!("the {} grant read failed: {e}", kind.reply_id())))?;
         if n < 2 || grant[0] != codec::GRANT_REPORT_ID {
             last = ReadFailure::Other(format!(
                 "the grant answer for {} is {n} bytes and does not start with the grant report id",
@@ -734,7 +740,7 @@ fn read_report(
         frame[0] = kind.rid();
         let n = config
             .get_feature(&mut frame)
-            .map_err(|e| ReadFailure::Other(format!("the {} read failed: {e}", kind.reply_id())))?;
+            .map_err(|e| ReadFailure::Transport(format!("the {} read failed: {e}", kind.reply_id())))?;
         match codec::check_reply(kind, &frame[..n.max(kind.reply_len())]) {
             Ok(()) => return Ok(frame.to_vec()),
             Err(why) => last = ReadFailure::Other(why),
@@ -763,8 +769,14 @@ fn read_all(config: &mut dyn FeatureTransport, pace: Pace, report: &dyn Fn(ReadP
                 if matches!(failure, ReadFailure::Refused) {
                     refused += 1;
                 }
-                if out.failure.is_none() {
+                let dead = matches!(failure, ReadFailure::Transport(_));
+                if out.failure.is_none() || dead {
                     out.failure = Some(failure);
+                }
+                // A dead handle answers nothing more: no further request is sent on it (#568).
+                if dead {
+                    out.transport_failed = true;
+                    break;
                 }
             }
         }
@@ -1431,7 +1443,7 @@ impl PeripheralAdapter for AttackSharkX6 {
                 }
             };
             let mut pass = read_all(&mut *config, pace, &report);
-            if pass.all_refused {
+            if pass.all_refused && !pass.transport_failed {
                 // Every read was refused: the mouse is asleep. Wait for it to wake (any movement
                 // wakes it) and read once more before giving up.
                 if let Some(events) = events.as_mut() {
@@ -1450,12 +1462,18 @@ impl PeripheralAdapter for AttackSharkX6 {
         .map_err(join_error)?;
         self.config = Some(config);
         self.events = events;
+        // A dead handle is a link failure, whatever came back before it: the hub closes the
+        // device on `Io` and the next read opens the receiver again (#568).
+        if let Some(ReadFailure::Transport(why)) = &pass.failure {
+            return Err(AdapterError::Io(std::io::Error::other(why.clone())));
+        }
         if pass.reports.is_empty() {
             return Err(match pass.failure {
                 // Every report was refused: the mouse is asleep. That is its own error, not a
                 // protocol failure, and the message is the instruction the user needs.
                 Some(ReadFailure::Refused) => refuse(ASLEEP),
-                Some(ReadFailure::Other(why)) => {
+                // A transport failure returned `Io` above; the arm only keeps the match whole.
+                Some(ReadFailure::Transport(why) | ReadFailure::Other(why)) => {
                     refuse(format!("the mouse answered none of the five read requests: {why}"))
                 }
                 None => refuse("the mouse answered none of the five read requests: no answer"),
@@ -1639,6 +1657,8 @@ mod tests {
         break_report: Option<u8>,
         /// Refuse every answer, the way a sleeping mouse does.
         silent: bool,
+        /// The receiver was replugged: every HID call on the old handle fails with os error 1167.
+        unplugged: bool,
         opens: u32,
         /// The status reports the fake hands over, in order.
         events: VecDeque<Vec<u8>>,
@@ -1651,6 +1671,9 @@ mod tests {
     impl FeatureTransport for FakeFeature {
         fn send_feature(&mut self, data: &[u8]) -> Result<(), String> {
             let mut s = self.0.lock().unwrap();
+            if s.unplugged {
+                return Err("HidD_SetFeature failed: The device is not connected. (os error 1167)".into());
+            }
             s.sent.push(data.to_vec());
             Ok(())
         }
@@ -2279,6 +2302,21 @@ mod tests {
         assert!(matches!(&err, AdapterError::Protocol(m) if m == ASLEEP), "{err:?}");
         // Two attempts per report.
         assert_eq!(s.lock().unwrap().sent.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn a_dead_handle_is_an_io_error_and_the_pass_stops_568() {
+        // 2026-11-25: after a replug every request failed with os error 1167 for 17 hours,
+        // because the failure came back as a protocol refusal and the hub never reopened.
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        s.lock().unwrap().unplugged = true;
+        let err = a.read_settings(&a.device_id()).await.unwrap_err();
+        assert!(
+            matches!(&err, AdapterError::Io(e) if e.to_string().contains("os error 1167")),
+            "{err:?}: a dead handle must be Io so the hub closes and reopens the device"
+        );
+        assert!(s.lock().unwrap().sent.is_empty(), "nothing reached the dead handle");
     }
 
     // -------------------------------------------------------------------------- the sleeping mouse
