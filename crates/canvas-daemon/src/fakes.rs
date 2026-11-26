@@ -390,6 +390,9 @@ pub struct FakePeripheral {
     values: canvas_proto::props::Props,
     connected: bool,
     writes_enabled: bool,
+    /// What the real adapter answers to `background_reads`, so fakes mode reads the fake mouse
+    /// exactly when the daemon would read the real one (#567).
+    background_reads: bool,
 }
 
 impl FakePeripheral {
@@ -403,19 +406,23 @@ impl FakePeripheral {
         // Marked like the fake display, so a screenshot is never mistaken for the real device.
         info.name = format!("{} (fake)", info.name);
         let values = schema.properties().map(|def| (def.key.clone(), def.kind.default_value())).collect();
-        Self { name, info, schema, values, connected: false, writes_enabled: false }
+        Self { name, info, schema, values, connected: false, writes_enabled: false, background_reads: true }
     }
 
     /// The fake mouse, shaped like the Attack Shark X6.
     pub fn mouse() -> Self {
         let adapter = canvas_adapters::attack_shark_x6::AttackSharkX6::new();
-        Self::from_adapter("fake-attack-shark-x6", adapter.info(), adapter.schema())
+        let mut fake = Self::from_adapter("fake-attack-shark-x6", adapter.info(), adapter.schema());
+        fake.background_reads = crate::peripherals::Peripheral::background_reads(&adapter);
+        fake
     }
 
     /// The fake controller, shaped like the 8BitDo Ultimate 2.
     pub fn controller() -> Self {
         let adapter = canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::new();
-        Self::from_adapter("fake-eightbitdo-ultimate-2", adapter.info(), adapter.schema())
+        let mut fake = Self::from_adapter("fake-eightbitdo-ultimate-2", adapter.info(), adapter.schema());
+        fake.background_reads = crate::peripherals::Peripheral::background_reads(&adapter);
+        fake
     }
 
     fn check_id(&self, device: &canvas_proto::device::DeviceId) -> Result<(), canvas_proto::traits::AdapterError> {
@@ -570,6 +577,10 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
 impl crate::peripherals::Peripheral for FakePeripheral {
     fn set_config_writes(&mut self, on: bool) {
         self.writes_enabled = on;
+    }
+
+    fn background_reads(&self) -> bool {
+        self.background_reads
     }
 }
 

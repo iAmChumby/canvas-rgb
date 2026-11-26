@@ -1161,9 +1161,12 @@ async fn a_failed_read_drops_the_kept_values() {
     call(&router, "GET", &format!("{path}?fresh=true")).await;
     assert_eq!(fake.log().reads, 1);
     fake.0.lock().unwrap().fail_read = 1;
+    let (connects, disconnects) = (fake.log().connects, fake.log().disconnects);
     let failed = json(call(&router, "GET", &format!("{path}?fresh=true")).await).await;
     assert!(failed.get("problem").and_then(|v| v.as_str()).is_some(), "the failure is reported");
     assert_eq!(fake.log().reads, 2);
+    // #568: an Io failure closes the device, so the next read opens it again.
+    assert_eq!(fake.log().disconnects, disconnects + 1, "an Io read failure closes the device");
     let again = json(call(&router, "GET", &path).await).await;
     assert_eq!(fake.log().reads, 2, "nothing was kept, and the plain GET still reads nothing");
     assert!(
@@ -1173,6 +1176,7 @@ async fn a_failed_read_drops_the_kept_values() {
     let fresh = json(call(&router, "GET", &format!("{path}?fresh=true")).await).await;
     assert_eq!(fake.log().reads, 3, "Read again reads");
     assert_eq!(fresh.get("problem"), Some(&serde_json::Value::Null));
+    assert_eq!(fake.log().connects, connects + 1, "the read after the failure opened the device again");
 }
 
 
