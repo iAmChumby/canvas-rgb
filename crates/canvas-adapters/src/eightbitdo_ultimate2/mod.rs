@@ -982,7 +982,7 @@ fn await_ack(
         });
     }
     tracing::warn!(what, "the pad sent no acknowledgement");
-    refuse("The controller did not answer the change. Press Read again to see what it holds.")
+    Err(refuse("The controller did not answer the change. Press Read again to see what it holds."))
 }
 
 /// Throws away anything the pad has already queued (a late answer to `Reportstate`), so it
@@ -3064,7 +3064,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Io(m) if m.to_string().contains("wrong") && m.to_string().contains("request word 2")),
+            matches!(&err, AdapterError::Io(m) if m.to_string().contains("unexpected answer") && m.to_string().contains("Press Read again")),
             "{err:?}"
         );
         let sent = s.lock().unwrap().sent[before..].to_vec();
@@ -3083,7 +3083,7 @@ mod tests {
             .write_settings(&a.device_id(), &choice(&[("profile-3-paddle-1", "a")]))
             .await
             .unwrap_err();
-        assert!(matches!(&err, AdapterError::Io(m) if m.to_string().contains("did not reply")), "{err:?}");
+        assert!(matches!(&err, AdapterError::Io(m) if m.to_string().contains("did not answer the change")), "{err:?}");
         let sent = s.lock().unwrap().sent[before..].to_vec();
         assert_eq!(sent.len(), 3);
         assert_eq!(sent[2], codec::report_state_request(1));
@@ -3101,7 +3101,7 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(&err, AdapterError::Io(m) if m.to_string().contains("commit") && m.to_string().contains("uncommitted")),
+                matches!(&err, AdapterError::Io(m) if m.to_string().contains("partly on the controller") && m.to_string().contains("Press Read again")),
                 "{err:?}"
             );
             let sent = s.lock().unwrap().sent[before..].to_vec();

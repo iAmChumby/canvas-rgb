@@ -1226,7 +1226,7 @@ mod tests {
         let id = ring_device_id();
         r.pad.silence_commits();
         let err = r.adapter.write_frame(&id, &solid(0, 0, 255)).await.unwrap_err();
-        assert!(err.to_string().contains("commit"), "{err}");
+        assert!(err.to_string().contains("partly on the controller"), "{err}");
         assert!(!r.adapter.status().complete, "the rings may be partly written");
         let stored = r.store.saved().unwrap();
         assert_eq!(stored.picture, None, "no hash is kept for a write that did not finish");

@@ -2463,7 +2463,7 @@ mod tests {
             "{err:?}: the asleep error is its own message"
         );
         // The message is the instruction, and nothing else.
-        assert_eq!(ASLEEP, "the mouse is asleep: move it and try again");
+        assert_eq!(ASLEEP, "The mouse is asleep. Move it, then try again.");
     }
 
     #[tokio::test]
@@ -2824,7 +2824,6 @@ mod tests {
         let (mut a, s) = rig();
         a.connect().await.unwrap();
         a.set_writes_enabled(true);
-        let before = s.lock().unwrap().sent.len();
 
         // DPI has not been read at all.
         let err = a
@@ -2863,9 +2862,15 @@ mod tests {
             .unwrap_err();
         let AdapterError::Protocol(message) = &err else { panic!("a refusal: {err:?}") };
         assert!(!message.contains("sparkle"), "{message}");
+        assert!(message.contains("Pick one the page offers"), "{message}");
+        // The plan's own arm carries the same plain words if it is reached directly.
+        let Err(err) = a.plan(&choice(&[("led-mode", "sparkle")])) else { panic!("a refusal was expected") };
+        let AdapterError::Protocol(message) = err else { panic!("a refusal: {err:?}") };
+        assert!(!message.contains("sparkle"), "{message}");
         assert!(message.contains("Pick a mode the page offers"), "{message}");
 
         // A brightness in a mode that ignores it: no debug-quoted mode name.
+        let before = s.lock().unwrap().sent.len();
         let err = a
             .write_settings(
                 &a.device_id(),
