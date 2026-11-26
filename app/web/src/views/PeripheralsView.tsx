@@ -290,8 +290,9 @@ export function PeripheralsView() {
   const listed = selectedId ? (list?.find((row) => row.id === selectedId) ?? null) : null;
   const connection = listed ? connectionKey(listed) : null;
   const detailKey = selectedId === null ? null : `${selectedId}\u0000${connection ?? ""}`;
-  const fresh =
-    loaded && loaded.id === selectedId && loaded.key === detailKey ? loaded.detail : null;
+  // A detail this page fetched is authoritative even when the list row is a tick behind it:
+  // the no-settings poll can land a connection change before the next list refresh (#572).
+  const fresh = loaded && loaded.id === selectedId ? loaded.detail : null;
   const kept =
     selectedId !== null && listed ? (lastRead.get(cacheKey(selectedId, listed)) ?? null) : null;
   // The connection changed while this page was open and no answer for it has landed. Show the
@@ -315,6 +316,9 @@ export function PeripheralsView() {
   // The number of the read that is on its way. An answer that is older than the newest one is
   // dropped: a slow reload of one device must not put its error on another.
   const detailRequest = useRef(0);
+  // The connection the last detail fetch was for. A new one drops the detail on screen, so a
+  // pad that moved while the page was open cannot keep the earlier connection's sections (#572).
+  const fetchedKey = useRef<string | null>(null);
 
   // A Read again that is out: a second press while it runs is the same read, not another one.
   const rereading = useRef(false);
@@ -447,6 +451,8 @@ export function PeripheralsView() {
     // id alone is not enough for a pad that moves to Bluetooth while the page is open (#572).
     // The counter drops an answer that belongs to a device that is no longer the one on screen:
     // a slow reload of one device must not put its error on another.
+    if (fetchedKey.current !== null && fetchedKey.current !== detailKey) setLoaded(null);
+    fetchedKey.current = detailKey;
     const n = ++detailRequest.current;
     const id = selectedId;
     let stop = false;
