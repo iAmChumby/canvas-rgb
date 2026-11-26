@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-26
+
 ### Added
 
 - Peripherals: the 8BitDo Ultimate 2 is recognised over Bluetooth. The Peripherals view names it "(Bluetooth)" and shows its battery while its reads are on. Its profiles, button map and stick ranges can be changed only through the 2.4G receiver or a USB cable, and the read's message now says that in plain words. (#566)
@@ -491,7 +493,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.17.0...v0.18.0
