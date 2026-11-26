@@ -330,18 +330,18 @@ button.chip::before,
   background-color: var(--on-accent);
 }
 
-/* A switch that cannot be switched looks it (#572): faded, flat, and no hover answer. */
-.switch:disabled {
+/* A peripheral switch that cannot be switched looks it (#572): faded, flat, no hover answer. */
+.rd-peri-toggle .switch:disabled {
   cursor: not-allowed;
   opacity: 0.4;
   box-shadow: none;
 }
 
-.switch:disabled:hover {
+.rd-peri-toggle .switch:disabled:hover {
   border-color: var(--line);
 }
 
-.switch:disabled::after {
+.rd-peri-toggle .switch:disabled::after {
   box-shadow: none;
 }
 
