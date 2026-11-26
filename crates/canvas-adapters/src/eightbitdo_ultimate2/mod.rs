@@ -2498,7 +2498,7 @@ mod tests {
         let upper = br"\?\HID#{00001812-0000-1000-8000-00805F9B34FB}_Dev_VID&022dc8_PID&6012";
         let cable = br"\?\hid#vid_2dc8&pid_6012&mi_00#8&1234&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
         // The shape hidapi listed for a real pad (the Bluetooth address and instance are made up).
-        let listed = br"\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&122dc8_PID&6012_REV&0001_000000000000#c&0000000&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let listed = br"\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&122dc8_PID&6012_REV&0001_000000000000#c&0000000&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
         assert!(is_bluetooth_path(listed));
         assert!(is_bluetooth_path(ble));
         assert!(is_bluetooth_path(upper), "the match ignores case");
