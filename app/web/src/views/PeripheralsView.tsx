@@ -11,6 +11,7 @@ import {
   GameController,
   Keyboard,
   Mouse,
+  Prohibit,
 } from "@phosphor-icons/react";
 import { Button, Swap } from "@/components/Button";
 import { Chip } from "@/components/Chip";
@@ -127,7 +128,21 @@ function remember(id: string, detail: PeripheralDetail): void {
   else lastRead.set(id, detail);
 }
 
-/** How often the page asks again, in the "Not read yet" state. A plain GET never touches the device. */
+/** True on a connection that carries no settings: the daemon describes no section for it. */
+function hasNoSettings(detail: PeripheralDetail): boolean {
+  return detail.schema.sections.length === 0;
+}
+
+/**
+ * What the page is waiting to see change, or null when it is not waiting: values the daemon has
+ * not read yet, or a connection with no settings, which the device can leave at any time.
+ */
+function waitingFor(detail: PeripheralDetail): string | null {
+  if (hasNoSettings(detail)) return `no-settings:${detail.info.name}:${detail.problem ?? ""}`;
+  return isUnread(detail) && detail.problem === NOT_READ_YET_PROBLEM ? "unread" : null;
+}
+
+/** How often the page asks again while it waits. A plain GET never touches the device. */
 export const UNREAD_POLL_MS = 5000;
 
 /** The clock, ticking every `everyMs`, so "Read 3 min ago" moves on by itself. */
@@ -398,10 +413,11 @@ export function PeripheralsView() {
   // away. The page asks again every few seconds with a plain GET (it never touches the device)
   // and stops when values arrive, the device changes or the page goes away (#127).
   // Only while the daemon itself says it has not read the device yet: after a failed Read again
-  // the page shows the error and does not poll.
-  const awaitingIdleRead = detail !== null && isUnread(detail) && detail.problem === NOT_READ_YET_PROBLEM;
+  // the page shows the error and does not poll. A connection with no settings is asked about the
+  // same way, so the page follows the device to one that has them.
+  const awaiting = detail === null ? null : waitingFor(detail);
   useEffect(() => {
-    if (!selectedId || !awaitingIdleRead) return;
+    if (!selectedId || awaiting === null) return;
     const id = selectedId;
     let stop = false;
     const timer = setInterval(() => {
@@ -410,7 +426,7 @@ export function PeripheralsView() {
       api
         .peripheral(id)
         .then((d) => {
-          if (stop || (isUnread(d) && d.problem === NOT_READ_YET_PROBLEM)) return;
+          if (stop || waitingFor(d) === awaiting) return;
           remember(id, d);
           setLoaded({ id, detail: d });
           dropUnreadEdits(id, d);
@@ -424,7 +440,7 @@ export function PeripheralsView() {
       stop = true;
       clearInterval(timer);
     };
-  }, [selectedId, awaitingIdleRead, dropUnreadEdits]);
+  }, [selectedId, awaiting, dropUnreadEdits]);
 
   // An edit for a key the latest read did not carry is dropped, not shown as read (#276): the
   // page offers no control for an unread setting, so the edit can only be left from an earlier
@@ -710,20 +726,28 @@ function PeripheralDetail({
   const reads = detail.access.reads;
   const isController = detail.schema.kind === "game_controller";
   const isMouse = detail.schema.kind === "mouse";
+  // No settings on this connection: one frame says why, in the daemon's words, and nothing that
+  // reads or changes a setting can be pressed. The saved access is left as it is.
+  const noSettings = hasNoSettings(detail);
   // Nothing was read yet: a frame that says so replaces the controls (no setting is made up).
-  const unread = isUnread(detail);
+  const unread = !noSettings && isUnread(detail);
   // Reads off: the daemon has read nothing and will read nothing until Read is turned on, so the
   // controls have no values to show and stand behind a frame that says what reading does (#264).
-  const readsOff = !reads;
-  const showsSettings = !unread && !readsOff;
+  const readsOff = !noSettings && !reads;
+  const showsSettings = !noSettings && !unread && !readsOff;
   const noun = nounOf(info.kind);
   // The "Read again" tooltip (#374). Only the mouse's read is known to hitch: it is five report
   // exchanges with the pointer's own reports among them. The pad's read is 36 chunks of its
   // profile image with no pointer in it, so the pad's tooltip promises the read and no more
   // (#387).
-  const readAgainWords = isMouse
+  const readAgainWords = noSettings
+    ? `The ${noun}'s settings cannot be read over this connection.`
+    : isMouse
     ? `Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself. The ${noun} may stutter briefly while it reads.`
     : `Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself.`;
+  const readWords = noSettings
+    ? `Opens the ${noun}. Its settings cannot be read over this connection.`
+    : `Opens the ${noun} and asks for its settings. It changes nothing on the ${noun}.`;
   const nowMs = useNowMs(30_000);
   const readAt = detail.read_at_ms == null ? null : Number(detail.read_at_ms);
   const ago = readAt === null ? null : readAgo(readAt, nowMs);
@@ -822,8 +846,8 @@ function PeripheralDetail({
             <span
               className="rd-peri-readat"
               data-role="read-at"
-              data-stale={reads && ago?.stale ? "true" : "false"}
-              data-empty={reads && (ago || unread) ? "false" : "true"}
+              data-stale={!noSettings && reads && ago?.stale ? "true" : "false"}
+              data-empty={!noSettings && reads && (ago || unread) ? "false" : "true"}
             >
               {/* The third wording is never shown: it holds the width of the longest one. */}
               <Swap
@@ -832,7 +856,7 @@ function PeripheralDetail({
                 shown={reads && ago ? ago.text : undefined}
               />
             </span>
-            <Tooltip label={`Opens the ${noun} and asks for its settings. It changes nothing on the ${noun}.`} className="rd-peri-tip">
+            <Tooltip label={readWords} className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Read</span>
                 <Toggle
@@ -862,32 +886,52 @@ function PeripheralDetail({
                   size="sm"
                   variant={unread ? "primary" : "default"}
                   icon={<ArrowsClockwise size={16} />}
-                  disabled={!reads || reading}
+                  disabled={noSettings || !reads || reading}
                   onClick={onReadAgain}
                 >
                   Read again
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip label={`Lets canvas-rgb change the settings on the ${noun}.`} className="rd-peri-tip">
+            <Tooltip
+              label={
+                noSettings
+                  ? `The ${noun}'s settings cannot be changed over this connection.`
+                  : `Lets canvas-rgb change the settings on the ${noun}.`
+              }
+              className="rd-peri-tip"
+            >
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Change</span>
                 <Toggle
                   label="Change settings on the device"
-                  checked={writes}
-                  disabled={!reads}
+                  checked={!noSettings && writes}
+                  disabled={noSettings || !reads}
                   onChange={(v) => onAccess({ writes: v })}
                 />
               </span>
             </Tooltip>
           </div>
         </div>
-        {detail.problem && !(unread && detail.problem === NOT_READ_YET_PROBLEM) && !(readsOff && detail.problem === READS_OFF_PROBLEM) && (
+        {detail.problem && !noSettings && !(unread && detail.problem === NOT_READ_YET_PROBLEM) && !(readsOff && detail.problem === READS_OFF_PROBLEM) && (
           <p className="rule rule-warn" data-role="problem">
             {detail.problem}
           </p>
         )}
       </Panel>
+
+      {noSettings && (
+        <Panel className="rd-peri-unread">
+          <div className="rd-peri-unread-body" data-role="no-settings">
+            <span className="rd-peri-unread-icon" aria-hidden="true">
+              <Prohibit size={22} />
+            </span>
+            <p className="rd-peri-unread-text">
+              {detail.problem ?? `The ${noun}'s settings cannot be read or changed over this connection.`}
+            </p>
+          </div>
+        </Panel>
+      )}
 
       {unread && (
         <Panel className="rd-peri-unread">
@@ -896,7 +940,10 @@ function PeripheralDetail({
               <ClockCountdown size={22} />
             </span>
             <p className="rd-peri-unread-text">
-              {`Not read yet. The ${noun}'s settings are read while you are away. Press Read again to read them now.`}
+              {/* The mouse is never read in the background (#567), so its frame promises no read. */}
+              {isMouse
+                ? `Not read yet. Press Read again to read the ${noun}'s settings.`
+                : `Not read yet. The ${noun}'s settings are read while you are away. Press Read again to read them now.`}
             </p>
           </div>
         </Panel>

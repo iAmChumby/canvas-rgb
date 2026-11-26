@@ -181,6 +181,16 @@ const GRANT_ATTEMPTS: u32 = 2;
 /// protocol message as it is, so this reaches the user word for word.
 pub const ASLEEP: &str = "the mouse is asleep: move it and try again";
 
+/// A read the mouse answered no part of.
+const NOTHING_READ: &str =
+    "The mouse did not answer, so its settings were not read. Move it to wake it, then press Read again.";
+
+/// Windows would not open the receiver: why goes to the log.
+fn not_opened(why: String) -> AdapterError {
+    tracing::warn!("the mouse could not be opened: {why}");
+    refuse("Windows could not open the mouse. Close other programs that use it, then press Read again.")
+}
+
 // ---------------------------------------------------------------------------------- property keys
 
 const KEY_STAGE_COUNT: &str = "dpi-stage-count";
@@ -311,20 +321,20 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn join_error(e: tokio::task::JoinError) -> AdapterError {
-    refuse(format!("the X6 blocking task failed: {e}"))
+    tracing::error!("the X6 blocking task failed: {e}");
+    refuse("Something went wrong inside canvas-rgb while it talked to the mouse. Try again.")
 }
 
 /// Why a property cannot be written yet.
 fn read_only_reason(key: &str) -> &'static str {
     if key.starts_with("button-") {
-        "which physical button each firmware slot belongs to is not known yet (research U12)"
+        "canvas-rgb does not know which physical button it is"
     } else if key == KEY_ACTIVE_STAGE {
-        "the mouse changes the active stage with its own DPI button, and the vendor app's device \
-         model lists it as a runtime readout with no write report (research 2)"
+        "the mouse changes it with its own DPI button"
     } else if key == KEY_PROFILE {
-        "the mouse holds one profile and the profile list lives on the host (research 2)"
+        "the mouse holds one profile"
     } else {
-        "this adapter cannot write it yet"
+        "canvas-rgb cannot change it yet"
     }
 }
 
@@ -363,10 +373,10 @@ fn check_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError>
     match (&def.kind, value) {
         (PropKind::Number { min, max, step, .. }, PropValue::Number(n)) => {
             if *n < *min || *n > *max {
-                return Err(refuse(format!("{} is {n}; it takes {min} to {max}", def.key)));
+                return Err(refuse(format!("{} is {n}; it takes {min} to {max}.", def.label)));
             }
             if *step > 0.0 && ((*n - *min) / *step).fract() != 0.0 {
-                return Err(refuse(format!("{} is {n}; it takes steps of {step}", def.key)));
+                return Err(refuse(format!("{} is {n}; it takes steps of {step}.", def.label)));
             }
             Ok(())
         }
@@ -374,14 +384,14 @@ fn check_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError>
             if options.iter().any(|o| o == c) {
                 Ok(())
             } else {
-                Err(refuse(format!("{} has no option {c:?}", def.key)))
+                Err(refuse(format!("{} has no option {c:?}.", def.label)))
             }
         }
         (PropKind::Color { .. }, PropValue::Color(_)) => Ok(()),
         (PropKind::Bool { .. }, PropValue::Bool(_)) => Ok(()),
         (PropKind::Hue { .. }, PropValue::Hue(_)) => Ok(()),
         (PropKind::Angle { .. }, PropValue::Angle(_)) => Ok(()),
-        _ => Err(refuse(format!("{} does not take that kind of value", def.key))),
+        _ => Err(refuse(format!("{} does not take that kind of value.", def.label))),
     }
 }
 
@@ -1262,7 +1272,8 @@ impl AttackSharkX6 {
             let key = stage_key(i);
             if props.contains_key(&key) && i >= count {
                 return Err(refuse(format!(
-                    "{key} is beyond the {count} stages in use; write {KEY_STAGE_COUNT} first"
+                    "DPI stage {} is beyond the {count} stages in use. Raise the stage count first.",
+                    i + 1
                 )));
             }
         }
@@ -1395,10 +1406,10 @@ impl PeripheralAdapter for AttackSharkX6 {
         let (config, events) = tokio::task::spawn_blocking(move || {
             let config = opener
                 .open_config()
-                .map_err(AdapterError::Protocol)?
+                .map_err(not_opened)?
                 .ok_or(AdapterError::NotConnected)?;
             // The status collection is a bonus: a mouse that only answers the read-back still works.
-            let events = opener.open_events().map_err(AdapterError::Protocol)?;
+            let events = opener.open_events().map_err(not_opened)?;
             Ok::<_, AdapterError>((config, events))
         })
         .await
@@ -1503,9 +1514,10 @@ impl PeripheralAdapter for AttackSharkX6 {
                 Some(ReadFailure::Refused) => refuse(ASLEEP),
                 // A transport failure returned `Io` above; the arm only keeps the match whole.
                 Some(ReadFailure::Transport(why) | ReadFailure::Other(why)) => {
-                    refuse(format!("the mouse answered none of the five read requests: {why}"))
+                    tracing::warn!("the mouse answered none of the five read requests: {why}");
+                    refuse(NOTHING_READ)
                 }
-                None => refuse("the mouse answered none of the five read requests: no answer"),
+                None => refuse(NOTHING_READ),
             });
         }
 
@@ -1547,7 +1559,10 @@ impl AttackSharkX6 {
         .await
         .map_err(join_error)?;
         self.config = Some(config);
-        let frame = frame.map_err(|f| refuse(format!("the DPI settings could not be read before the write: {}", f.message())))?;
+        let frame = frame.map_err(|f| {
+            tracing::warn!("the DPI settings could not be read before the write: {}", f.message());
+            refuse("The mouse's DPI settings could not be read, so nothing was changed. Move the mouse to wake it, then try again.")
+        })?;
         self.store(Kind::Dpi, &frame);
         Ok(())
     }
@@ -1562,7 +1577,7 @@ impl AttackSharkX6 {
         self.check_id(device)?;
         if !self.writes_enabled {
             return Err(AdapterError::Unsupported(
-                "config writes are off: turn them on with set_writes_enabled(true) first",
+                "Changes are turned off for this mouse. Turn Change on, then try again.",
             ));
         }
         if props.is_empty() {
@@ -1571,10 +1586,14 @@ impl AttackSharkX6 {
         let schema = self.schema();
         for (key, value) in props {
             let Some(def) = schema.property(key) else {
-                return Err(refuse(format!("the mouse has no setting called {key}")));
+                return Err(refuse(format!("The mouse has no setting called {key}.")));
             };
             if !schema.is_writable(key) {
-                return Err(refuse(format!("{key} is read-only: {}", read_only_reason(key))));
+                return Err(refuse(format!(
+                    "{} cannot be changed: {}.",
+                    def.label,
+                    read_only_reason(key)
+                )));
             }
             check_value(def, value)?;
         }
@@ -2334,7 +2353,7 @@ mod tests {
         a.connect().await.unwrap();
         let err = a.read_settings(&a.device_id()).await.unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("none of the five read requests")),
+            matches!(&err, AdapterError::Protocol(m) if m.contains("settings were not read")),
             "{err:?}"
         );
     }
@@ -2793,7 +2812,7 @@ mod tests {
         a.read_settings(&a.device_id()).await.unwrap();
         a.set_writes_enabled(true);
         let before = s.lock().unwrap().sent.len();
-        for (key, why) in [("button-1", "read-only"), ("dpi-active-stage", "read-only"), ("profile", "read-only")] {
+        for (key, why) in [("button-1", "cannot be changed"), ("dpi-active-stage", "cannot be changed"), ("profile", "cannot be changed")] {
             let err = a
                 .write_settings(&a.device_id(), &choice(&[(key, "off")]))
                 .await
@@ -2886,7 +2905,7 @@ mod tests {
             .write_settings(&a.device_id(), &choice(&[("dpi-active-stage", "3")]))
             .await
             .unwrap_err();
-        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("read-only")), "{err:?}");
+        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("cannot be changed")), "{err:?}");
         assert_eq!(s.lock().unwrap().sent.len(), before);
     }
 

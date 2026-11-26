@@ -97,7 +97,7 @@ function mouse(id: string): PeripheralDetail {
     schema: {
       device: id,
       kind: "mouse",
-      sections: [],
+      sections: [{ id: "light", title: "Lighting", properties: [] }],
       read_only: [],
       unreported: [],
     } as unknown as PeripheralDetail["schema"],

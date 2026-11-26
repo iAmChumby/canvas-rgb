@@ -10,6 +10,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Peripherals: the 8BitDo Ultimate 2 is recognised over Bluetooth. The Peripherals view names it "(Bluetooth)" and shows its battery while its reads are on. Its profiles, button map and stick ranges can be changed only through the 2.4G receiver or a USB cable, and the read's message now says that in plain words. (#566)
 
+### Fixed
+
+- Peripherals: a controller on Bluetooth, or in DInput mode on the 2.4G receiver, says once and in plain words why its settings cannot be read there and what to do. Change and Read again are switched off on that connection, and the page no longer promises to read the settings later. Other read and write errors are in plain words too, and a mouse that has not been read no longer says it is read while you are away. (#572)
+
 ## [0.19.0] - 2026-11-26
 
 ### Added

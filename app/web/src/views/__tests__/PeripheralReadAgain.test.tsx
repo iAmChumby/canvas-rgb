@@ -62,7 +62,7 @@ function mouseDetail(): PeripheralDetail {
   };
   return {
     info,
-    schema: { device: "x6:one", kind: "mouse", sections: [], read_only: [], unreported: [] },
+    schema: { device: "x6:one", kind: "mouse", sections: [{ id: "light", title: "Lighting", properties: [] }], read_only: [], unreported: [] },
     values: {},
     access: { reads: true, writes: false },
     problem: null,

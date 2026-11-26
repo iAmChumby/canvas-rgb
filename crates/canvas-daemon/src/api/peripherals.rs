@@ -17,7 +17,7 @@ use canvas_proto::traits::AdapterError;
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
-use crate::peripherals::{NOT_READ_YET, READS_OFF};
+use crate::peripherals::{user_words, NOT_READ_YET, READS_OFF};
 use crate::state::App;
 
 /// `GET /api/v1/peripherals`. Every peripheral the adapters see.
@@ -48,7 +48,10 @@ fn parse_fresh(query: Option<&str>) -> Result<bool, ApiFailure> {
 ///
 /// The schema is always there. The values are served only while reads are on for this id;
 /// otherwise they are empty and `problem` says why. A fresh read that fails leaves the values
-/// empty too, and `problem` carries the adapter's own message.
+/// empty too, and `problem` says in plain words what happened ([`user_words`]).
+///
+/// A connection that carries no settings (a pad over Bluetooth) answers a schema with no
+/// sections, no values and the reason in `problem`, and the device is not read.
 pub async fn get_peripheral(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -60,14 +63,19 @@ pub async fn get_peripheral(
     let info = find_info(&app, &device)
         .await
         .ok_or_else(|| ApiFailure::not_found(format!("no peripheral with the id {id}")))?;
-    let schema = app.peripherals.describe(&device).await.map_err(adapter_failure)?;
-    let (values, problem, read_at_ms) = if access.reads {
+    let (schema, unavailable) =
+        app.peripherals.describe_reach(&device).await.map_err(adapter_failure)?;
+    let (values, problem, read_at_ms) = if let Some(why) = unavailable {
+        // Nothing to read over this connection, whatever the access is: say why, on a plain GET
+        // too, and promise no later read.
+        (Props::new(), Some(why.to_string()), None)
+    } else if access.reads {
         if fresh {
             match app.peripherals.read_fresh_stamped(&device).await {
                 Ok((values, read_at_ms)) => (values, None, Some(read_at_ms)),
                 Err(error) => {
                     tracing::warn!(device = %id, error = %error, "the peripheral did not answer the read");
-                    (Props::new(), Some(error.to_string()), None)
+                    (Props::new(), Some(user_words(&error)), None)
                 }
             }
         } else {
@@ -160,7 +168,8 @@ pub async fn put_peripheral_access(
         Err(error) => {
             tracing::warn!(device = %id, error = %error, "the peripheral could not be opened");
             return Err(ApiFailure::internal(format!(
-                "the access is saved, but the peripheral could not be opened: {error}"
+                "The access is saved, but the device could not be opened. {}",
+                user_words(&error)
             )));
         }
     }
@@ -209,14 +218,19 @@ fn adapter_failure(error: AdapterError) -> ApiFailure {
         AdapterError::Protocol(message) => ApiFailure::validation(message),
         AdapterError::Unsupported(message) => ApiFailure::validation(message.to_string()),
         AdapterError::NotConnected => ApiFailure::validation(
-            "the peripheral is not open: turn reads on before reading or writing it",
+            "The device is not connected. Check that it is switched on, plugged in or paired, and \
+             that Read is on.",
         ),
         AdapterError::Zone { device, zone, reason } => ApiFailure::internal(format!(
             "zone {zone} of {}: {reason}",
             device.0
         )),
         AdapterError::Io(error) => {
-            ApiFailure::internal(format!("the peripheral did not answer: {error}"))
+            tracing::warn!(error = %error, "the peripheral link failed");
+            ApiFailure::internal(
+                "The device stopped answering, so the change may be incomplete. Check that it is \
+                 switched on and connected, then press Read again.",
+            )
         }
     }
 }

@@ -1557,3 +1557,62 @@ async fn the_list_shows_the_battery_of_an_open_device_and_asks_no_closed_one() {
     assert_eq!(open.pointer("/peripherals/0/charging"), Some(&serde_json::Value::Bool(false)), "{open}");
     assert_eq!(fake.log().reads, 0, "the battery comes from input reports, not a settings read");
 }
+
+/// What a person reads after a failed Read again says what happened and what to do, and carries
+/// no error-type prefix.
+#[tokio::test]
+async fn a_failed_read_is_told_in_plain_words() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0;
+    call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
+    fake.0.lock().unwrap().fail_read = 1;
+    let body = json(call(&router, "GET", &format!("{}?fresh=true", path_of(&id))).await).await;
+    let problem = body.get("problem").and_then(|v| v.as_str()).unwrap_or_default();
+    assert!(!problem.starts_with("io:") && !problem.starts_with("protocol:"), "{problem}");
+    assert!(problem.contains("Read again"), "{problem}");
+}
+
+/// A pad whose connection carries no settings: a plain GET already says why, offers no section,
+/// and no read is sent to it, with reads on or off.
+#[tokio::test]
+async fn a_pad_over_bluetooth_says_why_on_a_plain_get_and_offers_no_settings() {
+    use canvas_adapters::eightbitdo_ultimate2::{
+        EightBitDoUltimate2, Personality, BLUETOOTH_NO_SETTINGS,
+    };
+    let pad = canvas_adapters::fake_pad::FakePad::with_image(
+        canvas_adapters::fake_pad::ring_fixture_image(),
+        Personality::Bluetooth,
+    );
+    let adapter = EightBitDoUltimate2::with_opener(Arc::new(pad.clone()));
+    let id = adapter.device_id().0;
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::load_from(&home.path);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(
+        App::with_displays(
+            store,
+            Arc::new(FakeEngine::default()),
+            Box::new(FakeAdapter::default()),
+            TOKEN.to_string(),
+            "0.1.0-test".to_string(),
+            tx,
+            Box::new(canvas_daemon::displays::NoDisplays),
+        )
+        .with_peripherals(vec![Box::new(adapter) as Box<dyn canvas_daemon::peripherals::Peripheral>]),
+    );
+    let router = api::router(app);
+    for reads in [false, true] {
+        if reads {
+            let access = r#"{"reads":true,"writes":true}"#;
+            let put = call_with_body(&router, "PUT", &access_path_of(&id), access).await;
+            assert_eq!(put.status(), StatusCode::OK);
+        }
+        for path in [path_of(&id), format!("{}?fresh=true", path_of(&id))] {
+            let body = json(call(&router, "GET", &path).await).await;
+            assert_eq!(body["problem"], BLUETOOTH_NO_SETTINGS, "reads={reads} {path}");
+            assert_eq!(body["schema"]["sections"], serde_json::json!([]));
+        }
+    }
+    assert!(pad.sent_reports().is_empty(), "nothing is sent to the pad");
+}

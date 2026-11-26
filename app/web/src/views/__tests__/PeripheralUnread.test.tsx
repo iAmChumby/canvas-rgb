@@ -50,7 +50,7 @@ afterEach(() => {
 });
 
 const NOT_READ_TEXT =
-  "Not read yet. The mouse's settings are read while you are away. Press Read again to read them now.";
+  "Not read yet. Press Read again to read the mouse's settings.";
 
 /** A mouse with a DPI section; `readAt` is when the daemon read it (Unix ms), or null for never. */
 function mouse(id: string, readAt: number | null): PeripheralDetail {

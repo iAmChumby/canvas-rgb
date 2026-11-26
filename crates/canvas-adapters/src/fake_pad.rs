@@ -387,9 +387,13 @@ impl Opener for FakePad {
 
     fn open_gamepad(
         &self,
-        _personality: Personality,
+        personality: Personality,
     ) -> Result<Option<Box<dyn InputTransport>>, String> {
-        Ok(None)
+        // A silent gamepad collection where the real pad has one: over Bluetooth it is the one
+        // collection there is, so the adapter connects through it.
+        Ok(personality
+            .reads_gamepad_collection()
+            .then(|| Box::new(self.vendor()) as Box<dyn InputTransport>))
     }
 
     fn open_collections(&self) -> Result<OpenedCollections, String> {

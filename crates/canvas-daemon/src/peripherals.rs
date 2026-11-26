@@ -240,6 +240,13 @@ pub trait Peripheral: PeripheralAdapter + canvas_adapters::resume::ResumeBehavio
     /// Turns config writes on or off. Nothing is written to the hardware while they are off.
     fn set_config_writes(&mut self, on: bool);
 
+    /// Why the device's settings cannot be read or changed over its current connection, in words
+    /// for the person; `None` when they can. Metadata only: it comes from the last enumeration.
+    /// An adapter that answers here also describes a schema with no sections.
+    fn settings_unavailable(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Where this adapter reports the stage of a read, for the adapters whose read takes long
     /// enough to be worth reporting. An adapter that reports nothing keeps this default, and its
     /// read shows as one stage.
@@ -310,6 +317,11 @@ impl Peripheral for canvas_adapters::attack_shark_x6::AttackSharkX6 {
 impl Peripheral for canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2 {
     fn set_config_writes(&mut self, on: bool) {
         self.set_writes_enabled(on);
+    }
+
+    /// Bluetooth, and DInput with no vendor channel, carry no settings.
+    fn settings_unavailable(&self) -> Option<&'static str> {
+        canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::settings_unavailable(self)
     }
 
     /// The battery byte of the gamepad report (DInput on a cable, and Bluetooth, #566). Over
@@ -755,6 +767,18 @@ impl PeripheralHub {
         Ok(schema)
     }
 
+    /// What the device has, as [`PeripheralHub::describe`] answers, and why its settings cannot
+    /// be reached over its connection when they cannot ([`Peripheral::settings_unavailable`]).
+    /// Both come from one hold of the adapters, so they agree. No device is opened.
+    pub async fn describe_reach(
+        &self,
+        device: &DeviceId,
+    ) -> Result<(PeripheralSchema, Option<&'static str>), AdapterError> {
+        let mut adapters = self.adapters.lock().await;
+        let (index, schema) = owner_of(&mut adapters, device).await?;
+        Ok((schema, adapters[index].settings_unavailable()))
+    }
+
     /// The device's settings, read from the device now. This is the only path that touches a
     /// device: the person's **Read again** (`?fresh=true`) and the idle background refresh.
     ///
@@ -1135,6 +1159,25 @@ async fn owner_of(
         }
     }
     Err(AdapterError::UnknownDevice(device.clone()))
+}
+
+/// What a person is told when a device fails them: what happened and what they can do. An
+/// adapter's refusal is already written for them; the technical text of a link failure goes to
+/// the log, where the caller puts it.
+pub fn user_words(error: &AdapterError) -> String {
+    match error {
+        AdapterError::Protocol(message) => message.clone(),
+        AdapterError::Unsupported(message) => (*message).to_string(),
+        AdapterError::NotConnected => "The device is not connected. Check that it is switched on and \
+            plugged in or paired, then press Read again."
+            .to_string(),
+        AdapterError::UnknownDevice(_) => {
+            "The device is no longer there. Connect it again, then reopen this page.".to_string()
+        }
+        AdapterError::Io(_) | AdapterError::Zone { .. } => "The device stopped answering. Check that \
+            it is switched on and connected, then press Read again."
+            .to_string(),
+    }
 }
 
 /// True when the error means the device is gone or the link failed, not that the request was

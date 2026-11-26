@@ -68,7 +68,7 @@ function info(id: string, name: string): PeripheralInfo {
 function detail(id: string, name: string): PeripheralDetail {
   return {
     info: info(id, name),
-    schema: { device: id, kind: "mouse", sections: [], read_only: [], unreported: [] },
+    schema: { device: id, kind: "mouse", sections: [{ id: "light", title: "Lighting", properties: [] }], read_only: [], unreported: [] },
     values: {},
     access: { reads: false, writes: false },
     problem: null,

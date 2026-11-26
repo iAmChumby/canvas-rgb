@@ -70,7 +70,7 @@ function mouse(id: string, read: boolean): PeripheralDetail {
     schema: {
       device: id,
       kind: "mouse",
-      sections: [],
+      sections: [{ id: "light", title: "Lighting", properties: [] }],
       read_only: [],
       unreported: [],
     } as unknown as PeripheralDetail["schema"],
@@ -97,7 +97,7 @@ function pad(id: string): PeripheralDetail {
     schema: {
       device: id,
       kind: "game_controller",
-      sections: [],
+      sections: [{ id: "light", title: "Lighting", properties: [] }],
       read_only: [],
       unreported: [],
     } as unknown as PeripheralDetail["schema"],
@@ -189,7 +189,7 @@ describe("what the Peripherals page says about a read (#374)", () => {
     api.peripheral.mockResolvedValue(mouse(id, false));
     render(<PeripheralsView />);
     const frame = await screen.findByText(
-      "Not read yet. The mouse's settings are read while you are away. Press Read again to read them now.",
+      "Not read yet. Press Read again to read the mouse's settings.",
     );
     expect(frame.textContent).not.toMatch(/paus/i);
   });

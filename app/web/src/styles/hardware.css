@@ -330,6 +330,25 @@ button.chip::before,
   background-color: var(--on-accent);
 }
 
+/* A switch that cannot be switched looks it (#572): faded, flat, and no hover answer. */
+.switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+  box-shadow: none;
+}
+
+.switch:disabled:hover {
+  border-color: var(--line);
+}
+
+.switch:disabled::after {
+  box-shadow: none;
+}
+
+.rd-peri-toggle:has(.switch:disabled) .rd-peri-toggle-label {
+  color: var(--mute);
+}
+
 /* Once touched, the knob smears as it travels: it stretches towards where it is going and gathers
    back into a circle when it lands. */
 .switch[data-touched="true"][aria-checked="true"]::after {

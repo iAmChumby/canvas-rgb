@@ -293,6 +293,21 @@ or acts as if a step worked without checking that it did.
   queue drops a refresh hint), and best-effort UI calls that claim nothing afterwards.
 - **How to check a new notice or log line:** name the field or the measurement behind it. If there
   is none, it is this bug.
+- [#572](https://github.com/iAmChumby/canvas-rgb/issues/572): over a connection that carries no
+  settings (the 8BitDo pad on Bluetooth, or in DInput mode on its receiver) the page promised a
+  background read, offered Change and Read again, and showed `error.to_string()` with its
+  `protocol:` prefix. The mouse's empty page promised a background read it never gets (#567).
+  Fixed: the adapter says from its enumeration that the connection has none
+  (`Peripheral::settings_unavailable`, `crates/canvas-daemon/src/peripherals.rs`) and describes no
+  section, a plain GET answers the reason, and the page switches Change and Read again off. Every
+  adapter error a person reads goes through one function, `peripherals::user_words`; an adapter's
+  `Protocol` and `Unsupported` text is written for that person, and the technical text goes to the
+  log. Tests: `a_connection_with_no_settings_offers_none_and_says_why_in_plain_words` (adapter),
+  `a_pad_over_bluetooth_says_why_on_a_plain_get_and_offers_no_settings` and
+  `a_failed_read_is_told_in_plain_words` (`tests/peripherals.rs`),
+  `app/web/src/views/__tests__/PeripheralNoSettings.test.tsx`. Sibling search: the other
+  peripheral adapter (the mouse) has its messages rewritten; displays and lighting devices report
+  their errors through other routes and were left.
 - A second mechanism, same cause: the editor draws a value it never received. A control, a count or a
   figure falls back to a default (`?? 0`, `?? "1"`, `?? "#ffffff"`, a schema default) when the answer
   is missing, so an unknown value reads as a real one.
