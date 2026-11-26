@@ -16,7 +16,9 @@ export const POLL_MS = 10_000;
  */
 export function usePoll(refresh: () => void, everyMs: number = POLL_MS): void {
   const latest = useRef(refresh);
-  latest.current = refresh;
+  useEffect(() => {
+    latest.current = refresh;
+  }, [refresh]);
   useEffect(() => {
     const timer = setInterval(() => latest.current(), everyMs);
     return () => clearInterval(timer);
