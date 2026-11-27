@@ -611,12 +611,24 @@ fn spawn_pipe_client(app: Arc<App>) {
                     daemon_pid: std::process::id(),
                 };
                 match client.request(&hello).await {
-                        Ok(canvas_proto::pipe::PipeResponse::Hello { protocol, service_version, .. }) => {
+                        Ok(canvas_proto::pipe::PipeResponse::Hello {
+                            protocol,
+                            service_version,
+                            start_mode,
+                            last_exit,
+                            safe_start,
+                        }) => {
                             tracing::info!(protocol, service_version, "the service is up");
                             // Help & About shows the service that answered, not a guess (#574 R6).
                             app.set_service_version(service_version.clone());
                             app.service_down_ms.store(0, Ordering::SeqCst);
                             down_since = std::time::Instant::now();
+                            // A start that got no answer learns its mode here (#577). On its
+                            // own task: the heartbeats do not wait for the lights.
+                            let late = app.clone();
+                            tokio::spawn(async move {
+                                canvas_daemon::pipe_client::apply_hello(&late, start_mode, last_exit, safe_start).await;
+                            });
                             // The heartbeat goes every second.
                             loop {
                                 tokio::time::sleep(std::time::Duration::from_millis(
@@ -697,6 +709,10 @@ fn spawn_user_effects_watch(app: Arc<App>) {
         let dir = app.effects_dir.clone();
         loop {
             tokio::time::sleep(canvas_daemon::user_effects::RESCAN_INTERVAL).await;
+            // A run that turned safe late loads no more user effects (#577).
+            if canvas_daemon::scenes::safe_mode(&app) {
+                continue;
+            }
             let user = app.user_effects.clone();
             let dir = dir.clone();
             // Parsing an effect can take a while; keep it off the async workers.

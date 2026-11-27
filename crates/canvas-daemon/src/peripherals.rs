@@ -1270,6 +1270,10 @@ pub fn start_idle_refresh(app: Arc<App>) {
             if app.shutting_down.load(std::sync::atomic::Ordering::SeqCst) != 0 {
                 return;
             }
+            // A run that turned safe late reads nothing more (#577).
+            if crate::scenes::safe_mode(&app) {
+                continue;
+            }
             let saved: Vec<DeviceId> = {
                 let store = app.store.read().await;
                 store

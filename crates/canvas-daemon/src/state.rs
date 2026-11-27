@@ -6,7 +6,8 @@
 
 use canvas_adapters::frame_lane::FrameLane;
 use canvas_adapters::resume::ResumeBehavior;
-use canvas_proto::api::{LastExit, LinkState, SafeStart, SafeStartMode, Status};
+use canvas_proto::api::{LastExit, LinkState, Power, SafeStart, SafeStartMode, Status};
+use canvas_proto::config::Settings;
 use canvas_proto::device::{DeviceId, DeviceInfo};
 use canvas_proto::fans::FansStatus;
 use canvas_proto::traits::{DeviceAdapter, Engine, FrameSink, GroupState, PreviewSink, RenderStats};
@@ -459,6 +460,13 @@ fn watch_groups(app: Arc<App>, stop: Arc<AtomicBool>) {
     }
 }
 
+/// The power and brightness safe start puts in place of the saved ones; `None` is the saved one.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SafeOutput {
+    pub power: Option<Power>,
+    pub brightness: Option<u8>,
+}
+
 /// The state every handler sees.
 pub struct App {
     /// The on-disk state. Written rarely (a settings change) and read often.
@@ -565,6 +573,8 @@ pub struct App {
     pub safe_builtin: Mutex<String>,
     /// Set once Breathing could not be built: safe mode shows one steady colour from then on.
     pub safe_fallback: std::sync::atomic::AtomicBool,
+    /// What safe start shows in place of the saved power and brightness. In memory only.
+    pub safe_output: Mutex<SafeOutput>,
     /// SignalRGB conflicts, refreshed every 5 s.
     pub conflicts: tokio::sync::RwLock<Vec<canvas_proto::api::Conflict>>,
     /// Where OpenRGB is, as the daemon sees it.
@@ -766,6 +776,7 @@ impl App {
             safe_effect: Mutex::new(None),
             safe_builtin: Mutex::new("breathing".into()),
             safe_fallback: std::sync::atomic::AtomicBool::new(false),
+            safe_output: Mutex::new(SafeOutput::default()),
             conflicts: tokio::sync::RwLock::new(Vec::new()),
             openrgb: tokio::sync::RwLock::new(LinkState::Down),
             shutting_down: AtomicU32::new(0),
@@ -844,10 +855,11 @@ impl App {
 
     /// Latches the first `Hello`'s decision. Later replies never change it mid-run. The reason,
     /// the streak and since when are the service's record; with none, they read as unknown.
-    pub fn latch_start_from(&self, mode: SafeStartMode, last_exit: LastExit, record: Option<SafeStart>) {
+    /// Answers false when an earlier reply had already decided.
+    pub fn latch_start_from(&self, mode: SafeStartMode, last_exit: LastExit, record: Option<SafeStart>) -> bool {
         let mut slot = self.start_mode.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_some() {
-            return;
+            return false;
         }
         *slot = Some(mode);
         drop(slot);
@@ -863,6 +875,36 @@ impl App {
             });
             SafeStart { active: true, fans_on_bios: None, lights: None, ..record }
         });
+        true
+    }
+
+    /// The power and brightness that are on the lights: the saved ones, except where safe start
+    /// holds its own.
+    pub fn effective_output(&self, settings: &Settings) -> (Power, u8) {
+        let held = *self.safe_output.lock().unwrap_or_else(|e| e.into_inner());
+        (held.power.unwrap_or(settings.power), held.brightness.unwrap_or(settings.brightness))
+    }
+
+    /// Safe start shows light whatever was saved (#577): power on, at least
+    /// [`crate::scenes::SAFE_MIN_BRIGHTNESS`] bright. Answers what to put on the engine.
+    pub fn raise_safe_output(&self, settings: &Settings) -> (Power, u8) {
+        let held = SafeOutput {
+            power: Some(Power::Running),
+            brightness: Some(settings.brightness.max(crate::scenes::SAFE_MIN_BRIGHTNESS)),
+        };
+        *self.safe_output.lock().unwrap_or_else(|e| e.into_inner()) = held;
+        self.effective_output(settings)
+    }
+
+    /// The owner chose a value: it replaces the one safe start holds.
+    pub fn owner_chose_output(&self, power: bool, brightness: bool) {
+        let mut held = self.safe_output.lock().unwrap_or_else(|e| e.into_inner());
+        if power {
+            held.power = None;
+        }
+        if brightness {
+            held.brightness = None;
+        }
     }
 
     /// Whether every fan header is on BIOS control, from the latest fan status. Unknown while
@@ -1035,8 +1077,7 @@ impl App {
     pub async fn status(&self) -> Option<Status> {
         let stats = self.engine_stats().await?;
         let store = self.store.read().await;
-        let power = store.config.settings.power;
-        let brightness = store.config.settings.brightness;
+        let (power, brightness) = self.effective_output(&store.config.settings);
         let fps_target = store.config.settings.fps;
         let scene = crate::scenes::active_scene(&store.scenes);
         let active_scene = Some(canvas_proto::api::SceneRef { id: scene.id.clone(), name: scene.name.clone() });

@@ -93,34 +93,46 @@ impl PipeLink for ServicePipe {
 }
 
 /// How long a start waits for the service's first `Hello`. Inside the 30 s first-heartbeat
-/// grace; a service that cannot answer in time gives Normal and `Unknown` (#577 R13).
+/// grace; a start that gets no answer in time runs normally until one arrives (#577).
 pub const FIRST_HELLO_LIMIT: Duration = Duration::from_secs(2);
 
 /// Reads the mode the service chose for this run from its first `Hello`, before anything is
-/// restored or played. A missing or old service answers Normal / `Unknown`. The mode is latched
-/// once here; later replies cannot change it mid-run (#577 R13).
+/// restored or played. A failed, late or different answer decides nothing: the run starts
+/// normally, and the reconnect loop hands the next answer to [`apply_hello`].
 pub async fn read_start_decision(app: &std::sync::Arc<crate::state::App>) -> canvas_proto::api::SafeStartMode {
-    use canvas_proto::api::{LastExit, SafeStartMode};
-    use canvas_proto::pipe::{PipeRequest, PipeResponse};
     let hello = PipeRequest::Hello {
         protocol: canvas_proto::pipe::PROTOCOL_VERSION,
         daemon_pid: std::process::id(),
     };
-    let (mode, last_exit, record) = match tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&hello)).await {
-        Ok(Ok(PipeResponse::Hello { start_mode, last_exit, safe_start, .. })) => (start_mode, last_exit, safe_start),
+    match tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&hello)).await {
+        Ok(Ok(PipeResponse::Hello { start_mode, last_exit, safe_start, .. })) => {
+            apply_hello(app, start_mode, last_exit, safe_start).await;
+        }
         Ok(other) => {
-            tracing::debug!(response = ?other, "the service answered the start hello differently; starting normally");
-            (SafeStartMode::Normal, LastExit::Unknown, None)
+            tracing::debug!(response = ?other, "no start hello from the service; starting normally until it answers");
         }
         Err(_) => {
-            tracing::info!("the service did not answer before the start hello timed out; starting normally");
-            (SafeStartMode::Normal, LastExit::Unknown, None)
+            tracing::info!("the service did not answer before the start hello timed out; starting normally until it does");
         }
-    };
-    app.latch_start_from(mode, last_exit, record);
-    // The latch, not this reply, is the mode for the rest of the run: an earlier reply in the
-    // same run cannot be overridden by a later one.
+    }
+    // The latch, not this reply, is the mode: an earlier answer in the same run cannot be
+    // overridden by a later one.
     app.start_mode()
+}
+
+/// Takes one answered `Hello`. The first one decides the mode for the whole run, whenever it
+/// arrives: a Safe one turns a run that started without an answer safe on the spot (#577).
+pub async fn apply_hello(
+    app: &std::sync::Arc<crate::state::App>,
+    mode: canvas_proto::api::SafeStartMode,
+    last_exit: canvas_proto::api::LastExit,
+    record: Option<canvas_proto::api::SafeStart>,
+) {
+    if mode == canvas_proto::api::SafeStartMode::Safe {
+        crate::scenes::enter_safe(app, last_exit, record).await;
+    } else {
+        app.latch_start_from(mode, last_exit, record);
+    }
 }
 
 /// Sends one request to the service through the app's pipe.

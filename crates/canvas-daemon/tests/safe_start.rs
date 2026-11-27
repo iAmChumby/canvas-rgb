@@ -9,10 +9,12 @@ use axum::http::{Request, StatusCode};
 use canvas_daemon::api;
 use canvas_daemon::pipe_client::{self, PipeError, PipeLink};
 use canvas_daemon::state::App;
-use canvas_proto::api::{LastExit, SafeStartMode, SafeStartPut};
+use canvas_proto::api::{routes, LastExit, Power, SafeStartMode, SafeStartPut};
+use canvas_proto::traits::Engine as _;
 use canvas_proto::pipe::{PipeRequest, PipeResponse, PROTOCOL_VERSION};
 use canvas_proto::props::Props;
 use common::{a_scene, FakeAdapter, FakeEngine};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tower::ServiceExt;
@@ -400,4 +402,272 @@ async fn m4_a_breathing_failure_shows_a_steady_colour_that_status_names() {
     assert_eq!(status.active_scene.unwrap().name, "Safe start");
     assert_eq!(status.safe_start.unwrap().lights.as_deref(), Some("One steady colour, blue"));
     assert_eq!(status.active_effects, vec!["solid".to_string()]);
+}
+
+// ---- #577 fix pass 2 ----
+
+/// A service whose first answer fails, or hangs past the start limit, and then says Safe.
+struct LatePipe {
+    hang: bool,
+    calls: Arc<Mutex<u32>>,
+}
+
+#[async_trait::async_trait]
+impl PipeLink for LatePipe {
+    async fn exchange(&self, _: &PipeRequest) -> Result<PipeResponse, PipeError> {
+        let call = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if call == 1 {
+            if self.hang {
+                tokio::time::sleep(pipe_client::FIRST_HELLO_LIMIT + Duration::from_millis(500)).await;
+            }
+            return Err(PipeError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "no fake service yet")));
+        }
+        RecordPipe.exchange(&PipeRequest::Heartbeat).await
+    }
+}
+
+async fn send(
+    app: &Arc<App>,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("host", "127.0.0.1:9430")
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("content-type", "application/json")
+        .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+        .unwrap();
+    let response = tokio::time::timeout(WAIT, api::router(app.clone()).oneshot(request))
+        .await
+        .expect("the request hung")
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test]
+async fn r4_a_safe_answer_after_a_missed_first_hello_turns_the_run_safe() {
+    for hang in [false, true] {
+        let (mut app, engine, _home) = build();
+        Arc::get_mut(&mut app).unwrap().pipe =
+            Arc::new(LatePipe { hang, calls: Arc::new(Mutex::new(0)) });
+        saved_solid(&app).await;
+        assert_eq!(pipe_client::read_start_decision(&app).await, SafeStartMode::Normal, "hang={hang}");
+        canvas_daemon::scenes::restore_active(&app).await;
+        assert_eq!(playing(&engine), vec![Some("rainbow_wave".to_string())], "hang={hang}");
+        let saved = app.store.read().await.scenes.clone();
+
+        assert_eq!(pipe_client::read_start_decision(&app).await, SafeStartMode::Safe, "hang={hang}");
+        assert_eq!(playing(&engine), vec![Some("breathing".to_string())], "hang={hang}");
+        let status = app.status().await.unwrap();
+        assert!(status.safe_start.expect("the banner's record").active);
+        assert_eq!(status.active_scene.unwrap().name, "Safe start");
+        assert_eq!(app.last_exit(), LastExit::Unclean);
+        assert_eq!(app.store.read().await.scenes, saved, "the saved scene was changed");
+    }
+}
+
+#[tokio::test]
+async fn r4_a_late_safe_answer_ends_the_draft_on_the_lights() {
+    let (mut app, engine, _home) = build();
+    Arc::get_mut(&mut app).unwrap().pipe = Arc::new(LatePipe { hang: false, calls: Arc::new(Mutex::new(0)) });
+    saved_solid(&app).await;
+    pipe_client::read_start_decision(&app).await;
+    canvas_daemon::scenes::restore_active(&app).await;
+    let (status, body) = send(&app, "PUT", routes::EFFECT_DRAFT, Some(pattern_draft())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(canvas_daemon::draft::status(&app).active);
+
+    pipe_client::read_start_decision(&app).await;
+    assert!(!canvas_daemon::draft::status(&app).active, "the draft stayed live in safe start");
+    assert_eq!(playing(&engine), vec![Some("breathing".to_string())]);
+}
+
+#[tokio::test]
+async fn r5_safe_start_lights_the_lights_whatever_was_saved() {
+    for (saved, shown) in [(0u8, 20u8), (5, 20), (80, 80)] {
+        let (mut app, engine, _home) = build();
+        Arc::get_mut(&mut app).unwrap().pipe = Arc::new(RecordPipe);
+        {
+            let mut store = app.store.write().await;
+            store.config.settings.power = Power::Paused;
+            store.config.settings.brightness = saved;
+            store.config.settings.warmth = 3000;
+        }
+        // The engine starts from the saved settings, before the mode is known.
+        engine.set_power(Power::Paused);
+        engine.set_brightness(saved);
+        engine.set_warmth(3000);
+        let before = app.store.read().await.config.settings.clone();
+
+        pipe_client::read_start_decision(&app).await;
+        let lit = |when: &str| {
+            assert_eq!(*engine.power.lock().unwrap(), Power::Running, "{when}, saved {saved}");
+            assert_eq!(engine.brightness.load(Ordering::SeqCst), u32::from(shown), "{when}, saved {saved}");
+            assert_eq!(engine.warmth.load(Ordering::SeqCst), 3000, "{when}");
+        };
+        lit("at start");
+        let status = app.status().await.unwrap();
+        assert_eq!((status.power, status.brightness), (Power::Running, shown), "status");
+        let (_, output) = send(&app, "GET", routes::OUTPUT, None).await;
+        assert_eq!(output["power"], "running");
+        assert_eq!(output["brightness"], shown);
+
+        // What puts the saved output back must not darken the lights.
+        canvas_daemon::identify::restore(&app).await;
+        assert!(engine.solid_writes.lock().unwrap().is_empty(), "black was painted");
+        let mut watcher = canvas_daemon::power::PowerWatcher::new();
+        for event in [canvas_daemon::power::PowerEvent::Suspend, canvas_daemon::power::PowerEvent::Resume] {
+            canvas_daemon::power::handle(&app, &mut watcher, event).await;
+        }
+        lit("after sleep");
+        // A settings save that changes something else keeps the lights on.
+        let mut settings = before.clone();
+        settings.fps = 24;
+        let (code, body) = send(&app, "PUT", routes::SETTINGS, Some(serde_json::to_value(&settings).unwrap())).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        lit("after a settings save");
+        let mut stored = app.store.read().await.config.settings.clone();
+        stored.fps = before.fps;
+        assert_eq!(stored, before, "safe start wrote to the store");
+
+        // The owner's own change wins, and is saved as in any run.
+        let (code, body) = send(&app, "PATCH", routes::OUTPUT, Some(serde_json::json!({ "brightness": 7 }))).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["brightness"], 7);
+        assert_eq!(engine.brightness.load(Ordering::SeqCst), 7);
+        assert_eq!(app.status().await.unwrap().brightness, 7);
+        let (code, body) = send(&app, "PATCH", routes::OUTPUT, Some(serde_json::json!({ "power": "paused" }))).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["power"], "paused");
+        assert_eq!(*engine.power.lock().unwrap(), Power::Paused);
+    }
+}
+
+fn pattern_draft() -> serde_json::Value {
+    serde_json::json!({
+        "pattern": {
+            "id": "pattern:Probe",
+            "built_on": { "led_count": 12, "arrangement": "ring" },
+            "frames": [{ "colors": vec!["#c80000"; 12], "hold": 0 }],
+            "motion": serde_json::to_value(canvas_proto::pattern::Motion::none()).unwrap(),
+        },
+        "props": {},
+        "epoch": "0123456789abcdef",
+        "seq": 1,
+    })
+}
+
+const DRAFT_HTML: &str = r##"<head><title>Flat</title></head>
+<body><canvas id="c" width="320" height="200"></canvas></body>
+<script>
+  var c = document.getElementById("c");
+  var ctx = c.getContext("2d");
+  ctx.fillStyle = "#3366cc";
+  function draw() { ctx.fillRect(0, 0, 320, 200); window.requestAnimationFrame(draw); }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+#[tokio::test]
+async fn r7_safe_start_refuses_every_draft_with_a_clear_error() {
+    let (app, engine, _home) = build();
+    saved_solid(&app).await;
+    app.latch_start(SafeStartMode::Safe, LastExit::Unclean);
+    canvas_daemon::scenes::apply_for_devices(&app).await;
+    let stack = serde_json::json!({
+        "stack": { "id": "stack:Probe", "layers": [{ "id": "l1", "name": "Base", "effect": "solid" }] },
+        "props": {},
+        "epoch": "0123456789abcdef",
+        "seq": 1,
+    });
+    let html = serde_json::json!({ "html": DRAFT_HTML, "props": {} });
+    for (kind, body) in [("html", html), ("stack", stack), ("pattern", pattern_draft())] {
+        let (status, answer) = send(&app, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{kind}: {answer}");
+        assert_eq!(answer["message"], "Not available in safe start", "{kind}");
+        assert!(!canvas_daemon::draft::status(&app).active, "{kind} left a live draft");
+    }
+    assert_eq!(playing(&engine), vec![Some("breathing".to_string())]);
+}
+
+#[tokio::test]
+async fn r7_safe_start_refuses_the_greeting() {
+    let (app, engine, _home) = build();
+    saved_solid(&app).await;
+    app.latch_start(SafeStartMode::Safe, LastExit::Unclean);
+    canvas_daemon::scenes::apply_for_devices(&app).await;
+    let uri = routes::EFFECT_ACTIVATE.replace("{id}", "onboard-hello");
+    let (status, answer) = send(&app, "POST", &uri, Some(serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert_eq!(answer["message"], "Not available in safe start");
+    assert_eq!(playing(&engine), vec![Some("breathing".to_string())]);
+}
+
+#[tokio::test]
+async fn r7_safe_start_applies_nothing_of_the_owners() {
+    let (app, engine, _home) = build();
+    saved_solid(&app).await;
+    app.latch_start(SafeStartMode::Safe, LastExit::Unclean);
+    canvas_daemon::scenes::apply_for_devices(&app).await;
+    let safe = vec![("safe-start".to_string(), Some("breathing".to_string()))];
+    let on_lights = || {
+        engine.scene.lock().unwrap().iter().map(|g| (g.0.clone(), g.1.clone())).collect::<Vec<_>>()
+    };
+    assert_eq!(on_lights(), safe);
+
+    let build_one = canvas_daemon::takeover_builder(&app, "solid");
+    let groups = canvas_daemon::scenes::apply_takeover(&app, "solid", &Props::new(), None, build_one)
+        .await
+        .unwrap();
+    assert!(groups.is_empty());
+    assert_eq!(on_lights(), safe, "takeover");
+
+    let pattern = serde_json::from_value(pattern_draft()["pattern"].clone()).unwrap();
+    assert_eq!(canvas_daemon::scenes::apply_pattern_takeover(&app, &pattern).await.unwrap(), 0);
+    assert_eq!(on_lights(), safe, "pattern takeover");
+
+    // From here an apply of any kind shows: the record is emptied, and stays empty.
+    engine.scene.lock().unwrap().push(("marker".into(), None, Props::new()));
+    let marked = on_lights();
+    // A saved group that shares the safe group's id: nothing but the guard keeps it off.
+    {
+        let mut store = app.store.write().await;
+        let group = &mut store.scenes.scenes[0].groups[0];
+        group.id = "safe-start".into();
+        group.plays = canvas_proto::scene::Plays::Effect { effect: "pattern:Probe".into(), props: Props::new() };
+    }
+
+    let old = app.store.read().await.scenes.scenes[0].clone();
+    let mut new = old.clone();
+    new.groups[0].plays = canvas_proto::scene::Plays::Effect { effect: "solid".into(), props: Props::new() };
+    {
+        let lock = app.scene.lock().await;
+        canvas_daemon::scenes::apply_group_change(&app, &lock, &old, &new).await;
+        let mut wider = new.clone();
+        let mut extra = new.groups[0].clone();
+        extra.id = "second".into();
+        extra.members.clear();
+        wider.groups.push(extra);
+        canvas_daemon::scenes::apply_group_change(&app, &lock, &new, &wider).await;
+    }
+    assert_eq!(on_lights(), marked, "group change");
+
+    canvas_daemon::scenes::pattern_changed(&app, "pattern:Probe").await;
+    assert_eq!(on_lights(), marked, "pattern changed");
+
+    // With a device here, a first run that went ahead would save lights and its own flag.
+    app.devices.write().await.push(common::device("x", canvas_proto::device::DeviceKind::Motherboard, 8));
+    app.store.write().await.config.first_run_done = false;
+    let before = app.store.read().await.config.clone();
+    canvas_daemon::first_run::maybe_run(&app).await;
+    assert_eq!(on_lights(), marked, "first run");
+    assert_eq!(app.store.read().await.config, before, "the first run wrote the config");
 }

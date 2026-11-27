@@ -110,7 +110,7 @@ pub async fn handle(app: &Arc<App>, watcher: &mut PowerWatcher, event: PowerEven
 
     match event {
         PowerEvent::Suspend => {
-            watcher.previous = app.store.read().await.config.settings.power;
+            watcher.previous = app.effective_output(&app.store.read().await.config.settings).0;
             watcher.suspended = true;
             app.identify.stop();
             app.identify.paint_solid(app.engine.as_ref(), canvas_proto::Rgb8::BLACK);

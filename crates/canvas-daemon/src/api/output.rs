@@ -11,9 +11,10 @@ use crate::state::App;
 /// `GET /api/v1/output`.
 pub async fn get_output(State(app): State<Arc<App>>) -> Json<OutputState> {
     let state = app.store.read().await;
+    let (power, brightness) = app.effective_output(&state.config.settings);
     let state = OutputState {
-        power: state.config.settings.power,
-        brightness: state.config.settings.brightness,
+        power,
+        brightness,
         warmth: state.config.settings.warmth,
     };
     Json(state)
@@ -40,6 +41,7 @@ pub async fn patch_output(
     if let Some(warmth) = patch.warmth {
         validate_warmth(warmth)?;
     }
+    app.owner_chose_output(patch.power.is_some(), patch.brightness.is_some());
     if let Some(brightness) = patch.brightness {
         app.engine.set_brightness(brightness);
     }

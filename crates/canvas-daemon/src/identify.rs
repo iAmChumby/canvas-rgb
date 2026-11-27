@@ -608,7 +608,7 @@ pub fn spawn_ticker(app: Arc<App>) {
 /// runs. A draft on the lights stays on the lights, the onboarding effect is not killed, and
 /// the scene is not rebuilt. Nothing is applied here.
 pub async fn restore(app: &Arc<App>) {
-    let power = app.store.read().await.config.settings.power;
+    let power = app.effective_output(&app.store.read().await.config.settings).0;
     if power == Power::Paused {
         app.identify.paint_solid(app.engine.as_ref(), Rgb8::BLACK);
     }

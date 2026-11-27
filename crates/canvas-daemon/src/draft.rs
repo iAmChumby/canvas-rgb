@@ -472,7 +472,7 @@ pub enum PutError {
     /// The draft's HTML did not build: the editor's problem (422), and a running draft is left
     /// alone.
     Build(String),
-    /// The stack's name is another stack's, ignoring case: the answer is a 409, as Save's is.
+    /// The stack's name is another stack's, ignoring case, or safe start is on: a 409.
     Conflict(String),
     /// The stack breaks a rule a Save enforces (422).
     Validation(String),
@@ -503,6 +503,14 @@ pub struct Ended {
     pub note: Option<String>,
 }
 
+/// A draft in safe start would be a live slot that plays nothing, so it is refused (#577).
+fn refuse_in_safe_start(app: &App) -> Result<(), PutError> {
+    if crate::scenes::safe_mode(app) {
+        return Err(PutError::Conflict(crate::scenes::NOT_IN_SAFE_START.into()));
+    }
+    Ok(())
+}
+
 /// Puts `html` on the lights as the draft, renews a running draft's lease and updates its props.
 ///
 /// The draft plays on every group of the active scene whose `Plays` names its effect, or on one
@@ -514,6 +522,7 @@ pub struct Ended {
 /// Stop, or another source) answers `false` and leaves the newer state alone. A beat whose
 /// source is already building joins that build rather than starting another.
 pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutError> {
+    refuse_in_safe_start(app)?;
     let source_hash = crate::user_effects::source_hash(html);
     let id = format!("{}{source_hash}", canvas_proto::consts::DRAFT_ID_PREFIX);
 
@@ -606,6 +615,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
         })?;
 
     let _gate = app.draft.gate.lock().await;
+    refuse_in_safe_start(app)?;
     // A Stop, an expiry, or another PUT landed while this built: this one is stale.
     let Some(building) = app.draft.take_in_flight_if(token) else {
         return Ok(false);
@@ -691,6 +701,7 @@ pub async fn put_stack(
     epoch: &str,
     seq: u64,
 ) -> Result<bool, PutError> {
+    refuse_in_safe_start(app)?;
     // The one check a Save also runs, on the canonical stack (D95.4.4, D95.4.5): a layer written
     // by its display name is the id it becomes, so the HTML cap counts it, the name rule leaves
     // out this stack by exact id as `Stacks::put` does, and the stack that is built and hashed is
@@ -844,6 +855,7 @@ pub async fn put_stack(
     .map_err(PutError::Internal)?;
 
     let _gate = app.draft.gate.lock().await;
+    refuse_in_safe_start(app)?;
     // An older epoch or sequence, a Stop, or another draft that replaced this one while it
     // built: this PUT is stale and must not land over the newer state.
     let Some(building) = app.draft.take_in_flight_if(token) else {
@@ -943,6 +955,7 @@ pub async fn put_pattern(
         .map_err(|error| PutError::Validation(error.to_string()))?;
 
     let _gate = app.draft.gate.lock().await;
+    refuse_in_safe_start(app)?;
     expire_locked(app).await;
     // The newest page owns the slot: an older epoch, or a sequence the route already saw, is
     // superseded (D95.4.4's rule, the same watermark the stack draft uses).

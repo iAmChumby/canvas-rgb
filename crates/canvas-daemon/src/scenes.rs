@@ -734,6 +734,44 @@ pub fn safe_lights_words(fallback: bool, playing: bool) -> Option<&'static str> 
 /// lights run is in `SafeStart::lights`.
 pub const SAFE_SCENE_NAME: &str = "Safe start";
 
+/// The least brightness safe start shows: a saved 0 must not leave the lights dark.
+pub const SAFE_MIN_BRIGHTNESS: u8 = 20;
+
+/// What a request that would put something of the owner's on the lights is told in safe start.
+pub const NOT_IN_SAFE_START: &str = "Not available in safe start";
+
+/// Turns the run safe, at start or when the service's answer comes late. The mode is latched
+/// first, so every apply from here on builds the safe scene. Then a draft or greeting leaves the
+/// lights, they come on, the opened peripherals are closed and a saved scene that is already
+/// playing gives way. Nothing is written to the store. Does nothing once the mode is decided.
+pub async fn enter_safe(app: &Arc<App>, last_exit: canvas_proto::api::LastExit, record: Option<canvas_proto::api::SafeStart>) {
+    if !app.latch_start_from(canvas_proto::api::SafeStartMode::Safe, last_exit, record) {
+        return;
+    }
+    {
+        let lock = app.scene.lock().await;
+        let replace = crate::draft::hold_for_replace(app).await;
+        app.transient.cancel();
+        let settings = app.store.read().await.config.settings.clone();
+        let (power, brightness) = app.raise_safe_output(&settings);
+        app.engine.set_brightness(brightness);
+        app.engine.set_power(power);
+        // At start nothing is on yet: the first device list puts the safe scene on.
+        if app.scene.is_on() || replace.ended_takeover() {
+            apply_with(app, &lock, false).await;
+        }
+        replace.settle();
+    }
+    let saved: Vec<_> = app.store.read().await.peripherals.peripherals.keys().cloned().collect();
+    for id in saved {
+        let id = canvas_proto::device::DeviceId(id);
+        if let Err(error) = app.peripherals.apply(&id, Default::default()).await {
+            tracing::debug!(device = %id, error = %error, "safe start could not close a peripheral");
+        }
+    }
+    app.scene.notify();
+}
+
 /// True for the whole of a safe-start run: the saved scene is saved and never applied.
 pub fn safe_mode(app: &App) -> bool {
     app.start_mode() == canvas_proto::api::SafeStartMode::Safe

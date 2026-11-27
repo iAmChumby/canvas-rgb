@@ -33,13 +33,15 @@ pub async fn put_settings(
     }
     crate::storage::validate_settings(&settings).map_err(ApiFailure::validation)?;
 
+    let stored = app.store.read().await.config.settings.clone();
+    // Safe start (#577): a value this save leaves as it was keeps what safe start shows.
+    app.owner_chose_output(settings.power != stored.power, settings.brightness != stored.brightness);
     app.engine.set_fps(settings.fps);
-    app.engine.set_brightness(settings.brightness);
+    app.engine.set_brightness(app.effective_output(&settings).1);
     app.engine.set_warmth(settings.warmth);
     // The HTML budget a stack's layers are held to follows the frame rate.
     app.stacks.set_fps(settings.fps);
-    let current_power = app.store.read().await.config.settings.power;
-    if settings.power != current_power {
+    if settings.power != stored.power {
         crate::api::output::apply_power(&app, settings.power)?;
     }
 
@@ -370,10 +372,15 @@ pub async fn config_import(
         // The display task reads the saved configs on its next pass; wake it so it does not wait.
         app.displays.changed();
         let settings = app.store.read().await.config.settings.clone();
+        let (power, brightness) = if crate::scenes::safe_mode(&app) {
+            app.raise_safe_output(&settings)
+        } else {
+            (settings.power, settings.brightness)
+        };
         app.engine.set_fps(settings.fps);
-        app.engine.set_brightness(settings.brightness);
+        app.engine.set_brightness(brightness);
         app.engine.set_warmth(settings.warmth);
-        app.engine.set_power(settings.power);
+        app.engine.set_power(power);
         let balances = crate::api::devices::white_balance_map(&app.store.read().await.config);
         app.engine.set_white_balance(balances);
         app.stacks.set_fps(settings.fps);

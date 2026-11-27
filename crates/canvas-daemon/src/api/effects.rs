@@ -211,6 +211,10 @@ pub async fn activate(
     // The onboarding effects are transient: nothing about them is saved, the layout keeps its
     // own effect, and a timer puts that effect back (see `crate::transient`).
     let transient = canvas_effects::onboard::is_onboard_id(&schema.id);
+    // A greeting is a takeover, and safe start puts none on the lights (#577).
+    if transient && crate::scenes::safe_mode(&app) {
+        return Err(ApiFailure::conflict(crate::scenes::NOT_IN_SAFE_START));
+    }
 
     // Scenes: the effect plays on the groups asked for (every group when none is named), with the
     // values just worked out. Planned first, so a refusal (an unknown group, too many HTML

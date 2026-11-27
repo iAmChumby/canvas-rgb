@@ -2159,3 +2159,29 @@ async fn a_late_replay_leaves_an_open_setup_alone() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(rig.server.zone_leds(0, 0), Some(EARLIER));
 }
+
+/// #577: a chain setup in safe start puts the safe scene back after a cancel and after a commit,
+/// never the saved one.
+#[tokio::test]
+async fn r7_chain_routes_in_safe_start_apply_only_the_safe_scene() {
+    let rig = rig("safe-chains", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    rig.app.latch_start(canvas_proto::api::SafeStartMode::Safe, canvas_proto::api::LastExit::Unclean);
+    canvas_daemon::scenes::apply_active(&rig.app, false).await;
+    let on_lights =
+        || rig.engine.scene.lock().unwrap().iter().map(|g| g.0.clone()).collect::<Vec<_>>();
+    assert_eq!(on_lights(), vec!["safe-start".to_string()]);
+
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    let (status, body) = light(&rig, 0, &setup.session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = cancel(&rig, 0, &setup.session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(on_lights(), vec!["safe-start".to_string()], "after a cancel");
+
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    committed(&rig, 0, &setup.session, &seven_parts()).await;
+    assert_eq!(on_lights(), vec!["safe-start".to_string()], "after a commit");
+}
