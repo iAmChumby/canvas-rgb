@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { DownloadSimple, FolderOpen, UploadSimple } from "@phosphor-icons/react";
-import { Button, FileButton } from "@/components/Button";
+import { DownloadSimple, FolderOpen, Info, UploadSimple } from "@phosphor-icons/react";
+import { Button, ButtonLink, FileButton } from "@/components/Button";
 import { ColorField } from "@/components/ColorField";
 import { Field, Panel, StateDot } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
@@ -304,6 +304,9 @@ export function SettingsView() {
           <Panel title="Version" actions={<span className="fig rd-version" aria-busy={!status || undefined}>{status ? status.version : <InlineSkeleton width="8ch" />}</span>}>
             <UpdatesPanel />
             <div className="row-wrap" style={{ marginTop: 12 }}>
+              <ButtonLink href="/credits/" icon={<Info size={16} />}>
+                Credits
+              </ButtonLink>
               <Button
                 icon={<FolderOpen size={16} />}
                 disabled={!inTray}

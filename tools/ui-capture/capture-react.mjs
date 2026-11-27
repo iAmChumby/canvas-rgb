@@ -44,7 +44,11 @@ if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(DAEMON_BASE)) {
   throw new Error(`UI_CAPTURE_API_BASE must be http://127.0.0.1:<port> (the token is sent there), not ${DAEMON_BASE}`);
 }
 
-const VIEWS = [
+// UI_CAPTURE_VIEWS overrides the standard list with a JSON array of
+// { name, path } when only a page or two needs a screenshot run (#578).
+const VIEWS = process.env.UI_CAPTURE_VIEWS
+  ? JSON.parse(process.env.UI_CAPTURE_VIEWS)
+  : [
   { name: "scenes", path: "/" },
   { name: "effects", path: "/effects/" },
   { name: "devices", path: "/devices/" },
@@ -53,16 +57,21 @@ const VIEWS = [
   { name: "updates", path: "/updates/" },
   { name: "displays", path: "/displays/" },
   { name: "peripherals", path: "/peripherals/" },
-];
+  { name: "credits", path: "/credits/" },
+  ];
 
-const VIEWPORTS = [
-  { w: 1920, h: 1040 },
-  { w: 1440, h: 900 },
-  { w: 1280, h: 860 },
-  { w: 1024, h: 768 },
-  { w: 960, h: 1032 },
-  { w: 390, h: 844 },
-];
+// UI_CAPTURE_VIEWPORTS overrides the standard matrix with a JSON array of
+// { w, h } when a change needs screenshots at other sizes (#578).
+const VIEWPORTS = process.env.UI_CAPTURE_VIEWPORTS
+  ? JSON.parse(process.env.UI_CAPTURE_VIEWPORTS)
+  : [
+      { w: 1920, h: 1040 },
+      { w: 1440, h: 900 },
+      { w: 1280, h: 860 },
+      { w: 1024, h: 768 },
+      { w: 960, h: 1032 },
+      { w: 390, h: 844 },
+    ];
 
 const THEMES = ["dark", "light"];
 

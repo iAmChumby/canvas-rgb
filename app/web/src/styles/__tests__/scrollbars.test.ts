@@ -126,6 +126,7 @@ const SCROLL_PANES = [
   ".chainStage",
   ".takeover",
   ".frameScroll",
+  ".disclosureBody", // the Credits page's licence text pane (#578)
 ];
 
 /**
