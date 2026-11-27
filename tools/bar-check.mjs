@@ -61,9 +61,17 @@ export const STATES = [
   { name: "builder", url: builder("loaded"), state: "loaded" },
   { name: "builder", url: builder("long-name"), state: "long-name" },
   { name: "peripherals", url: "/peripherals/?peripherals=unread", state: "pending" },
-  // B10: the keys that leave the bar must still be reachable from the overflow at every width.
-  { name: "effects", url: "/effects/", state: "overflow" },
-  { name: "builder", url: builder("loaded"), state: "overflow" },
+  // B6: a draft that differs from what is saved, and a name being typed.
+  { name: "builder", url: builder("loaded"), state: "dirty" },
+  { name: "builder", url: "/effects/?stack=new&state=stack", state: "renaming" },
+  { name: "fans", url: "/fans/", state: "dirty" },
+  { name: "scenes", url: "/", state: "renaming" },
+  // B7: a name cut on a narrow window is whole again on a wide one.
+  { name: "builder", url: builder("long-name"), state: "regrow" },
+  // B10: every secondary key has one home at every width, the bar or the overflow.
+  { name: "effects", url: "/effects/?group=g-case", state: "overflow" },
+  { name: "builder", url: builder("loaded", "&group=g-case"), state: "overflow" },
+  { name: "peripherals", url: "/peripherals/?peripherals=unread", state: "overflow" },
   { name: "command-palette", url: "/fans/", state: "palette" },
   { name: "status-popover", url: "/fans/", state: "popover" },
 ];
@@ -191,6 +199,26 @@ export const MEASURE = () => {
   const primaryEl = document.querySelector(".strip-inner [data-bar-primary]");
   const userEl = document.querySelector("[data-bar-user-title]");
   const fullName = userEl?.getAttribute("title") ?? "";
+  /** The width the row could give the user's name: what it has now, and the row's spare room. */
+  const nameRoom = () => {
+    const row = userEl?.closest(".strip-row");
+    const titleBox = userEl?.closest(".rd-title");
+    if (!row || !titleBox) return 0;
+    const px = (v) => parseFloat(v) || 0;
+    const wraps = getComputedStyle(row).getPropertyValue("--bar-wraps").trim() === "1";
+    const used = (box, items) => {
+      const shownItems = items.filter((el) => el.offsetWidth > 0);
+      return shownItems.reduce((n, el) => {
+        const cs = getComputedStyle(el);
+        const left = el.classList.contains("strip-controls") ? 0 : px(cs.marginLeft);
+        return n + el.offsetWidth + left + px(cs.marginRight);
+      }, px(getComputedStyle(box).columnGap) * Math.max(0, shownItems.length - 1));
+    };
+    const items = [...row.children]
+      .flatMap((el) => (el.classList.contains("strip-slot") ? [...el.children] : [el]))
+      .filter((el) => !(wraps && el.classList.contains("strip-page-actions")));
+    return Math.round(userEl.offsetWidth + Math.max(0, row.clientWidth - used(row, items)));
+  };
   let fullWidth = 0;
   if (userEl && fullName) {
     const cs = getComputedStyle(userEl);
@@ -204,8 +232,29 @@ export const MEASURE = () => {
   }
   const userTitle = userEl ? {
     present: true, visible: fullyVisible(userEl), full: fullName, fullWidth: Math.round(fullWidth),
-    shown: norm(userEl.textContent), room: Math.round(userEl.parentElement?.getBoundingClientRect().width ?? 0),
+    shown: norm(userEl.textContent), room: nameRoom(),
   } : { present: false, visible: false, full: "", fullWidth: 0, shown: "", room: 0 };
+  // The strip's keys are drawn whole, and no part of the row is drawn over another.
+  const cutControls = [...document.querySelectorAll(".strip-inner button, .strip-inner a")]
+    .filter((el) => drawn(el) && !fullyVisible(el))
+    .map((el) => el.getAttribute("aria-label") || norm(el.textContent) || label(el));
+  const parts = [...document.querySelectorAll(".strip-brand, .rd-title, .strip-now, .strip-mark, .rd-actions, .strip-controls")]
+    .filter(drawn);
+  const overlaps = [];
+  parts.forEach((a, i) => parts.slice(i + 1).forEach((b) => {
+    const p = a.getBoundingClientRect();
+    const q = b.getBoundingClientRect();
+    if (Math.min(p.right, q.right) - Math.max(p.left, q.left) > 1 && Math.min(p.bottom, q.bottom) - Math.max(p.top, q.top) > 1) {
+      overlaps.push(`${label(a)} over ${label(b)}`);
+    }
+  }));
+  const words = (el) => norm(`${el.getAttribute("aria-label") ?? ""} ${el.innerText ?? ""}`);
+  const barActions = [...document.querySelectorAll(".strip-inner .rd-actions button, .strip-inner .rd-actions a, .strip-inner .rd-title a")]
+    .filter(fullyVisible).map(words);
+  // In the menu the words themselves must be drawn: an icon with a hidden label is not a home.
+  const menuActions = [...document.querySelectorAll('[role="dialog"][aria-label="More page actions"] button, [role="dialog"][aria-label="More page actions"] a')]
+    .filter(drawn).map((el) => norm(el.innerText));
+  const renameFields = [...document.querySelectorAll('input[aria-label="The name of this scene"]')].filter(drawn);
   const scroller = document.scrollingElement ?? document.documentElement;
   return {
     vw: document.documentElement.clientWidth, vh: document.documentElement.clientHeight,
@@ -215,7 +264,11 @@ export const MEASURE = () => {
     userTitle, hasTitleSlot: document.querySelector(".rd-title") !== null,
     isBuilder: document.querySelector("[data-testid='stack-builder']") !== null,
     fixtureError: /The stack could not be read/.test(document.body.textContent ?? ""),
-    menuText: norm(document.querySelector('[role="dialog"][aria-label="More page actions"]')?.textContent ?? ""),
+    barActions, menuActions, cutControls, overlaps,
+    dirty: primaryEl?.getAttribute("data-dirty") === "true",
+    naming: shown('[role="dialog"][aria-label="Name the stack"]'),
+    renameFields: renameFields.length, renameFocused: renameFields.includes(document.activeElement),
+    fanFixed: [...document.querySelectorAll("main [role='radio']")].some((el) => norm(el.textContent) === "Fixed %" && el.getAttribute("aria-checked") === "true"),
     stripW: box(".strip-inner")?.w ?? null,
     barRows: document.querySelector(".strip")?.getAttribute("data-bar-rows") ?? null,
     barContext: document.documentElement.dataset.barContext ?? null,
@@ -235,6 +288,9 @@ export const MEASURE = () => {
 export const USER_TITLE_FLOOR = 12;
 /** At 960 px and up a page must fit; at phone width only these pages fit on main (B14). */
 const NO_SCROLL_AT_PHONE = new Set(["layout"]);
+/** The secondary keys each page's overflow state must find a home for. */
+const OVERFLOW_ACTIONS = { effects: ["Import", "Back to"], builder: ["Revert", "Back to"], peripherals: ["Revert"] };
+const REGROW = { narrow: { width: 390, height: 844 }, wide: { width: 1920, height: 1040 } };
 
 export function judge(m, state) {
   const bad = [];
@@ -255,12 +311,27 @@ export function judge(m, state) {
     bad.push(`${where}: ${kind} ${c.selector} "${c.text}" needs ${c.need}px, given ${c.given}px`);
   }
   for (const n of m.names ?? []) bad.push(`${where}: ${n.selector} accessible name "${n.name}" is shorter than its visible words "${n.visible}"`);
-  // B10: an action that left the bar must be in the overflow, not gone.
+  // B10: one home per action, at every width: whole in the bar, or in the overflow. Never both.
   if (state.state === "overflow") {
-    const wanted = state.name === "effects" ? ["Import"] : ["Revert"];
-    for (const action of wanted) {
-      if (!(m.menuText ?? "").includes(action)) bad.push(`${where}: ${action} is not reachable from the overflow menu`);
+    for (const action of OVERFLOW_ACTIONS[state.name]) {
+      const inBar = (m.barActions ?? []).some((a) => a.includes(action));
+      const inMenu = (m.menuActions ?? []).some((a) => a.includes(action));
+      if (!inBar && !inMenu) bad.push(`${where}: ${action} is not reachable from the bar or the overflow menu`);
+      if (inBar && inMenu) bad.push(`${where}: ${action} is in the bar and in the overflow menu`);
     }
+  }
+  for (const c of m.cutControls ?? []) bad.push(`${where}: the "${c}" key is cut off`);
+  for (const o of m.overlaps ?? []) bad.push(`${where}: ${o}`);
+  // B6: each driven state is really on screen.
+  if (state.name === "builder" && state.state === "dirty" && !m.dirty) bad.push(`${where}: the builder's Save does not say the draft is unsaved`);
+  if (state.name === "builder" && state.state === "renaming" && !m.naming) bad.push(`${where}: the name dialog is not open`);
+  if (state.name === "fans" && state.state === "dirty" && !m.fanFixed) bad.push(`${where}: the header's mode did not change`);
+  if (state.name === "scenes" && state.state === "renaming") {
+    if (m.renameFields !== 1) bad.push(`${where}: ${m.renameFields ?? 0} rename fields are drawn, expected one`);
+    else if (!m.renameFocused) bad.push(`${where}: the rename field on screen does not have the focus`);
+  }
+  if (state.state === "regrow" && m.userTitle.shown !== m.userTitle.full) {
+    bad.push(`${where}: user title did not grow back on a wide window: "${m.userTitle.shown}"`);
   }
   // B6: a fixture that cannot load is a failure, never a quiet error-panel capture.
   if (state.name === "builder" && m.fixtureError) bad.push(`${where}: the builder fixture did not load (error panel)`);
@@ -291,44 +362,62 @@ const MUTATIONS = {
   "mutate-vscroll": { css: ".content { padding-bottom: 1200px !important; }" },
   "mutate-primary": { css: "[data-bar-primary] { display: none !important; }" },
   "mutate-inline": { css: ".strip-effect-name { display: inline-block !important; max-width: 8px !important; overflow: hidden !important; white-space: nowrap !important; text-overflow: ellipsis !important; }" },
-  "mutate-fixture": { url: (u) => u.replace("state=complete,stack", "state=stack-missing") },
+  "mutate-overflow": { css: ".rd-actions .rd-secondary, .rd-actions .rd-overflow { display: none !important; }" },
+  // A stack that is not there: the builder draws its error panel.
+  "mutate-fixture": { url: (u) => u.replace(/\?stack=(?!new)[^&]*/, "?stack=Nope").replace(/&stack-name=[^&]*/, "") },
 };
 
 /** Plant a regression in a measurement the DOM cannot reliably hold against React re-renders. */
-function plant(m, state) {
-  if (!mutation) return m;
-  const copy = { ...m, clip: [...m.clip], userTitle: { ...m.userTitle } };
-  if (mutation === "mutate-floor") copy.userTitle = { ...copy.userTitle, present: true, visible: true, full: "A".repeat(40), fullWidth: 600, shown: "AAAAA…BBBBB", room: 200 };
-  if (mutation === "mutate-fixture" && state.name === "builder") copy.fixtureError = true;
-  return copy;
+function plant(m) {
+  if (mutation !== "mutate-floor") return m;
+  return { ...m, userTitle: { present: true, visible: true, full: "A".repeat(40), fullWidth: 600, shown: "AAAAA…BBBBB", room: 200 } };
 }
 
-async function clickFirst(page, descriptions) {
-  const errors = [];
-  for (const d of descriptions) {
-    try {
-      await page.getByText(d, { exact: true }).first().click({ timeout: 1500 });
-      return;
-    } catch (e) { errors.push(String(e).slice(0, 80)); }
+async function addLayer(page) {
+  const tile = page.locator(".rd-library-tile:not([disabled]):visible").first();
+  // On a phone the library is behind its own tab under the stage.
+  if ((await tile.count()) === 0) {
+    await page.getByRole("radio", { name: "Library" }).or(page.getByRole("tab", { name: "Library" })).first().click({ timeout: 5000 });
   }
-  throw new Error(`none of ${descriptions.join(" / ")} is clickable: ${errors.join(" | ")}`);
+  await tile.click({ timeout: 5000 });
 }
 
 async function driveState(page, state) {
-  if (state.state === "dirty" && state.name === "builder") {
-    await clickFirst(page, ["Add Solid"]);
-    await page.waitForTimeout(250);
-  } else if (state.state === "renaming" && state.name === "builder") {
-    await page.getByRole("button", { name: /^Save/ }).first().click({ timeout: 5000 });
+  if (mutation === "mutate-state") {
+    await page.getByRole("button", { name: "No such control" }).click({ timeout: 500 });
+  }
+  if (state.name === "builder" && state.state === "dirty") {
+    await addLayer(page);
+    await page.waitForSelector("[data-bar-primary][data-dirty='true']", { timeout: 5000 });
+  } else if (state.name === "builder" && state.state === "renaming") {
+    await addLayer(page);
+    await page.locator("[data-bar-primary]").click({ timeout: 5000 });
     await page.getByRole("dialog", { name: "Name the stack" }).waitFor({ timeout: 5000 });
-  } else if (state.state === "renaming" && state.name === "scenes") {
+  } else if (state.name === "scenes" && state.state === "renaming") {
     await page.getByRole("button", { name: "More about this scene" }).click({ timeout: 5000 });
-    await clickFirst(page, ["Rename scene", "Rename"]);
-  } else if (state.state === "dirty" && state.name === "fans") {
-    await clickFirst(page, ["Quiet"]);
+    await page.getByRole("dialog", { name: "More about this scene" }).getByRole("button", { name: "Rename", exact: true }).click({ timeout: 5000 });
+    await page.locator('input[aria-label="The name of this scene"]:visible').waitFor({ timeout: 5000 });
+  } else if (state.name === "fans" && state.state === "dirty") {
+    // A header's mode that the saved profile does not hold. Fans draws no dirty mark (#586 R7).
+    await page.locator("main").getByRole("radio", { name: "Fixed %" }).first().click({ timeout: 5000 });
+    await page.evaluate(() => {
+      for (const el of [document.scrollingElement, document.querySelector(".content")]) el?.scrollTo(0, 0);
+    });
+  } else if (state.state === "regrow") {
+    await page.setViewportSize(REGROW.narrow);
+    await page.waitForFunction(() => document.querySelector("[data-bar-user-title]")?.textContent?.includes("…"), { timeout: 5000 });
+    await page.setViewportSize(REGROW.wide);
   } else if (state.state === "overflow") {
-    await page.getByRole("button", { name: "More page actions" }).first().click({ timeout: 5000 });
-    await page.getByRole("dialog", { name: "More page actions" }).waitFor({ timeout: 5000 });
+    // Peripherals has keys in its bar only while a change is staged.
+    if (state.name === "peripherals") await page.getByRole("switch").first().click({ timeout: 5000 });
+    await page.locator(".strip-inner [data-bar-primary]").waitFor({ timeout: 5000 });
+    await page.waitForTimeout(250);
+    // The overflow key is there only when something did not fit; a bar that holds everything has none.
+    const more = page.getByRole("button", { name: "More page actions" });
+    if (await more.isVisible()) {
+      await more.click({ timeout: 5000 });
+      await page.getByRole("dialog", { name: "More page actions" }).waitFor({ timeout: 5000 });
+    }
   } else if (state.state === "pending" && state.name === "peripherals") {
     await page.getByRole("switch").first().click({ timeout: 5000 });
   } else if (state.state === "palette") {
@@ -356,9 +445,8 @@ async function main() {
   const widths = [];
   let checks = 0;
   const note = (raw, state, size, scheme, extra = []) => {
-    const m = plant(raw, state);
+    const m = plant(raw);
     const bad = [...judge(m, state), ...extra];
-    if (mutation === "mutate-state") bad.push(`${state.name}/${state.state}: state was not driven (planted)`);
     checks++;
     widths.push({ page: state.name, state: state.state, size: `${size.w}x${size.h}`, theme: scheme, ...m });
     const summary = `strip ${m.stripW}px, title ${m.title?.w ?? "-"}px, primary ${m.primary?.w ?? "-"}px, clips ${m.clip.length}, scroll ${m.docHidden}`;
@@ -396,7 +484,7 @@ async function main() {
           // B3: a state that cannot be driven is a failure, never a silent pass.
           try {
             await page.waitForFunction(() => document.querySelector('[data-live="on"]') !== null, { timeout: 10000 });
-            await driveState(page, mutation === "mutate-state" ? { ...state, state: "not-a-real-state" } : state);
+            await driveState(page, state);
           } catch (e) {
             note(await page.evaluate(MEASURE), state, size, scheme, [`${state.name}/${state.state}: state could not be driven: ${String(e).slice(0, 120)}`]);
             continue;
@@ -411,6 +499,7 @@ async function main() {
           }
           const m = await page.evaluate(MEASURE);
           note(m, state, size, scheme);
+          if (state.state === "regrow") await page.setViewportSize({ width: size.w, height: size.h });
         }
         await ctx.close();
       }

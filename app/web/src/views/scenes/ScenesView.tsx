@@ -12,7 +12,7 @@ import { Skeleton, InlineSkeleton } from "@/components/Skeleton";
 import { notify } from "@/components/Notify";
 import { NameField } from "@/components/NameField";
 import { Popover } from "@/components/Popover";
-import { PageActions, PageTitle } from "@/shell/PageHeader";
+import { PageActions, PageTitle, useContextInBody } from "@/shell/PageHeader";
 import { effectMissing, effectNameOf } from "@/lib/status";
 import { getSnap, retryScenes, useSnap } from "@/lib/store";
 import { AddDevices } from "@/views/scenes/AddDevices";
@@ -257,6 +257,18 @@ export function ScenesView() {
 
   /** Where the scene that plays is in the order of the keys. */
   const sceneAt = use.scenes.findIndex((s) => s.id === scene?.id);
+
+  // The rename field stands where the scene line is. When the strip moves that line between the
+  // bar and the body, the focus follows the copy that is on screen (#586 R3).
+  const contextInBody = useContextInBody();
+  useEffect(() => {
+    if (!renaming) return;
+    const fields = document.querySelectorAll<HTMLInputElement>('input[aria-label="The name of this scene"]');
+    const shown = [...fields].find((field) => field.getClientRects().length > 0);
+    if (!shown || document.activeElement === shown) return;
+    shown.focus();
+    shown.select();
+  }, [renaming, contextInBody]);
 
   /**
    * The groups of the scene, in another order (#384).

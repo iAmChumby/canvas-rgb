@@ -59,7 +59,7 @@ import type { PropertyDef } from "@/proto/PropertyDef";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { Props } from "@/proto/props";
-import { BarContextMirror, PageActions, PageTitle } from "@/shell/PageHeader";
+import { BarContextMirror, BarOverflow, PageActions, PageTitle } from "@/shell/PageHeader";
 import { Tooltip } from "@/components/Tooltip";
 
 /** The icon each kind of peripheral wears. */
@@ -690,6 +690,7 @@ export function PeripheralsView() {
               className="warn-text fig rd-peri-pending"
               aria-label={`${changedCount} change${changedCount === 1 ? "" : "s"} not sent`}
               title={`${changedCount} change${changedCount === 1 ? "" : "s"} not sent`}
+              data-count={changedCount}
             >
               <Warning size={14} weight="fill" aria-hidden="true" />
               <span className="rd-peri-pending-text">
@@ -705,11 +706,16 @@ export function PeripheralsView() {
               aria-label="Revert"
               onClick={revert}
             >
-              <span className="rd-peri-revert-label">Revert</span>
+              <span className="rd-btn-text">Revert</span>
             </Button>
             <Button data-bar-primary="" data-short="Apply" variant="primary" size="sm" busy={saving} onClick={() => void apply()}>
               Apply
             </Button>
+            <BarOverflow>
+              <Button variant="ghost" size="sm" icon={<ArrowCounterClockwise size={16} />} disabled={saving} onClick={revert}>
+                <span className="rd-btn-text">Revert</span>
+              </Button>
+            </BarOverflow>
           </>
         )}
       </PageActions>

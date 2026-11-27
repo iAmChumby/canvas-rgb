@@ -93,14 +93,6 @@ test("B11: the scene name is drawn once on a narrow strip", () => {
   assert.ok(judge(m, state("scenes")).some((b) => b.includes("drawn once")));
 });
 
-test("B7: the user title measures a stable box and cuts on code points", () => {
-  const tsx = source("app/web/src/shell/PageHeader.tsx");
-  assert.match(tsx, /Array\.from\(title\)/, "name must be cut on code points, not UTF-16 units");
-  assert.match(tsx, /titleBox\.getBoundingClientRect\(\)\.width/, "room must come from the title slot");
-  assert.ok(!/el\.clientWidth/.test(tsx), "the shrinking heading must not measure its own room");
-  assert.match(tsx, /ro\.observe\(titleBox\)/, "a slot that grows must grow the name back");
-});
-
 test("B9/B13: context and row count come from one measured rule, not the window", () => {
   const tsx = source("app/web/src/shell/StatusStrip.tsx");
   const css = source("app/web/src/styles/app.css");
@@ -115,4 +107,40 @@ test("an accessible name shorter than the visible words is a failure", () => {
   const m = measurement();
   m.names.push({ selector: ".select-trigger", name: "Audio source", visible: "Audio source: Voicemeeter Input" });
   assert.ok(judge(m, state("settings")).some((b) => b.includes("accessible name")));
+});
+
+test("B10: every secondary key has one home, the bar or the overflow", () => {
+  const overflow = state("builder", "overflow");
+  const held = measurement();
+  held.barActions = ["Revert Revert"];
+  held.menuActions = ["Back to Case"];
+  assert.deepEqual(judge(held, overflow), []);
+  const lost = measurement();
+  lost.barActions = ["Back to Case"];
+  lost.menuActions = [];
+  assert.ok(judge(lost, overflow).some((b) => b.includes("Revert is not reachable")));
+  const twice = measurement();
+  twice.barActions = ["Revert", "Back to Case"];
+  twice.menuActions = ["Revert"];
+  assert.ok(judge(twice, overflow).some((b) => b.includes("Revert is in the bar and in the overflow")));
+});
+
+test("a cut-off key or one part drawn over another is a failure", () => {
+  const m = measurement();
+  m.cutControls = ["Save the stack"];
+  m.overlaps = ["span.strip-now over button.strip-mark"];
+  assert.equal(judge(m, state()).length, 2);
+});
+
+test("B6: each driven state must be on screen", () => {
+  for (const [name, value] of [["builder", "dirty"], ["builder", "renaming"], ["fans", "dirty"], ["scenes", "renaming"]]) {
+    assert.ok(STATES.some((s) => s.name === name && s.state === value), `${name} ${value} is not driven`);
+    assert.ok(judge(measurement(), state(name, value)).length > 0, `${name} ${value} passes with nothing on screen`);
+  }
+});
+
+test("B7: a name that stays cut on a wide window is a failure", () => {
+  const m = measurement();
+  m.userTitle = { present: true, visible: true, full: LONG_NAME, fullWidth: 630, shown: "A very…hand", room: 100 };
+  assert.ok(judge(m, state("builder", "regrow")).some((b) => b.includes("grow back")));
 });

@@ -2,6 +2,10 @@
 
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { DotsThreeOutline } from "@phosphor-icons/react";
+import { IconButton } from "@/components/Button";
+import { Popover } from "@/components/Popover";
+import { USER_TITLE_FLOOR, middleCut, rowItems, textMeasurer, widthOf } from "@/shell/barFit";
 
 /**
  * The status strip's two slots for the page (redesign rule R2).
@@ -90,8 +94,31 @@ function useSlot(pick: (slots: StripSlots) => HTMLElement | null): HTMLElement |
   return el;
 }
 
-/** The shortest a user-named title may be drawn before it gives way (#586 R1). */
-export const USER_TITLE_FLOOR = 12;
+/**
+ * The room the row has for a user-named heading: the row, less everything beside the heading on
+ * its line. Nothing here reads the heading's own box or a box that shrinks with it, so a name that
+ * was cut grows back as soon as the row has room (#586 B7).
+ */
+function roomFor(heading: HTMLElement, row: HTMLElement, titleBox: HTMLElement): number {
+  const wraps =
+    row.closest<HTMLElement>(".strip")?.dataset.barRows === "2" &&
+    getComputedStyle(row).getPropertyValue("--bar-wraps").trim() === "1";
+  const others = rowItems(row).filter(
+    (el) => el !== titleBox && el.offsetWidth > 0 && !(wraps && el.classList.contains("strip-page-actions")),
+  );
+  const beside = ([...titleBox.children] as HTMLElement[]).filter((el) => !el.contains(heading) && el.offsetWidth > 0);
+  const px = (value: string) => parseFloat(value) || 0;
+  const rowGap = px(getComputedStyle(row).columnGap);
+  const box = getComputedStyle(titleBox);
+  return (
+    row.clientWidth -
+    widthOf(row, others) -
+    (others.length > 0 ? rowGap : 0) -
+    px(box.marginRight) -
+    widthOf(titleBox, beside) -
+    (beside.length > 0 ? px(box.columnGap) : 0)
+  );
+}
 
 /**
  * A name a person typed. It gives way in the middle, never at the end: the first and last words
@@ -103,38 +130,31 @@ export function UserTitle({ title }: { title: string }) {
   const [shown, setShown] = useState(title);
   useLayoutEffect(() => {
     const el = ref.current;
-    if (!el) return;
-    // B7: measure the room from the bar row, never from the heading: measuring the heading ratchets
-    // (a name that shortened never grows back). The row is a stable box owned by the strip.
-    const row = el.closest(".strip-row") as HTMLElement | null;
+    const row = el?.closest<HTMLElement>(".strip-row");
+    const titleBox = el?.closest<HTMLElement>(".rd-title");
+    if (!el || !row || !titleBox) return;
     const measure = () => {
-      const ctx = document.createElement("canvas").getContext("2d");
-      if (!ctx) return;
-      const cs = getComputedStyle(el);
-      ctx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-      const titleBox = el.closest(".rd-title") as HTMLElement | null;
-      const gap = titleBox ? parseFloat(getComputedStyle(titleBox).columnGap || "0") || 0 : 0;
-      // B5/B7: the stable room is the title slot, not the heading that shrinks with its own text.
-      const beside = titleBox
-        ? [...titleBox.children].filter((c) => c !== el.parentElement && !c.contains(el)).reduce((n, c) => n + (c as HTMLElement).getBoundingClientRect().width, 0)
-        : 0;
-      const available = titleBox ? titleBox.getBoundingClientRect().width - beside - gap : 0;
-      const full = ctx.measureText(title).width;
-      if (available <= 0 || full <= available) { setShown(title); return; }
+      const width = textMeasurer(el);
+      if (!width) return;
+      const room = roomFor(el, row, titleBox);
       // B7: cut on code points, never inside a surrogate pair (an emoji stays whole).
-      const chars = Array.from(title);
-      const keep = Math.min(chars.length, Math.max(USER_TITLE_FLOOR, Math.floor((available / full) * chars.length) - 1));
-      if (keep >= chars.length) { setShown(title); return; }
-      const left = Math.ceil(keep / 2);
-      setShown(`${chars.slice(0, left).join("")}…${chars.slice(chars.length - (keep - left)).join("")}`);
+      let keep = Array.from(title).length;
+      let next = title;
+      while (room > 0 && keep > USER_TITLE_FLOOR && width(next) > room) {
+        keep -= 1;
+        next = middleCut(title, keep);
+      }
+      setShown(next);
     };
     measure();
+    // The row's size, and the strip's own decision about what else is on it.
     const ro = new ResizeObserver(measure);
-    if (row) ro.observe(row);
-    // The title slot grows when the context moves to the body: the name must grow back with it.
-    const titleBox = el.closest(".rd-title");
-    if (titleBox) ro.observe(titleBox);
-    return () => ro.disconnect();
+    ro.observe(row);
+    row.addEventListener("barfit", measure);
+    return () => {
+      ro.disconnect();
+      row.removeEventListener("barfit", measure);
+    };
   }, [title]);
   return (
     <h1 ref={ref} data-bar-user-title="" title={title} aria-label={title}>
@@ -186,40 +206,49 @@ export function BarContextMirror({ children, className }: { children: ReactNode;
   return <p className={className ? `bar-context-mirror ${className}` : "bar-context-mirror"}>{children}</p>;
 }
 
-/** True when the strip measured that the context had to leave the bar (B8). */
-export function useContextInBody(): boolean {
-  const [inBody, setInBody] = useState(false);
+/** True while the strip's measurement, published on the root element, is `value`. */
+function useBarFlag(key: "barContext" | "barSecondary", value: string): boolean {
+  const [on, setOn] = useState(false);
   useEffect(() => {
-    const read = () => setInBody(document.documentElement.dataset.barContext === "body");
+    const read = () => setOn(document.documentElement.dataset[key] === value);
     read();
     const mo = new MutationObserver(read);
-    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-bar-context"] });
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-bar-context", "data-bar-secondary"] });
     return () => mo.disconnect();
-  }, []);
-  return inBody;
+  }, [key, value]);
+  return on;
+}
+
+/** True when the strip measured that the context had to leave the bar (B8). */
+export function useContextInBody(): boolean {
+  return useBarFlag("barContext", "body");
+}
+
+/**
+ * The one overflow menu for a page's secondary keys (B10). Its key is drawn exactly when the strip
+ * measured that the `.rd-secondary` keys do not fit, by the same attribute that hides them, so an
+ * action always has one home and never two.
+ */
+export function BarOverflow({ children }: { children: ReactNode }) {
+  const inMenu = useBarFlag("barSecondary", "menu");
+  const [open, setOpen] = useState(false);
+  const anchor = useRef<HTMLSpanElement>(null);
+  // A menu left open while the keys went back to the bar closes with them.
+  if (open && !inMenu) setOpen(false);
+  return (
+    <span className="rd-overflow">
+      <span ref={anchor}>
+        <IconButton label="More page actions" size="sm" icon={<DotsThreeOutline size={16} />} onClick={() => setOpen((v) => !v)} />
+      </span>
+      <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} label="More page actions" className="bar-overflow-menu">
+        {children}
+      </Popover>
+    </span>
+  );
 }
 
 export function PageActions({ children }: { children: ReactNode }) {
   const slot = useSlot(pickActions);
   if (!slot) return null;
   return createPortal(<span className="rd-actions">{children}</span>, slot);
-}
-
-/**
- * True when the strip's own content box is too narrow to show secondary keys. A view uses this to
- * render the same actions in the overflow menu the moment they leave the bar (B10). It measures the
- * container, not the window: the rail takes width the viewport does not know about.
- */
-export function useStripCompact(): boolean {
-  const [compact, setCompact] = useState(false);
-  useEffect(() => {
-    const row = document.querySelector<HTMLElement>(".strip-row");
-    if (!row) return;
-    const read = () => setCompact(row.clientWidth <= 1150);
-    read();
-    const ro = new ResizeObserver(read);
-    ro.observe(row);
-    return () => ro.disconnect();
-  }, []);
-  return compact;
 }

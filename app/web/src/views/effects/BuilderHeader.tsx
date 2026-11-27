@@ -3,11 +3,10 @@
 // The builder's page strip (#257 phase 4), moved out of StackBuilder.tsx unchanged: the back key,
 // the stack's name and layer count, Unsaved, Revert and Save.
 
-import { ArrowCounterClockwise, ArrowLeft, DotsThreeOutline, FilmSlate, FloppyDisk } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowLeft, FilmSlate, FloppyDisk } from "@phosphor-icons/react";
 import { Button, ButtonLink, IconButton } from "@/components/Button";
-import { Popover } from "@/components/Popover";
-import { BarContextMirror, PageActions, PageTitle, useContextInBody, useStripCompact } from "@/shell/PageHeader";
-import { useRef, useState, type RefObject } from "react";
+import { BarContextMirror, BarOverflow, PageActions, PageTitle, useContextInBody } from "@/shell/PageHeader";
+import type { RefObject } from "react";
 
 export function BuilderHeader({
   name,
@@ -37,11 +36,7 @@ export function BuilderHeader({
   onRevert: () => void;
   onSave: () => void;
 }) {
-  // B10: when the bar drops the back and revert keys they live in the one overflow menu.
-  const stripCompact = useStripCompact();
   const contextInBody = useContextInBody();
-  const [moreOpen, setMoreOpen] = useState(false);
-  const moreRef = useRef<HTMLSpanElement>(null);
   return (
     <>
       <PageTitle
@@ -87,18 +82,16 @@ export function BuilderHeader({
         )}
         {/* R7: Save is always in the bar and is disabled when there is nothing to save. R2: the
             Unsaved words become a dot on Save, with those words kept in its accessible name. */}
-        {!narrow && (
-          <Button
-            className="rd-secondary"
-            size="sm"
-            variant="ghost"
-            icon={<ArrowCounterClockwise size={14} />}
-            disabled={!dirty || saveState === "saving"}
-            onClick={onRevert}
-          >
-            Revert
-          </Button>
-        )}
+        <Button
+          className="rd-secondary"
+          size="sm"
+          variant="ghost"
+          icon={<ArrowCounterClockwise size={14} />}
+          disabled={!dirty || saveState === "saving"}
+          onClick={onRevert}
+        >
+          <span className="rd-btn-text">Revert</span>
+        </Button>
         <Button
           className="rd-stack-strip-save"
           data-bar-primary=""
@@ -115,23 +108,18 @@ export function BuilderHeader({
           <span className="rd-btn-text" data-short="Save">Save</span>
           {dirty && <span className="sr-only">Unsaved</span>}
         </Button>
-        {stripCompact && (
-          <>
-            <span ref={moreRef}>
-              <IconButton label="More page actions" size="sm" icon={<DotsThreeOutline size={16} />} onClick={() => setMoreOpen((v) => !v)} />
-            </span>
-            <Popover anchor={moreRef} open={moreOpen} onClose={() => setMoreOpen(false)} label="More page actions">
-              {groupHref && (
-                <ButtonLink href={groupHref} variant="ghost" size="sm" icon={<ArrowLeft size={14} />} label={groupName ? `Back to ${groupName}` : "Back to the scene"}>
-                  <span className="rd-btn-text">{groupName ? `Back to ${groupName}` : "Back to the scene"}</span>
-                </ButtonLink>
-              )}
-              <Button variant="ghost" size="sm" icon={<ArrowCounterClockwise size={14} />} disabled={!dirty || saveState === "saving"} onClick={onRevert}>
-                Revert
-              </Button>
-            </Popover>
-          </>
-        )}
+        {/* B10: the keys that do not fit the bar are in the one overflow menu. On a phone the way
+            back to the group stands before the name, so the menu does not repeat it. */}
+        <BarOverflow>
+          {!narrow && groupHref && (
+            <ButtonLink href={groupHref} variant="ghost" size="sm" icon={<ArrowLeft size={14} />} label={groupName ? `Back to ${groupName}` : "Back to the scene"}>
+              <span className="rd-btn-text">{groupName ? `Back to ${groupName}` : "Back to the scene"}</span>
+            </ButtonLink>
+          )}
+          <Button variant="ghost" size="sm" icon={<ArrowCounterClockwise size={14} />} disabled={!dirty || saveState === "saving"} onClick={onRevert}>
+            <span className="rd-btn-text">Revert</span>
+          </Button>
+        </BarOverflow>
       </PageActions>
     </>
   );

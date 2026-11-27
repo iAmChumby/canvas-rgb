@@ -15,18 +15,10 @@ import { patchSnap, refreshStatus, useSnap } from "@/lib/store";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { RunningPresetName, useTrackRunningPreset } from "@/shell/RunningPresetName";
 import { StripSlot } from "@/shell/PageHeader";
+import { fitBar } from "@/shell/barFit";
 
 /** What the strip says when nothing is wrong. */
 const ALL_GOOD = "All connected";
-
-/**
- * The strip's own content box, not the window's width, decides where the page's context lives
- * (#586). The rail takes width the viewport media queries never knew about. Below this width the
- * context moves to the head of the page body; the pages render the same words there and CSS shows
- * only one copy. Measured from the widest context in the audit (Fans, 311 px) plus the title, the
- * primary action and the gaps: 1150 px of content keeps every one of them whole.
- */
-export const STRIP_CONTEXT_ROOM = 1150;
 
 /** The icon of the mark: a tick when all is well, a warning when it is not. */
 function markIcon(tone: Tone) {
@@ -74,12 +66,12 @@ export function StatusStrip({
   const rowRef = useRef<HTMLDivElement>(null);
   const markRef = useRef<HTMLButtonElement>(null);
 
-  // One rule, measured from the strip's own content box (#586 fix pass 1 B9, B13):
-  //  - the context stays in the bar while it fits; otherwise its page renders the same words at
-  //    the head of its body (CSS shows one copy, with no 1150/1151 gap);
+  // One rule, measured from the strip's own content box (#586 fix pass 1 B9, B10, B12, B13):
+  //  - the context and the secondary keys stay in the bar while they fit; otherwise the page draws
+  //    the context at the head of its body and the keys in the overflow (CSS shows one copy);
   //  - a second row appears only when a primary action cannot fit beside the other controls;
   //  - now playing lives in the strip only while the rail's deck is collapsed, never twice.
-  // All three are decided from the strip's box, never from a viewport guess.
+  // All of it is decided from the strip's box, never from a viewport guess.
   useEffect(() => {
     const strip = stripRef.current;
     const row = rowRef.current;
@@ -90,35 +82,17 @@ export function StatusStrip({
     };
     const update = () => {
       const root = document.documentElement;
-      root.dataset.barContext = "bar";
-      const gap = parseFloat(getComputedStyle(row).columnGap || "0") || 0;
-      const kids = [...row.children] as HTMLElement[];
-      const width = (el: HTMLElement) => el.getBoundingClientRect().width;
-      const actions = row.querySelector<HTMLElement>(".strip-page-actions");
-      const primary = actions?.querySelector("[data-bar-primary]");
-      const main = kids.filter((k) => k !== actions);
-      const used = main.reduce((n, k) => n + width(k), 0) + gap * Math.max(0, main.length - 1);
-      const actionsWidth = actions ? width(actions) : 0;
-      // The context is part of the title slot: it moves out when it is itself cut or when the
-      // whole row no longer fits. Measuring scrollWidth here is what makes the rule per page.
-      const context = row.querySelector<HTMLElement>(".rd-context");
-      let contextCut = false;
-      if (context) {
-        const range = document.createRange();
-        range.selectNodeContents(context);
-        contextCut = range.getBoundingClientRect().right > row.getBoundingClientRect().right - 1
-          || context.scrollWidth > context.clientWidth + 1;
-      }
-      root.dataset.barContext = contextCut || used + actionsWidth + (actions ? gap : 0) > row.clientWidth + 1 ? "body" : "bar";
-      // A second row exists only when a primary action cannot fit beside the other controls. The
-      // 85% margin keeps the decision stable once the actions have moved to their own row.
-      const actionsBox = actions?.getBoundingClientRect();
-      const overflowing = !!actionsBox && actionsBox.right > row.getBoundingClientRect().right - 1;
-      const fitsEasily = used + actionsWidth + gap <= row.clientWidth * 0.85;
-      strip.dataset.barRows = primary && (overflowing || !fitsEasily) ? "2" : "1";
       const deck = document.querySelector<HTMLElement>(".rail-deck");
       root.dataset.nowWhere = deck && getComputedStyle(deck).display !== "none" ? "rail" : "strip";
+      // `data-measure` stops everything shrinking, so what is measured is what each part needs.
+      strip.dataset.measure = "";
+      const fit = fitBar(strip, row);
+      delete strip.dataset.measure;
+      root.dataset.barContext = fit.context;
+      root.dataset.barSecondary = fit.secondary;
+      strip.dataset.barRows = fit.rows;
       publishHeight();
+      row.dispatchEvent(new Event("barfit"));
     };
     update();
     const ro = new ResizeObserver(update);
@@ -126,7 +100,13 @@ export function StatusStrip({
     ro.observe(strip);
     const mo = new MutationObserver(update);
     mo.observe(strip, { childList: true, subtree: true, characterData: true });
+    // The faces arrive after the first measurement and change every width.
+    let gone = false;
+    void document.fonts?.ready.then(() => {
+      if (!gone) update();
+    });
     return () => {
+      gone = true;
       ro.disconnect();
       mo.disconnect();
       document.documentElement.style.removeProperty("--strip-h");

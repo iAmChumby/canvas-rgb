@@ -550,11 +550,11 @@ html[data-motion="reduced"] *::after {
 
 /* One priority order, from the strip's own content box (#586). A page's own title is flex:none
    everywhere and appears in none of these rules: it never gives way.
-   1150 px: the context (1), the now-playing detail (2), the status words (3) and the power words
-   (7) step down. The measured widest context is 311 px; add the longest static title (124 px),
-   the primary action (96 px), a mark (90 px), the gaps and the 48 px padding, and 1150 px keeps
-   all of them whole. 900 px: the now-playing name (4) becomes a swatch, secondary keys (5) move
-   to the existing overflow, and a segmented switch (6) becomes a dropdown of its active value. */
+   The context (1) and the secondary keys (5) have no fixed width at which they leave: the strip
+   measures what each page needs (shell/barFit.ts) and they stay whenever they fit.
+   1150 px: the now-playing detail (2), the status words (3) and the power words (7) step down,
+   and the primary key keeps only its verb. 900 px: a segmented switch (6) becomes a dropdown of
+   its active value. */
 /* B11: one rule. The rail deck owns now playing while it is on screen; the strip owns it while
    the deck is collapsed. The two are never drawn together. */
 :root[data-now-where="rail"] .strip-now {
@@ -594,11 +594,15 @@ html[data-motion="reduced"] *::after {
     color: var(--mute);
   }
 
-  /* Rank 5 and 8: secondary keys go to the overflow, and the primary key keeps only its verb. */
-  .rd-actions .rd-secondary,
+  /* Rank 3: the pending words become their count beside the warning mark. */
   .rd-actions .rd-peri-pending-text {
     display: none;
   }
+  .rd-actions .rd-peri-pending::after {
+    content: attr(data-count);
+  }
+
+  /* Rank 8: the primary key keeps only its verb. */
   .rd-actions [data-bar-primary] .rd-btn-text {
     font-size: 0;
   }
@@ -618,12 +622,6 @@ html[data-motion="reduced"] *::after {
   }
   .rd-actions .rd-profile-dropdown {
     display: inline-flex;
-  }
-  .rd-actions .rd-secondary-icon {
-    display: inline-flex;
-  }
-  .rd-actions .rd-secondary {
-    display: none;
   }
 }
 
@@ -902,9 +900,60 @@ html[data-motion="reduced"] *::after {
 }
 
 /* The forms the strip switches between: one is drawn at a time by the container rules above. */
-.rd-profile-dropdown,
-.rd-secondary-icon {
+.rd-profile-dropdown {
   display: none;
+}
+
+/* B10: one attribute, set by the strip's measurement, moves the secondary keys: they are in the
+   bar, or their overflow key is. Never both. */
+.rd-actions .rd-overflow {
+  display: none;
+}
+
+:root[data-bar-secondary="menu"] .rd-actions .rd-overflow {
+  display: inline-flex;
+}
+
+:root[data-bar-secondary="menu"] .rd-actions .rd-secondary {
+  display: none;
+}
+
+.bar-overflow-menu {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s2);
+}
+
+/* The bar's keys and the menu's keep their words at every width: a key that does not fit moves,
+   it is not reduced to its icon. */
+.rd-actions .rd-btn-text,
+.bar-overflow-menu .rd-btn-text {
+  display: inline;
+}
+
+/* While the strip measures, nothing shrinks or wraps: each part reports what it needs. */
+.strip[data-measure] .strip-row {
+  flex-wrap: nowrap;
+}
+
+.strip[data-measure] .strip-row > *,
+.strip[data-measure] .strip-now-text,
+.strip[data-measure] .rd-title,
+.strip[data-measure] .rd-title > *,
+.strip[data-measure] .rd-actions,
+.strip[data-measure] .rd-actions > * {
+  flex-shrink: 0;
+}
+
+.strip[data-measure] .strip-controls {
+  margin-left: 0;
+}
+
+/* Beside a name a person typed, only the name gives way. */
+.strip-row:has([data-bar-user-title]) > :not(.strip-slot),
+.rd-title:has([data-bar-user-title]) > :not(h1) {
+  flex-shrink: 0;
 }
 
 /* The pending count keeps its warning glyph when its words step down; the words stay in the
@@ -5887,6 +5936,8 @@ button.chip:hover {
   /* Pages with actions own two rows: the title above, the controls below. Both rows are fixed
      for the page, whatever state it is in, and nothing in either row is ellipsized. */
   .strip[data-bar-rows="2"] .strip-row {
+    /* The strip's measurement reads this: only here can the keys take a line of their own. */
+    --bar-wraps: 1;
     flex-wrap: wrap;
     align-content: center;
     row-gap: 2px;
@@ -6643,19 +6694,6 @@ button.chip:hover {
     flex-wrap: wrap;
     gap: var(--s3);
     justify-content: flex-end;
-  }
-}
-
-/* The strip is outside the content box, so it follows the window, like the shell's own strip
-   rules do: the pending count and the Revert label give way to the title and Apply, which
-   have to fit at 390 px. */
-@media (max-width: 720px) {
-  .rd-peri-pending {
-    display: none;
-  }
-
-  .rd-peri-revert-label {
-    display: none;
   }
 }
 
