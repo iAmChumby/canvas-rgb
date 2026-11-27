@@ -42,7 +42,11 @@ both editors see the same daemon, so those go in `slowThumbnails`.
 Env: `UI_CAPTURE_PORT` (default 4310), `UI_CAPTURE_OUT` (default
 `.build/ui-capture`), `UI_CAPTURE_API_BASE` (default
 `http://127.0.0.1:19430`), `UI_CAPTURE_TOKEN_FILE` /
-`FAKE_TOKEN_FILE` (default `.build/fake-home/api-token`).
+`FAKE_TOKEN_FILE` (default `.build/fake-home/api-token`),
+`UI_CAPTURE_VIEWPORTS` (a JSON array of `{ "w": 1440, "h": 900 }`, defaulting
+to the standard matrix) for a change that needs other sizes, and
+`UI_CAPTURE_VIEWS` (a JSON array of `{ "name": "credits", "path": "/credits/" }`)
+to capture only some pages.
 
 ## What it never touches
 

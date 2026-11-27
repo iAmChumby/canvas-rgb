@@ -44,7 +44,11 @@ if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(DAEMON_BASE)) {
   throw new Error(`UI_CAPTURE_API_BASE must be http://127.0.0.1:<port> (the token is sent there), not ${DAEMON_BASE}`);
 }
 
-const VIEWS = [
+// UI_CAPTURE_VIEWS overrides the standard list with a JSON array of
+// { name, path } when only a page or two needs a screenshot run (#578).
+const VIEWS = process.env.UI_CAPTURE_VIEWS
+  ? JSON.parse(process.env.UI_CAPTURE_VIEWS)
+  : [
   { name: "scenes", path: "/" },
   { name: "effects", path: "/effects/" },
   { name: "devices", path: "/devices/" },
@@ -53,16 +57,21 @@ const VIEWS = [
   { name: "updates", path: "/updates/" },
   { name: "displays", path: "/displays/" },
   { name: "peripherals", path: "/peripherals/" },
-];
+  { name: "credits", path: "/credits/" },
+  ];
 
-const VIEWPORTS = [
-  { w: 1920, h: 1040 },
-  { w: 1440, h: 900 },
-  { w: 1280, h: 860 },
-  { w: 1024, h: 768 },
-  { w: 960, h: 1032 },
-  { w: 390, h: 844 },
-];
+// UI_CAPTURE_VIEWPORTS overrides the standard matrix with a JSON array of
+// { w, h } when a change needs screenshots at other sizes (#578).
+const VIEWPORTS = process.env.UI_CAPTURE_VIEWPORTS
+  ? JSON.parse(process.env.UI_CAPTURE_VIEWPORTS)
+  : [
+      { w: 1920, h: 1040 },
+      { w: 1440, h: 900 },
+      { w: 1280, h: 860 },
+      { w: 1024, h: 768 },
+      { w: 960, h: 1032 },
+      { w: 390, h: 844 },
+    ];
 
 const THEMES = ["dark", "light"];
 
@@ -310,7 +319,25 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
   }
   // Let the view settle (fonts, thumbnails, one preview frame).
   await page.waitForTimeout(400);
-  const fileName = `${view.name}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+  // UI_CAPTURE_SCROLL_TO scrolls to a selector before the shot, for a section
+  // that sits below the fold (#578).
+  const scrollTo = process.env.UI_CAPTURE_SCROLL_TO;
+  if (scrollTo) {
+    await page.evaluate((selector) => {
+      document.querySelector(selector)?.scrollIntoView({ block: "start" });
+    }, scrollTo);
+    await page.waitForTimeout(200);
+  }
+  // UI_CAPTURE_CLICK activates one selector before the shot (an opened
+  // disclosure). It dispatches the click in the page rather than using
+  // page.click: Playwright auto-scrolls to the element, which would push a
+  // section captured with UI_CAPTURE_SCROLL_TO back out of view.
+  const clickSelector = process.env.UI_CAPTURE_CLICK;
+  if (clickSelector) {
+    await page.$eval(clickSelector, (el) => el.click());
+    await page.waitForTimeout(200);
+  }
+  const fileName = `${view.name}${scrollTo ? "-scrolled" : ""}${clickSelector ? "-open" : ""}-react-${viewport.w}x${viewport.h}-${theme}.png`;
   const filePath = path.join(OUT_DIR, fileName);
   await page.screenshot({ path: filePath });
   page.off("pageerror", onPageError);

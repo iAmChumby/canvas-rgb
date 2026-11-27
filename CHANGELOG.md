@@ -8,11 +8,14 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Editor: a Credits page at /credits/ credits the people and projects canvas-rgb builds on and lists the third-party licences behind Rust and npm packages, grouped by licence with the full texts behind one disclosure each. It is linked from Settings > Version. (#578)
 - Help & About: a new page with the app's version, build, Windows edition and service version, a scrubbed copy of the support report, and links to the docs, source, release notes, privacy and credits. (#574)
 - Docs: `docs/privacy.md` lists, in plain words and with file-by-file evidence, the app's network requests — the daily update check (including a probe of a failed feed), the optional experimental feed, the signed installer, the OpenRGB download during setup and a shipped setup helper that downloads only when run by hand — and everything that stays local. The site is out of scope. (#581)
 
 ### Fixed
 
+- Credits: expanded licence texts reflow into paragraphs that wrap at any window width, keeping notice numbers, headings and copyright lines on their own lines. (#584)
+- Credits: the installer now ships the page's third-party notices, each notice carries its copyright holder, and credited links open in your browser instead of the editor window. (#578)
 - Help & About: the report now scrubs the real 8.3 short name of the profile and only whole user or machine names, free-text device names cannot add rows or cells to the report, a disconnected service is no longer shown as connected, "Last run" reads in plain words, and the page's links and receipt no longer overlap or move as they load. Go-to addresses stay on one line with the full URL on hover, and release notes are linked once, in the identity panel. (#583)
 
 ## [0.20.0] - 2026-11-26

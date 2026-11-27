@@ -1,0 +1,54 @@
+{
+  "about": "Copyright lines for crates whose published package has no licence file. cargo-about 0.9.3 falls back to its SPDX template, which leaves a <year> <owner> placeholder; MIT and BSD-3-Clause require the real notice. Source is the crate's upstream licence file at the locked version, read 2026-11-26. tools/fix-rust-notice-holders.mjs applies these to the generated notices.",
+  "crates": [
+    {
+      "name": "alloc-stdlib",
+      "version": "0.3.0",
+      "license": "BSD-3-Clause",
+      "copyright": ["Copyright (c) 2016 Dropbox, Inc."],
+      "source": "https://github.com/dropbox/rust-alloc-no-stdlib/blob/master/LICENSE"
+    },
+    {
+      "name": "rquickjs-core",
+      "version": "0.14.0",
+      "license": "MIT",
+      "copyright": ["Copyright (c) 2020 Mees Delzenne", "Copyright (c) 2025 Rquickjs Contributors"],
+      "source": "https://github.com/DelSkayn/rquickjs/blob/master/LICENSE"
+    },
+    {
+      "name": "ts-rs",
+      "version": "12.0.1",
+      "license": "MIT",
+      "copyright": ["Copyright (c) 2020 Aleph Alpha GmbH"],
+      "source": "https://github.com/Aleph-Alpha/ts-rs/blob/main/LICENSE"
+    },
+    {
+      "name": "ts-rs-macros",
+      "version": "12.0.1",
+      "license": "MIT",
+      "copyright": ["Copyright (c) 2020 Aleph Alpha GmbH"],
+      "source": "https://github.com/Aleph-Alpha/ts-rs/blob/main/LICENSE"
+    },
+    {
+      "name": "webview2-com",
+      "version": "0.39.1",
+      "license": "MIT",
+      "copyright": ["Copyright (c) 2021 Bill Avery"],
+      "source": "https://github.com/wravery/webview2-rs/blob/main/LICENSE"
+    },
+    {
+      "name": "webview2-com-macros",
+      "version": "0.8.1",
+      "license": "MIT",
+      "copyright": ["Copyright (c) 2021 Bill Avery"],
+      "source": "https://github.com/wravery/webview2-rs/blob/main/LICENSE"
+    },
+    {
+      "name": "webview2-com-sys",
+      "version": "0.39.1",
+      "license": "MIT",
+      "copyright": ["Copyright (c) 2021 Bill Avery"],
+      "source": "https://github.com/wravery/webview2-rs/blob/main/LICENSE"
+    }
+  ]
+}

@@ -17,9 +17,11 @@ fan chip through PawnIO. My protocol code started from theirs (Apache-2.0, credi
 **PawnIO** ([github.com/namazso/PawnIO](https://github.com/namazso/PawnIO)). A signed driver that
 lets user code reach the Super I/O chip safely. The fan control runs on it.
 
-**nct6687d** ([github.com/Fred78290/nct6687d](https://github.com/Fred78290/nct6687d)) and
+**nct6687d** ([github.com/Fred78290/nct6687d](https://github.com/Fred78290/nct6687d)).
+The register map of the fan chip on my board came from this driver.
+
 **LibreHardwareMonitor** ([github.com/LibreHardwareMonitor/LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)).
-The register map of the fan chip on my board came from their drivers.
+The register map of the fan chip on my board came from this driver.
 
 **ATKsoft** ([github.com/grivia0/ATKsoft](https://github.com/grivia0/ATKsoft)). The Attack Shark
 X6 support exists because this project had already worked out the mouse's read-back handshake
@@ -37,5 +39,23 @@ documents the controller's input reports.
 **SignalRGB** ([signalrgb.com](https://signalrgb.com)). canvas-rgb reads effects in SignalRGB's
 HTML format, so the effects people already wrote for it can run here. Their effects belong to
 their authors and are not part of this repo.
+
+## The stack canvas-rgb builds on
+
+These are the libraries and frameworks the app itself is built from.
+
+**Rust** ([rust-lang.org](https://www.rust-lang.org/)). The daemon, service, tray and command line are written in Rust.
+
+**Tauri** ([v2.tauri.app](https://v2.tauri.app/)). The tray app hosts the editor as a local web view.
+
+**Next.js** ([nextjs.org](https://nextjs.org/)). The editor is a static export built with Next.js.
+
+**React** ([react.dev](https://react.dev/)). The editor's views are React components.
+
+**CodeMirror** ([codemirror.net](https://codemirror.net/)). The effect editor is built on CodeMirror 6.
+
+**Phosphor** ([phosphoricons.com](https://phosphoricons.com/)). The editor's icons come from Phosphor.
+
+**Sonner** ([sonner.emilkowal.ski](https://sonner.emilkowal.ski/)). Toast messages in the editor use Sonner.
 
 If your work belongs on this list and is missing, open an issue and I will add it.

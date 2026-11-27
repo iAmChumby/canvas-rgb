@@ -436,7 +436,9 @@ fn every_outbound_host_and_client_is_in_the_privacy_table() {
     );
     // #574 added scrub.rs, api/about.rs, HelpView.tsx and Receipt.tsx, so the set grew by five;
     // the docs site is a sixth host named in source and opened only by the browser (row 5).
-    assert_eq!(files.len(), 480, "the set of scanned source files moved");
+    // #578 added CreditsView.tsx, LicenceDisclosure.tsx, credits/page.tsx and lib/licenceText.ts:
+    // four more files, reading a bundled local asset; no new outbound host or connection constructor.
+    assert_eq!(files.len(), 484, "the set of scanned source files moved");
     assert_eq!(found_hosts.len(), 4, "the set of outbound hosts moved");
     assert_eq!(found_tokens.len(), 8, "the set of connection constructors moved");
     assert!(
