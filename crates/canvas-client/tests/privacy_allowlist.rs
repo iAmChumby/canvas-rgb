@@ -439,7 +439,9 @@ fn every_outbound_host_and_client_is_in_the_privacy_table() {
     // #577 added safe_start.rs in the service and api/safe_start.rs in the daemon; #578 added
     // CreditsView.tsx, LicenceDisclosure.tsx, credits/page.tsx and lib/licenceText.ts. Six more
     // files, with no new outbound host or connection constructor.
-    assert_eq!(files.len(), 498, "the set of scanned source files moved");
+    // #580 added faults.rs, FaultNote.tsx, DeviceChecklist.tsx and lib/supportedDevices.ts; the
+    // errors/reporting pass added its own files. Both sets are scanned, with no new network access.
+    assert_eq!(files.len(), 502, "the set of scanned source files moved");
     assert_eq!(found_hosts.len(), 4, "the set of outbound hosts moved");
     assert_eq!(found_tokens.len(), 8, "the set of connection constructors moved");
     assert!(

@@ -3,6 +3,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { PeripheralsView } from "@/views/PeripheralsView";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 
+// The no-settings panel links to the Help checklist, so the shared ButtonLink needs a router.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: () => {}, replace: () => {} }),
+  usePathname: () => "/peripherals/",
+}));
+
 // #572: a pad keeps its id when it moves from the receiver to Bluetooth. The kept read is keyed
 // by connection, so the old connection's sections and enabled Change never show on the new one.
 

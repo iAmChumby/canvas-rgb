@@ -3,6 +3,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { PeripheralsView, UNREAD_POLL_MS } from "@/views/PeripheralsView";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 
+// The no-settings panel links to the Help checklist, so the shared ButtonLink needs a router.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: () => {}, replace: () => {} }),
+  usePathname: () => "/peripherals/",
+}));
+
 // A connection that carries no settings (a controller over Bluetooth): the page says so once, in
 // the daemon's words, and offers no control that cannot work.
 
@@ -154,5 +160,20 @@ describe("a connection with no settings", () => {
     expect(screen.queryByText(WHY)).toBeNull();
     expect(toggle("Change settings on the device").disabled).toBe(false);
     for (const call of api.peripheral.mock.calls) expect(call).toEqual([id]);
+  });
+
+  it("a mouse with no sections gets neutral advice, not pad advice (#580 C3)", async () => {
+    const mouse = pad("mouse:none", {
+      info: { ...pad("mouse:none").info, name: "Fake Mouse", kind: "mouse", adapter: "fake-attack-shark-x6" },
+      problem: "This mouse does not report settings over this connection.",
+    });
+    api.peripherals.mockResolvedValue({ peripherals: [mouse.info] });
+    api.peripheral.mockResolvedValue(mouse);
+    render(<PeripheralsView />);
+    expect(
+      await screen.findByText("The mouse's settings cannot be read or changed over this connection."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/XInput mode/)).toBeNull();
+    expect(screen.queryByText(/this pad/)).toBeNull();
   });
 });

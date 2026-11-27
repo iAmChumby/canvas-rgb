@@ -22,6 +22,11 @@
 //   UI_CAPTURE_API_BASE  daemon base URL (default http://127.0.0.1:19430)
 //   UI_CAPTURE_TOKEN_FILE / FAKE_TOKEN_FILE  test token path
 //       (default .build/fake-home/api-token)
+//   UI_CAPTURE_FAULTS  JSON {"openrgb":"down","fan":"pawn_io_unavailable","dismissed":false}
+//       #580: patches only the daemon answers the notes read, so the real fake daemon still
+//       serves everything else and no real hardware or fan chip is touched. `fan` may be
+//       pawn_io_unavailable or chip_not_found; `openrgb` may be down or connecting; `empty`
+//       empties the device list; `dismissed` hides the page notes, not the strip.
 
 import { createRequire } from "node:module";
 import http from "node:http";
@@ -79,6 +84,71 @@ function pick(raw, all, key) {
 }
 const VIEWS = pick(process.env.UI_CAPTURE_VIEWS, ALL_VIEWS, (v) => v.name);
 const VIEWPORTS = pick(process.env.UI_CAPTURE_VIEWPORTS, ALL_VIEWPORTS, (v) => `${v.w}x${v.h}`);
+const FAULTS = process.env.UI_CAPTURE_FAULTS ? JSON.parse(process.env.UI_CAPTURE_FAULTS) : null;
+
+/** The #580 notes a screenshot needs, in the daemon's words, with stable fixture keys. */
+function injectedFaults() {
+  const out = [];
+  if (FAULTS?.fan) {
+    const chipNotFound = FAULTS.fan === "chip_not_found";
+    out.push({
+      kind: "fan_chip",
+      key: chipNotFound ? "1111222233334444" : "aaaabbbbccccdddd",
+      device: null,
+      affected: "Fan headers can't be driven.",
+      cause: chipNotFound
+        ? "canvas-rgb found no supported fan chip on this board."
+        : "The PawnIO driver, which canvas-rgb needs to reach the fan chip, is missing or did not load.",
+      fix: chipNotFound
+        ? "GPU fans can still be set from canvas-rgb."
+        : "Install PawnIO, then restart canvas-rgb.",
+      ignore_if: chipNotFound
+        ? "Your motherboard has no NCT6687D chip; GPU fans are still controlled."
+        : "Your motherboard sets the fans and you do not need canvas-rgb to.",
+      dismissed: FAULTS.dismissed === true,
+    });
+  }
+  if (FAULTS?.openrgb === "down") {
+    out.push({
+      kind: "open_rgb_down",
+      key: "0123456789abcdef",
+      device: null,
+      affected: "Lights reached through OpenRGB are not available.",
+      cause: "OpenRGB is not running, or its port is busy or refused.",
+      fix: "Start OpenRGB.",
+      ignore_if: "You have no lights that need OpenRGB.",
+      dismissed: FAULTS.dismissed === true,
+    });
+  }
+  return out;
+}
+
+/** Patches the status and fans answers only; every other request still comes from the fake daemon. */
+async function injectFaults(page) {
+  if (!FAULTS) return;
+  const faults = injectedFaults();
+  await page.route(/127\.0\.0\.1:\d+\/api\/v1\/(status|fans|devices)(?:\?|$)/, async (route) => {
+    const answer = await route.fetch();
+    const body = await answer.json();
+    if (route.request().url().includes("/api/v1/status")) {
+      body.openrgb = FAULTS.openrgb ?? body.openrgb;
+      body.faults = faults;
+      if (FAULTS.empty) {
+        body.devices_connected = 0;
+        body.devices_total = 0;
+      }
+    } else if (route.request().url().includes("/api/v1/devices") && FAULTS.empty) {
+      body.devices = [];
+    } else if (FAULTS.fan) {
+      body.chip_problem = FAULTS.fan;
+      body.chip_checked = true;
+      body.chip = null;
+      body.headers = [];
+    }
+    await route.fulfill({ response: answer, body: JSON.stringify(body) });
+  });
+}
+
 
 const THEMES = ["dark", "light"];
 
@@ -439,6 +509,7 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
     fault,
     suppressChain: Boolean(process.env.UI_CAPTURE_SUPPRESS_CHAIN_SETUP),
   });
+  await injectFaults(page);
   const url = base + view.path;
   const loaded = await page.goto(url, { waitUntil: "load", timeout: 30000 });
   if (!loaded || !loaded.ok()) notLoaded.push(`page ${url} answered ${loaded ? loaded.status() : "nothing"}`);

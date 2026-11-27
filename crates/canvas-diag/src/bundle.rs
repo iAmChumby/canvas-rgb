@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn aliases_replace_the_longest_device_id_first() {
         let text = "openrgb:AB and openrgb:ABC and openrgb:ABCD".to_string();
-        let aliases = aliases_for(&[text.clone()]);
+        let aliases = aliases_for(std::slice::from_ref(&text));
         let (out, _) = apply_aliases(&text, &aliases);
         assert!(!out.contains("AB") && !out.contains("ABC") && !out.contains("ABCD"), "{out}");
         // A short id eating the start of a longer one leaves `device-1C`: no alias may have a

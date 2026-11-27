@@ -128,6 +128,26 @@ pub struct FansStatus {
     /// chart. Old payloads without it parse as empty.
     #[serde(default)]
     pub hot: Vec<HotLimitStatus>,
+    /// Issue #580: why the fan chip cannot be reached, when it cannot. `None` while
+    /// `chip_checked` is false, and when the chip is fine.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub chip_problem: Option<ChipProblem>,
+    /// Issue #580: the service has tried to open the chip and `chip_problem` is its answer. An
+    /// older service sends no field and reads false, so a missing answer never reads as healthy.
+    #[serde(default)]
+    pub chip_checked: bool,
+}
+
+/// Why the fan chip cannot be reached (#580).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ChipProblem {
+    /// PawnIO, the driver used to reach the chip, is not installed or did not load.
+    PawnIoUnavailable,
+    /// No supported fan chip was found on this board.
+    ChipNotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -449,6 +469,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_fans_status_from_an_older_service_reads_as_unchecked() {
+        // Issue #580 (R13): a payload without the chip fields never reads as a healthy chip.
+        let old = r#"{"chip":null,"hardware_watchdog":null,"headers":[],"temps":[],"active_profile":"Default","profiles":["Default"],"floor_percent":20}"#;
+        let status: FansStatus = serde_json::from_str(old).expect("an old payload parses");
+        assert!(!status.chip_checked);
+        assert_eq!(status.chip_problem, None);
+        let back = serde_json::to_value(&status).unwrap();
+        assert_eq!(back["chip_checked"], serde_json::json!(false));
+        let checked = r#"{"chip":null,"hardware_watchdog":null,"headers":[],"temps":[],"active_profile":"Default","profiles":[],"floor_percent":20,"chip_checked":true,"chip_problem":"pawn_io_unavailable"}"#;
+        let status: FansStatus = serde_json::from_str(checked).unwrap();
+        assert_eq!(status.chip_problem, Some(ChipProblem::PawnIoUnavailable));
+    }
 
     #[test]
     fn floors() {

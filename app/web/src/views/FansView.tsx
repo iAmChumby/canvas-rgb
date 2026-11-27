@@ -3,7 +3,8 @@ import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, WarningCircle, X } from "@phosphor-icons/react";
-import { Button, IconButton, WaitMark } from "@/components/Button";
+import { Button, ButtonLink, IconButton, WaitMark } from "@/components/Button";
+import { DismissFault, FaultNote } from "@/components/FaultNote";
 import { Checkbox } from "@/components/Checkbox";
 import { Chip } from "@/components/Chip";
 import { Popover } from "@/components/Popover";
@@ -27,7 +28,7 @@ import { TACH_ONLY_WHY, UNAVAILABLE_WHY, UNREAD_DUTY_WHY, canDrive, isHandedBack
 import { api } from "@/lib/endpoints";
 import { writeFanMode } from "@/lib/fanWrites";
 import { errorText } from "@/lib/errors";
-import { getSnap, refreshFans, retryFans as retryFansNow, useSnap } from "@/lib/store";
+import { getSnap, refreshFans, refreshStatus, retryFans as retryFansNow, useSnap } from "@/lib/store";
 import { baseFloor, CPU_IDLE_LIMIT_C, cpuLimitInIdleRange, hotRuleShortText, hotRuleText } from "@/lib/fan-rules";
 import { clamp, fmtSeconds } from "@/lib/format";
 import type { CurvePoint } from "@/proto/CurvePoint";
@@ -140,6 +141,22 @@ export function FansView() {
   const fans = useSnap((s) => s.fans);
   const fansError = useSnap((s) => s.fansError);
   const serviceDownMs = useSnap((s) => s.status?.service_down_ms ?? null);
+  // #580: the daemon builds the note from the service's typed chip answer; an older service
+  // sends no fault, so the page says nothing about a chip it never checked.
+  const chipFault = useSnap((s) => s.status?.faults?.find((f) => f.kind === "fan_chip") ?? null);
+  const [dismissingFault, setDismissingFault] = useState(false);
+  const dismissFault = async () => {
+    if (!chipFault) return;
+    setDismissingFault(true);
+    try {
+      await api.dismissFault(chipFault.key);
+      await refreshStatus();
+    } catch (e) {
+      notify(errorText(e), "warn");
+    } finally {
+      setDismissingFault(false);
+    }
+  };
   const rpm = useSnap((s) => s.rpm);
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("fans"));
@@ -256,6 +273,16 @@ export function FansView() {
           ) : undefined
         }
       />
+      {chipFault && !chipFault.dismissed && (
+        <FaultNote
+          parts={chipFault}
+          action={<DismissFault busy={dismissingFault} onDismiss={() => void dismissFault()} />}
+        >
+          <ButtonLink href="/help/" size="sm" variant="ghost">
+            Why isn&apos;t my device here?
+          </ButtonLink>
+        </FaultNote>
+      )}
       {fans && !fansError && <FanProfileActions fans={fans} />}
 
       {stale && (

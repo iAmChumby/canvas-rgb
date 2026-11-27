@@ -53,8 +53,12 @@ const ELLIPSIS = "(?:…|&hellip;|\\\\u2026|\\.\\.\\.)";
 /** A wait word, then within 80 characters (any kind, quotes and braces included) an ellipsis. */
 const PLAIN_WAIT = new RegExp(`\\b(?:${WAIT_WORDS.join("|")})\\b[^\\n]{0,80}?${ELLIPSIS}`);
 
-/** Sentences that are allowed, by file (relative to src) and the matched text. Empty today. */
-const ALLOWED: { file: string; text: string; why: string }[] = [];
+/** Sentences that are allowed, by file (relative to src) and the matched text. */
+const ALLOWED: { file: string; text: string; why: string }[] = [
+  // #580 R8 names the OpenRGB link's state in the Devices page's own line; it is a state, not a
+  // loading placeholder, and the list's own LoadFrame owns the wait.
+  { file: "views/DevicesView.tsx", text: "Connecting to OpenRGB…", why: "the link's state beside the OpenRGB note, not a loading placeholder" },
+];
 
 function walk(dir: string): string[] {
   return (readdirSync(dir, { withFileTypes: true }) as { name: string; isDirectory(): boolean }[]).flatMap((e) => {

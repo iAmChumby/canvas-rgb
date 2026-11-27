@@ -16,8 +16,10 @@ import {
   SlidersHorizontal,
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
-import { Button } from "@/components/Button";
+import { Button, ButtonLink } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
+import { DismissFault, FaultNote } from "@/components/FaultNote";
+import { notify } from "@/components/Notify";
 import { NameField } from "@/components/NameField";
 import { LedOrderControl } from "@/components/LedOrderControl";
 import { directionPatch, effectiveFirstLed, identifyLed } from "@/lib/ledOrder";
@@ -30,7 +32,7 @@ import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
 import { api } from "@/lib/endpoints";
 import { errorText } from "@/lib/errors";
-import { refreshLights, retryDevices, useSnap } from "@/lib/store";
+import { refreshLights, refreshStatus, retryDevices, useSnap } from "@/lib/store";
 import type { LightPatch } from "@/proto/LightPatch";
 import type { LightView } from "@/proto/LightView";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -442,6 +444,22 @@ export function DevicesView() {
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("devices"));
   const openrgb = useSnap((s) => s.status?.openrgb ?? "connected");
+  // #580 R8: the daemon's note in plain words. An older daemon may send no fault, so the plain
+  // line stays as a fallback; a dismissed note is hidden here but still counts in the strip.
+  const openrgbFault = useSnap((s) => s.status?.faults?.find((f) => f.kind === "open_rgb_down") ?? null);
+  const [dismissing, setDismissing] = useState(false);
+  const dismiss = async () => {
+    if (!openrgbFault) return;
+    setDismissing(true);
+    try {
+      await api.dismissFault(openrgbFault.key);
+      await refreshStatus();
+    } catch (e) {
+      notify(errorText(e), "warn");
+    } finally {
+      setDismissing(false);
+    }
+  };
 
   // The white balances, read once when the view mounts (#50); a device not listed is neutral.
   const [whiteBalances, setWhiteBalances] = useState<WhiteBalances | null>(null);
@@ -556,11 +574,21 @@ export function DevicesView() {
           <Details>{devicesError}</Details>
         </div>
       )}
-      {openrgb !== "connected" && (
-        <p className="rule rule-warn">
-          OpenRGB is not connected.
-        </p>
+      {openrgb === "down" && openrgbFault && !openrgbFault.dismissed && (
+        <FaultNote
+          parts={openrgbFault}
+          tone="down"
+          action={<DismissFault busy={dismissing} onDismiss={() => void dismiss()} />}
+        >
+          <ButtonLink href="/help/" size="sm" variant="ghost">
+            Why isn&apos;t my device here?
+          </ButtonLink>
+        </FaultNote>
       )}
+      {openrgb === "down" && !openrgbFault && (
+        <p className="rule rule-warn">OpenRGB is not connected.</p>
+      )}
+      {openrgb === "connecting" && <p className="rule rule-warn">Connecting to OpenRGB…</p>}
 
       <LoadFrame
         className="load-list"
@@ -602,7 +630,11 @@ export function DevicesView() {
                 </Button>
               }
             >
-              OpenRGB reports no lights. Plug one in or start OpenRGB, then try again.
+              OpenRGB reports no lights.{" "}
+              <ButtonLink href="/help/" size="sm" variant="ghost">
+                Why isn&apos;t my device here?
+              </ButtonLink>{" "}
+              Then try again.
             </EmptyState>
           </Panel>
         }

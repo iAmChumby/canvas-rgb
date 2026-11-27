@@ -45,6 +45,10 @@ use std::time::Duration;
 pub const VENDOR_ID: u16 = 0x1B80;
 pub const PRODUCT_ID: u16 = 0xB53C;
 const DISPLAY_NAME: &str = "GAMDIAS CHIONE Digital Display";
+
+/// The device this adapter drives itself, for the Help checklist (#580 R10). The name is the one
+/// its device info reports.
+pub const SUPPORTED: &[(&str, u16, u16)] = &[(DISPLAY_NAME, VENDOR_ID, PRODUCT_ID)];
 /// The output report: report ID 0 plus 64 bytes (recon section 1: OutputReportByteLength 65).
 const REPORT_LEN: usize = 65;
 /// The input report as Windows hidapi returns it: the leading report ID 0x00 is stripped on read

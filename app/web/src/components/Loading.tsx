@@ -107,7 +107,7 @@ export function ErrorPanel({
     <Panel>
       {/* An error title is a sentence, not the uppercase mono panel label (U9). */}
       <h2 className="err-panel-title">{title}</h2>
-      <ErrorLine>
+      <ErrorLine role="alert">
         {summary}
       </ErrorLine>
       {message ? <Details>{message}</Details> : null}

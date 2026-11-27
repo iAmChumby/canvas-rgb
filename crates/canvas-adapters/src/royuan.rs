@@ -83,6 +83,10 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 pub const VENDOR_ID: u16 = 0x3151;
+
+/// The device this adapter drives itself, for the Help checklist (#580 R10). The name is the one
+/// its device info reports, so the editor cannot invent a new one.
+pub const SUPPORTED: &[(&str, u16, u16)] = &[("ROYUAN MonsGeek Keyboard", VENDOR_ID, PRODUCT_ID)];
 pub const PRODUCT_ID: u16 = 0x4015;
 const INTERFACE: i32 = 2;
 const USAGE_PAGE: u16 = 0xFFFF;

@@ -4,6 +4,12 @@ import { PeripheralsView } from "@/views/PeripheralsView";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 import type { PeripheralInfo } from "@/proto/PeripheralInfo";
 
+// The no-settings panel links to the Help checklist, so the shared ButtonLink needs a router.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: () => {}, replace: () => {} }),
+  usePathname: () => "/peripherals/",
+}));
+
 // The peripherals page: what it says when a change landed and only the refresh failed, and
 // whose error it shows when two devices are read at once.
 

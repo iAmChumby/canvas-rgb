@@ -41,7 +41,7 @@ impl SecureDir for RecordingSecure {
 fn fake_hardware() -> Hardware {
     let chip = FakeChip::new(MSI_ALT1_MAP);
     let chip: Box<dyn FanChip> = Box::new(Nct6687::detect(chip, MSI_ALT1_MAP).unwrap());
-    Hardware { chip: Some(chip), chip_error: None, temps: Default::default(), gpu_rated_max_c: None }
+    Hardware { chip: Some(chip), chip_error: None, chip_problem: None, chip_checked: true, temps: Default::default(), gpu_rated_max_c: None }
 }
 
 fn deps(openrgb: &FakeProcesses, daemon: &FakeProcesses, install: &Path) -> Deps {

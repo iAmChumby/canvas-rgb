@@ -145,6 +145,15 @@ pub const PRODUCT_ID_DINPUT: u16 = codec::PID_DINPUT;
 
 /// The name the product canvas-rgb shows.
 pub const DISPLAY_NAME: &str = "8BitDo Ultimate 2 Wireless";
+
+/// One entry per personality the pad enumerates under (#580 R10, R19). Each name is the one its
+/// device info reports, and the Bluetooth and DInput personalities share the DInput product id.
+pub const SUPPORTED: &[(&str, u16, u16)] = &[
+    ("8BitDo Ultimate 2 Wireless (2.4G receiver, idle)", VENDOR_ID, PRODUCT_ID_IDLE),
+    ("8BitDo Ultimate 2 Wireless (XInput)", VENDOR_ID, PRODUCT_ID_XINPUT),
+    ("8BitDo Ultimate 2 Wireless (DInput)", VENDOR_ID, PRODUCT_ID_DINPUT),
+    ("8BitDo Ultimate 2 Wireless (Bluetooth)", VENDOR_ID, PRODUCT_ID_DINPUT),
+];
 /// The manufacturer the device reports.
 pub const MANUFACTURER: &str = "8BitDo";
 /// The adapter name.

@@ -1,6 +1,7 @@
 //! The settings routes, the first-run panel and the config export/import (G10).
 
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::Json;
 use canvas_proto::api::OutputState;
 use canvas_proto::config::{ConfigFile, ExportBundle, Settings};
@@ -71,6 +72,89 @@ pub async fn dismiss_zone_panel(State(app): State<Arc<App>>) -> ApiResult<Json<s
         &app,
         |store| {
             store.config.zone_panel_dismissed = true;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// The most dismissal keys the store keeps; the oldest goes when a new one is added (#580 C5).
+pub const MAX_DISMISSED_FAULTS: usize = 32;
+
+/// Only a note the current status actually carries may be dismissed or shown again (C5).
+async fn check_active_fault(app: &Arc<App>, key: &str) -> ApiResult<()> {
+    if key.is_empty() || key.len() > 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ApiFailure::validation("the fault key is not a dismissal key"));
+    }
+    let status = app
+        .status()
+        .await
+        .ok_or_else(|| ApiFailure::service_unavailable("The daemon is not answering yet."))?;
+    if !status.faults.iter().any(|f| f.key == key) {
+        // The spine has no `unknown_fault` code; `not_found` is its 404 code and the message says
+        // exactly what was not found. Adding a new code needs a spine change.
+        return Err(ApiFailure::new(
+            StatusCode::NOT_FOUND,
+            canvas_proto::api::error_codes::NOT_FOUND,
+            "That hardware note is not active, so there is nothing to change.",
+        ));
+    }
+    Ok(())
+}
+
+/// `POST /api/v1/faults/{key}/dismiss` (#580).
+///
+/// The note goes away on this viewer and stays away across restarts. Its key is stored beside
+/// `zone_panel_dismissed` in `config.toml` and comes back when the condition clears and returns.
+pub async fn dismiss_fault(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    check_active_fault(&app, &key).await?;
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            if !store.config.dismissed_faults.iter().any(|k| k == &key) {
+                store.config.dismissed_faults.push(key.clone());
+            }
+            // Trim in one go, so a config that already holds more than the cap shrinks to it on
+            // the first dismiss instead of losing one key per call (#580 fix pass 2).
+            if store.config.dismissed_faults.len() > MAX_DISMISSED_FAULTS {
+                let drop = store.config.dismissed_faults.len() - MAX_DISMISSED_FAULTS;
+                store.config.dismissed_faults.drain(..drop);
+            }
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// `DELETE /api/v1/faults/{key}/dismiss` (#580 C2): the strip's "Show again" puts the note back
+/// on the page while its condition is still active.
+pub async fn show_fault_again(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    check_active_fault(&app, &key).await?;
+    if !app.store.read().await.config.dismissed_faults.iter().any(|k| k == &key) {
+        return Ok(Json(serde_json::json!({ "ok": true })));
+    }
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            store.config.dismissed_faults.retain(|k| k != &key);
             Ok(())
         },
         |store| {

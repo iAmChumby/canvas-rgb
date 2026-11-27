@@ -23,6 +23,12 @@ export interface Problem {
    * sentence. The mark's icon says the rest.
    */
   short?: string;
+  /** #580: this entry is a hardware note. The strip counts every one, dismissed or not. */
+  fault?: boolean;
+  /** The note's key, so the strip can offer to show a hidden note again. */
+  key?: string;
+  /** True when this note was hidden by the owner. */
+  dismissed?: boolean;
 }
 
 /** One link between the app and something else, and what it is doing. */
@@ -115,7 +121,24 @@ export function problems(
   }
   // #577: safe start is first: it changes what the app is doing to every light and fan.
   if (status.safe_start?.active) out.push({ tone: "warn", text: "Safe start", short: "Safe" });
-  if (status.openrgb === "down") out.push({ tone: "down", text: "OpenRGB down", short: "OpenRGB" });
+  // #580 (R2, R15, C4): a fault array replaces the old OpenRGB entry only when the daemon sent
+  // one. An older daemon has no field, so its old line stays. "Fan control off" always stays: it
+  // means the service is down, which is a different thing. Dismissed faults stay here too.
+  const faults = Array.isArray(status.faults) ? status.faults : null;
+  if (faults) {
+    for (const fault of faults) {
+      out.push({
+        tone: fault.kind === "open_rgb_down" ? "down" : "warn",
+        text: fault.affected,
+        short: fault.kind === "open_rgb_down" ? "OpenRGB" : "Fan chip",
+        fault: true,
+        key: fault.key,
+        dismissed: fault.dismissed,
+      });
+    }
+  } else if (status.openrgb === "down") {
+    out.push({ tone: "down", text: "OpenRGB down", short: "OpenRGB" });
+  }
   if (status.service === "down") out.push({ tone: "down", text: "Fan control off", short: "Fans" });
   if (scenes.dark > 0) {
     // A group whose effect cannot run is dark: the lights it holds sit unlit, so it is said in words.

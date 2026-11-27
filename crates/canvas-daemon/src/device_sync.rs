@@ -29,6 +29,9 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
     let mut devices = devices;
     *app.devices.write().await = devices.clone();
     *app.openrgb.write().await = LinkState::Connected;
+    // #580 R4: this is an observed healthy OpenRGB state, so a dismissed down note can come
+    // back if OpenRGB later goes down. A Connecting state never reaches this path.
+    crate::faults::clear_openrgb_if_healthy(app, LinkState::Connected).await;
     // After the first run, a zone that appears (a late device, a header that got its LEDs) is a
     // light of its own; no group holds it until the owner adds it.
     // Scenes: every zone with LEDs is a light. A new one joins no group; one whose device

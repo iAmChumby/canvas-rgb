@@ -17,6 +17,7 @@ pub mod elevated;
 pub mod epoch;
 pub mod exit_log;
 pub mod fakes;
+pub mod faults;
 pub mod first_run;
 pub mod identify;
 pub mod last_frame;

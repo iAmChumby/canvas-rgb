@@ -152,6 +152,9 @@ pub mod routes {
     pub const AUDIO_TEST: &str = "/api/v1/audio/test";
     /// `POST`, no body: dismisses G7's "size your ARGB headers" panel.
     pub const DISMISS_ZONE_PANEL: &str = "/api/v1/first-run/dismiss-zone-panel";
+    /// Hide a hardware note (#580): `POST` with the fault's `key`, token. The note comes back when
+    /// its cause changes, or after the condition was seen healthy and goes bad again.
+    pub const FAULT_DISMISS: &str = "/api/v1/faults/{key}/dismiss";
     /// `POST`, no body: the owner reached the end of the onboarding. Sets
     /// `Status.onboarding_complete`, which stays true.
     pub const ONBOARDING_COMPLETE: &str = "/api/v1/onboarding/complete";
@@ -339,6 +342,48 @@ pub enum Power {
     Running,
     /// Writes black once, then stops the render loop.
     Paused,
+}
+
+/// What a hardware note is about (#580). SignalRGB stays a [`Conflict`]; a controller in a mode
+/// with no settings stays on the Peripherals page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum FaultKind {
+    /// The fan chip cannot be reached: PawnIO is unavailable or no supported chip was found.
+    FanChip,
+    /// OpenRGB is down, so the lights reached through it are not available.
+    OpenRgbDown,
+}
+
+/// One hardware note in plain words (#580): what is affected, the cause, the fix and when to
+/// ignore it. The daemon builds the words; the editor only shows them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Fault {
+    pub kind: FaultKind,
+    /// The dismissal key: hex FNV-1a of (kind, device id, cause code). Stable across builds; a
+    /// new cause gives a new key, so a dismissed note comes back when its text changes.
+    pub key: String,
+    /// The device the note is about, by its display name, when it is about one device.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub device: Option<String>,
+    /// What does not work, e.g. "Fan headers can't be driven".
+    pub affected: String,
+    /// Why, when it is known.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub cause: Option<String>,
+    /// What to do about it.
+    pub fix: String,
+    /// When the note can be ignored.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub ignore_if: Option<String>,
+    /// The owner hid this note. It still counts in the strip's mark; only the page notes hide.
+    #[serde(default)]
+    pub dismissed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -537,6 +582,9 @@ pub struct Status {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub safe_start: Option<SafeStart>,
+    /// Hardware notes (#580), dismissed ones included. Empty from an older daemon.
+    #[serde(default)]
+    pub faults: Vec<Fault>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

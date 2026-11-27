@@ -126,6 +126,8 @@ const DESCRIPTIONS = {
   "CONFIG_IMPORT:POST": "Validates and imports a configuration bundle. The bundle replaces every saved setting, scene, light, fan, display, stack and pattern with the one it carries, so export the current configuration first.",
   "ONBOARDING_COMPLETE:POST": "Records that first-run onboarding has finished.",
   "DISMISS_ZONE_PANEL:POST": "Dismisses the first-run prompt to size the ARGB headers.",
+  "FAULT_DISMISS:POST": "Hides one hardware note on every viewer. The note comes back when its cause clears and then returns.",
+  "FAULT_DISMISS:DELETE": "Shows a hidden hardware note again while its condition is still active.",
   "DIAG_READBACK:GET": "Reads the colours the hardware reports back from the devices.",
   "DIAG_BUNDLE:GET": "Lists the files and sizes a diagnostics zip would hold, before anything is written. Every file is scrubbed and every device id is given a per-bundle alias when the zip is written; `service_logs` says why the machine-wide logs are not included. Nothing is saved by this request.",
   "DIAG_BUNDLE:POST": "Writes the diagnostics zip to the app's one diagnostics folder and answers with its path, the file list, how many names and device ids were replaced and why the service logs were included or not. A destination cannot be chosen in the body: an existing zip is never overwritten. The API token is never in the zip, and the machine-wide log folder is only read: never written, deleted or adopted.",
@@ -205,6 +207,7 @@ const TITLES = {
   "/api/v1/config/import": "Config import",
   "/api/v1/onboarding/complete": "Complete onboarding",
   "/api/v1/first-run/dismiss-zone-panel": "Dismiss zone panel",
+  "/api/v1/faults/{key}/dismiss": "Dismiss fault",
   "/api/v1/diag/readback": "Readback",
   "/api/v1/diag/bundle": "Diagnostics bundle",
   "/api/v1/diag/fail-sensor": "Fail sensor",
@@ -273,6 +276,16 @@ const HAND_SHAPES = {
     note: "The fields the daemon sends: the panel was dismissed.",
     fields: [{ name: "ok", type: "boolean", meaning: "True when the panel was dismissed." }],
   },
+  "FAULT_DISMISS:POST:response": {
+    label: "JSON object",
+    note: "The fields the daemon sends: the hardware note was hidden.",
+    fields: [{ name: "ok", type: "boolean", meaning: "True when the note was hidden." }],
+  },
+  "FAULT_DISMISS:DELETE:response": {
+    label: "JSON object",
+    note: "The fields the daemon sends: the hardware note was shown again.",
+    fields: [{ name: "ok", type: "boolean", meaning: "True when the note was shown again." }],
+  },
   "DISPLAY:DELETE:response": {
     label: "JSON object",
     note: "The fields the daemon sends: the display whose config was removed.",
@@ -337,6 +350,8 @@ const HAND_SHAPES = {
       { name: "profiles", type: "array of strings", meaning: "The profiles the service knows." },
       { name: "floor_percent", type: "number", meaning: "The lowest duty the service allows." },
       { name: "hot", type: "array of JSON objects", meaning: "The hot line in force for each source kind." },
+      { name: "chip_problem", type: "string or null", meaning: "Why the fan chip could not be reached, when it could not." },
+      { name: "chip_checked", type: "boolean", meaning: "True once the fan service tried to open the chip. An older service leaves it false." },
     ],
   },
   "FAN_PROFILES:DELETE:response": {
@@ -620,6 +635,7 @@ const PATH_PARAM_INFO = {
   "GROUP_PROPS.group": { type: "string", meaning: "The id of a group in the scene named by the `id` path parameter. Any scene, active or not." },
   "STACK.id": { type: "string", meaning: "The id of the stack the route names." },
   "FAN_PROFILES.name": { type: "string", meaning: "The name of the fan profile to change." },
+  "FAULT_DISMISS.key": { type: "string", meaning: "The dismissal key of the note to hide, read from the status response." },
 };
 
 function pathParam(routeName, name) {
@@ -826,6 +842,16 @@ const FIELD_MEANINGS = {
   "FansFile.schema_version": "The format version of the saved file.",
   "FansStatus.active_profile": "The fan profile in force.",
   "FansStatus.chip": "The name of the fan chip, once the fan service has detected it.",
+  "FansStatus.chip_problem": "Why the fan chip could not be reached, when it could not.",
+  "FansStatus.chip_checked": "True once the fan service tried to open the chip. An older service leaves it false.",
+  "Fault.affected": "What does not work.",
+  "Fault.cause": "Why it does not work, when the cause is known.",
+  "Fault.device": "The device the note names, when it names one.",
+  "Fault.dismissed": "True when this note was hidden by the person using the app.",
+  "Fault.fix": "What to do about it.",
+  "Fault.ignore_if": "When the note can be ignored.",
+  "Fault.key": "The stable key used to dismiss the note.",
+  "Fault.kind": "What the note is about: the fan chip or OpenRGB.",
   "FansStatus.floor_percent": "The lowest duty the fan service allows, in percent.",
   "FansStatus.hardware_watchdog": "Whether the chip has a hardware fan watchdog reachable via PawnIO; null while that is still being settled.",
   "FansStatus.headers": "One entry per fan header, with its mode and state.",
@@ -1160,6 +1186,7 @@ const FIELD_MEANINGS = {
   "Status.conflicts": "The conflicts that need attention: SignalRGB is running and will fight canvas-rgb for the devices. The list is empty when SignalRGB is not running.",
   "Status.devices_connected": "How many devices are connected.",
   "Status.devices_total": "How many devices the daemon knows about, connected or not. The editor draws one card per device while the list is on its way, so it needs the total and the connected count.",
+  "Status.faults": "Hardware notes, dismissed ones included. Empty from an older daemon.",
   "Status.fps_measured": "The frame rate measured over the last second.",
   "Status.fps_target": "The frame rate the daemon aims for.",
   "Status.frame_time_ms": "The time the last frame took, in milliseconds.",
@@ -1217,6 +1244,10 @@ const FIELD_MEANINGS = {
  * not the values, so each value carries its own plain sentence here.
  */
 const ENUM_VALUE_MEANINGS = {
+  "ChipProblem.pawn_io_unavailable": "PawnIO, the driver used to reach the fan chip, is unavailable.",
+  "ChipProblem.chip_not_found": "No supported fan chip was found on the board.",
+  "FaultKind.fan_chip": "The note is about the fan chip.",
+  "FaultKind.open_rgb_down": "The note is about lights reached through OpenRGB.",
   "LastExit.clean": "The previous run ended on purpose.",
   "LastExit.unclean": "The previous run ended without a clean stop.",
   "LastExit.unknown": "There is no record of the previous run yet.",
