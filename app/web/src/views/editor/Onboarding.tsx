@@ -33,7 +33,6 @@ export function Onboarding({
 
   // The checklist on Scenes takes it from here; its "Done" ends the onboarding (#579).
   const finish = () => {
-    void import("@/lib/endpoints").then((m) => m.api.completeOnboarding());
     passHello();
     onDone();
   };

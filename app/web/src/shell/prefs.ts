@@ -73,7 +73,7 @@ export function applyTheme(theme: Theme): void {
   }
   if (previewActive()) previewChoice.theme = theme;
   try {
-    window.localStorage.setItem(THEME_KEY, theme);
+    storeLocal(THEME_KEY, theme);
   } catch {
     // The choice still applies for this session.
   }

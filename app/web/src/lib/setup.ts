@@ -102,7 +102,6 @@ function fanRead(status: Status | null, fans: FansStatus | null, fansError: stri
 
 /** The four rows, always in this order. */
 export function setupRows({ status, fans, fansError, effects }: SetupFacts): SetupRow[] {
-  if (status !== undefined) return [];
   const sceneRead = scene(status);
   return [
     { id: "lights", name: "Lights found", why: "The lights are what the app is for.", ...lights(status) },

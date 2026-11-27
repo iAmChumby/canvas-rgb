@@ -11,7 +11,7 @@ function asked(): boolean {
 }
 
 // Latched: an in-app link drops the query, and that must not hand the page back to the real daemon.
-const active = false;
+const active = asked();
 
 /** True for a page that was loaded as a preview. */
 export function previewActive(): boolean {
