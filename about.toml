@@ -38,8 +38,10 @@ private = { ignore = true }
 # cargo-about's scanner cannot match the file to the declared expression (the
 # names are lower-case, or the crate has several licence files). Each entry
 # names the real file in the crate's own crates.io package at the locked
-# version, and the checksum makes the clarification fail if that file ever
-# changes. The text is therefore the crate's own licence text, not a guess.
+# version. The checksum is of the text from `start` to EOF (not of the whole
+# file), so it fails if that part of the file changes. Without `start` it is
+# the checksum of the whole file. The text is therefore the crate's own
+# licence text, not a guess.
 #
 # Seven further Windows-compiled crates ship no licence file at all:
 #   alloc-stdlib 0.3.0, rquickjs-core 0.14.0, ts-rs 12.0.1,
@@ -48,9 +50,12 @@ private = { ignore = true }
 # For these, cargo-about uses the SPDX licence text embedded in cargo-about
 # 0.9.3 (the spdx/license-list-data texts bundled in that release) for the
 # licence the crate declares in Cargo.toml. Their expression is pinned by the
-# accepted list above. A git clarification would fetch the upstream file from
-# raw.githubusercontent.com, which the --offline gate forbids, so no file
-# checksum can be given for them.
+# accepted list above. The SPDX template's `<year> <owner>` placeholder is
+# replaced by tools/fix-rust-notice-holders.mjs with the copyright line from
+# each upstream licence file (cited in tools/rust-copyright.json): MIT and
+# BSD-3-Clause require that notice. A git clarification would fetch the
+# upstream file from raw.githubusercontent.com, which the --offline gate
+# forbids, so no file checksum can be given for them.
 # ---------------------------------------------------------------------------
 [brotli-decompressor.clarify]
 license = 'BSD-3-Clause'

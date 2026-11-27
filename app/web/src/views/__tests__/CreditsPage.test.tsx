@@ -3,11 +3,19 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { openExternal } from "@/lib/host";
 import { CreditsView } from "@/views/CreditsView";
 
+const { push } = vi.hoisted(() => ({ push: vi.fn() }));
+
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push }),
   usePathname: () => "/credits/",
+}));
+
+vi.mock("@/lib/host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/host")>()),
+  openExternal: vi.fn(async () => undefined),
 }));
 
 const DATA = {
@@ -34,6 +42,8 @@ const DATA = {
 };
 
 beforeEach(() => {
+  push.mockClear();
+  vi.mocked(openExternal).mockClear();
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => ({ ok: true, json: async () => DATA })),
@@ -53,6 +63,15 @@ describe("the Credits page", () => {
     expect(screen.getAllByRole("link", { name: /OpenRGB/ }).length).toBe(1);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledWith("/notices/credits.json");
+  });
+
+  it("opens a credited website through the host, never through the editor's router", async () => {
+    render(<CreditsView />);
+    const link = await screen.findByRole("link", { name: /OpenRGB/ });
+    expect(link.getAttribute("href")).toBe("https://codeberg.org/OpenRGB/OpenRGB");
+    fireEvent.click(link);
+    expect(openExternal).toHaveBeenCalledWith("https://codeberg.org/OpenRGB/OpenRGB");
+    expect(push).not.toHaveBeenCalled();
   });
 
   it("groups the notices by licence with a count and each package's name, version and source", async () => {

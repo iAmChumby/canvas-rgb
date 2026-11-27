@@ -196,6 +196,7 @@ jobs:
           cargo about generate --locked --fail --workspace -c about.toml about.hbs -o .build/notices/rust-notices.txt
           npm ci --prefix app/web
           node app/web/scripts/generate-npm-notices.mjs
+          node tools/fix-rust-notice-holders.mjs
           node tools/generate-credits.mjs
 
       # next.config.ts sets output: "export", so `next build` writes app/web/out.
@@ -448,6 +449,7 @@ jobs:
       - name: npm notices
         run: |
           node app/web/scripts/generate-npm-notices.mjs
+          node tools/fix-rust-notice-holders.mjs
           node tools/generate-credits.mjs
 
       - name: npm dependencies

@@ -10,6 +10,7 @@
 import { useEffect, useState } from "react";
 import { ArrowSquareOut } from "@phosphor-icons/react";
 import { ButtonLink } from "@/components/Button";
+import { openExternal } from "@/lib/host";
 import { LicenceDisclosure } from "@/components/LicenceDisclosure";
 import { Panel } from "@/components/Panel";
 import { SkeletonLines } from "@/components/Skeleton";
@@ -135,12 +136,15 @@ function CreditList({ entries }: { entries: Credit[] }) {
       {entries.map((entry) => (
         <div className={s.credit} key={`${entry.name}-${entry.url}`}>
           <span className={s.name}>
+            {/* A credit is a website, not an editor route: the host opens it outside the webview. */}
             <ButtonLink
               href={entry.url}
               variant="ghost"
               size="sm"
               className={s.nameButton}
               icon={<ArrowSquareOut size={14} aria-hidden="true" />}
+              external
+              onClick={() => void openExternal(entry.url)}
             >
               {entry.name}
             </ButtonLink>

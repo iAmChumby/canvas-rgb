@@ -14,6 +14,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Credits: the installer now ships the page's third-party notices, each notice carries its copyright holder, and credited links open in your browser instead of the editor window. (#578)
 - Help & About: the report now scrubs the real 8.3 short name of the profile and only whole user or machine names, free-text device names cannot add rows or cells to the report, a disconnected service is no longer shown as connected, "Last run" reads in plain words, and the page's links and receipt no longer overlap or move as they load. Go-to addresses stay on one line with the full URL on hover, and release notes are linked once, in the identity panel. (#583)
 
 ## [0.20.0] - 2026-11-26

@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Builds dist\canvas-rgb-setup-<version>.exe: release build (web + cargo, through the build lock),
-  stages the payload in dist\payload, runs Inno Setup 6.
+  Builds dist\canvas-rgb-setup-<version>.exe: generates the third-party notices, then a release
+  build (web + cargo, through the build lock), stages the payload in dist\payload, runs Inno Setup 6.
 .PARAMETER SkipBuild
   Reuse the existing web build and target\release binaries (still checks all four exes exist).
 .PARAMETER IsccPath
@@ -46,7 +46,18 @@ function Invoke-Locked([string[]]$Command) {
 Push-Location $repo
 try {
     if (-not $SkipBuild) {
-        # Web first: the tray embeds app/web/out.
+        # Notices first: generate-credits.mjs needs both generated notice files, and
+        # the web build copies credits.json into app/web/out. Every step fails the
+        # installer build when it fails, so no release ships a Credits page without
+        # its licence texts (#578). Generated notices stay in .build/ and are never
+        # committed.
+        New-Item -ItemType Directory -Force (Join-Path $repo '.build\notices') | Out-Null
+        Invoke-Locked @('cargo', 'about', 'generate', '--locked', '--fail', '--workspace', '-c', 'about.toml', '--format', 'json', '-o', '.build/notices/rust-notices.json')
+        Invoke-Locked @('cargo', 'about', 'generate', '--locked', '--fail', '--workspace', '-c', 'about.toml', 'about.hbs', '-o', '.build/notices/rust-notices.txt')
+        Invoke-Locked @('node', 'app/web/scripts/generate-npm-notices.mjs')
+        Invoke-Locked @('node', 'tools/fix-rust-notice-holders.mjs')
+        Invoke-Locked @('node', 'tools/generate-credits.mjs')
+        # Web next: the tray embeds app/web/out, including the credits asset.
         Invoke-Locked @('npm', '--prefix', 'app/web', 'run', 'build')
         # --locked: the release builds the versions in Cargo.lock and fails when the lock file
         # and the manifests disagree, instead of quietly moving the lock file (#167).

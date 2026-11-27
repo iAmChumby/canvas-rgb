@@ -16,11 +16,20 @@ const noticesDir = path.join(root, ".build", "notices");
 const bundleDir = path.join(root, "app", "web", "public", "notices");
 const read = (file) => JSON.parse(fs.readFileSync(path.join(noticesDir, file), "utf8"));
 
+// docs/thanks.md has two lists: the people and projects it is built on, and
+// the stack in the `## The stack canvas-rgb builds on` section. Both are read
+// from that one file; nothing about a credit is hardcoded here.
 function readThanks() {
   const md = fs.readFileSync(path.join(root, "docs", "thanks.md"), "utf8");
-  const paragraphs = md.split(/\n\s*\n/).slice(1).filter((p) => p.trim() && !p.startsWith("#"));
-  const entries = [];
-  for (const para of paragraphs) {
+  const sections = { thanks: [], foundations: [] };
+  let section = "thanks";
+  for (const block of md.split(/\n\s*\n/)) {
+    const para = block.trim();
+    if (!para) continue;
+    if (para.startsWith("#")) {
+      if (/^##\s+The stack canvas-rgb builds on/.test(para)) section = "foundations";
+      continue;
+    }
     // A project is `**Name** ([label](url))` or `**Name** (url)` in thanks.md.
     const link = /\*\*([^*]+)\*\*\s*(?:\(\[([^\]]+)\]\((https?:\/\/[^)]+)\)\)|\((https?:\/\/[^)]+)\))/g;
     const matches = [...para.matchAll(link)];
@@ -34,22 +43,13 @@ function readThanks() {
       // thanks.md joins two names with `and` and ends the link line with a
       // full stop. Strip both before the sentence that describes them.
       while (/^(and|,|\.|—|-|:)\s*/i.test(body)) body = body.replace(/^(and|,|\.|—|-|:)\s*/i, "");
-      entries.push({ name: m[1], url: m[3] ?? m[4], body });
+      sections[section].push({ name: m[1], url: m[3] ?? m[4], body });
     }
   }
-  return entries;
+  return sections;
 }
 
-const foundations = [
-  { name: "Rust", url: "https://www.rust-lang.org/", body: "The daemon, service, tray and command line are written in Rust." },
-  { name: "Tauri", url: "https://v2.tauri.app/", body: "The tray app hosts the editor as a local web view." },
-  { name: "Next.js", url: "https://nextjs.org/", body: "The editor is a static export built with Next.js." },
-  { name: "React", url: "https://react.dev/", body: "The editor's views are React components." },
-  { name: "CodeMirror", url: "https://codemirror.net/", body: "The effect editor is built on CodeMirror 6." },
-  { name: "Phosphor", url: "https://phosphoricons.com/", body: "The editor's icons come from Phosphor." },
-  { name: "Sonner", url: "https://sonner.emilkowal.ski/", body: "Toast messages in the editor use Sonner." },
-];
-
+const { thanks, foundations } = readThanks();
 const rust = read("rust-notices.json");
 const npm = read("npm-notices.json");
 const groups = new Map();
@@ -91,7 +91,7 @@ const ordered = [...groups.values()]
 
 const result = {
   generatedAt: new Date().toISOString(),
-  thanks: readThanks(),
+  thanks,
   foundations,
   groups: ordered,
   counts: {
