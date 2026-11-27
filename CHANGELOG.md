@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Editor: a Credits page at /credits/ credits the people and projects canvas-rgb builds on and lists the third-party licences behind Rust and npm packages, grouped by licence with the full texts behind one disclosure each. It is linked from Settings > Version. (#578)
 - Docs: `docs/privacy.md` lists, in plain words and with file-by-file evidence, the app's network requests — the daily update check (including a probe of a failed feed), the optional experimental feed, the signed installer, the OpenRGB download during setup and a shipped setup helper that downloads only when run by hand — and everything that stays local. The site is out of scope. (#581)
 
 ## [0.20.0] - 2026-11-26
