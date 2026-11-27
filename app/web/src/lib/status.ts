@@ -113,6 +113,8 @@ export function problems(
     out.push({ tone: "work", text: "Daemon connecting", short: "Daemon" });
     return out;
   }
+  // #577: safe start is first: it changes what the app is doing to every light and fan.
+  if (status.safe_start?.active) out.push({ tone: "warn", text: "Safe start", short: "Safe" });
   if (status.openrgb === "down") out.push({ tone: "down", text: "OpenRGB down", short: "OpenRGB" });
   if (status.service === "down") out.push({ tone: "down", text: "Fan control off", short: "Fans" });
   if (scenes.dark > 0) {

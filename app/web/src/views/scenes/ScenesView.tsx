@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { createPortal } from "react-dom";
 import { ArrowClockwise, ArrowCounterClockwise, ArrowLeft, ArrowRight, CopySimple, DotsThree, PencilSimple, Plus, SquaresFour, Trash } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
+import { Chip } from "@/components/Chip";
+import { writeListeners } from "@/lib/api";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { Skeleton, InlineSkeleton } from "@/components/Skeleton";
@@ -65,7 +67,20 @@ function ScenesShape({ rows }: { rows: number }) {
  */
 export function ScenesView() {
   const use = useScene();
-  const feed = useLightFeed();
+  const live = useLightFeed();
+  // Safe start (#577): the saved scene is shown and not played, so its rows show no colours.
+  const safe = useSnap((st) => st.status?.safe_start?.active ?? false);
+  const feed = useMemo<typeof live>(() => (safe ? () => null : live), [safe, live]);
+  useEffect(() => {
+    if (!safe) return;
+    const heard = (_method: string, path: string) => {
+      if (/^\/api\/v1\/(scenes|lights|chains)\b/.test(path)) notify("Saved. Applies when you start normally.", "ok");
+    };
+    writeListeners.add(heard);
+    return () => {
+      writeListeners.delete(heard);
+    };
+  }, [safe]);
   const effects = useSnap((st) => st.effects);
   const lights = useSnap((st) => st.lights);
   const lightsError = useSnap((st) => st.lightsError);
@@ -508,6 +523,13 @@ export function ScenesView() {
         onJumpToNew={jumpToNotice}
         onReorder={(order, options) => use.reorderScenes(order, options)}
       />
+
+      {/* In the page and not in the status strip: a phone's strip has no room for it. */}
+      {safe && scene && (
+        <div className={s.safeOff}>
+          <Chip testId="safe-off">Off in safe start</Chip>
+        </div>
+      )}
 
       <LightFeedContext.Provider value={feed}>
         <LoadFrame

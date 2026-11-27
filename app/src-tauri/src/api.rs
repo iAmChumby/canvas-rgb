@@ -64,6 +64,7 @@ enum Method {
     Get,
     Post,
     Patch,
+    Put,
 }
 
 pub struct Client {
@@ -113,6 +114,11 @@ impl Client {
         self.request(Method::Patch, path, Some(encode(body)?), true, None)
     }
 
+    /// Authenticated `PUT` with a JSON body (the safe-start mode, #577).
+    pub fn put<T: Serialize, R: DeserializeOwned>(&self, path: &str, body: &T) -> Result<R, ApiError> {
+        self.request(Method::Put, path, Some(encode(body)?), true, None)
+    }
+
     fn request<R: DeserializeOwned>(
         &self,
         method: Method,
@@ -137,9 +143,10 @@ impl Client {
                 }
                 req.call()
             }
-            Method::Post | Method::Patch => {
+            Method::Post | Method::Patch | Method::Put => {
                 let mut req = match method {
                     Method::Post => self.agent.post(&url),
+                    Method::Put => self.agent.put(&url),
                     _ => self.agent.patch(&url),
                 };
                 if let Some(auth) = &auth {

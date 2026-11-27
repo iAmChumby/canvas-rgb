@@ -2841,3 +2841,156 @@ fn issue225_valid_hot_limits_are_left_alone_and_nothing_is_logged() {
     assert!(cpu_row.user_set && cpu_row.limit_c == 70.0, "{cpu_row:?}");
     assert!(!log.contains("hot limit"), "no line for a valid file: {log}");
 }
+
+// ---- safe start's fan hold (#577 section 4) ----
+
+/// How many duty-register writes the chip has taken so far. A held header writes none more.
+fn duty_write_count(chip: &FakeChip) -> usize {
+    let duty_regs: Vec<u16> = MSI_ALT1_MAP.channels.iter().filter_map(|c| c.pwm_write_reg).collect();
+    chip.written_regs().iter().filter(|r| duty_regs.contains(r)).count()
+}
+
+#[test]
+fn the_hold_saves_edits_but_writes_nothing_manual() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    assert!(r.chip.manual(SYS_FAN1));
+
+    r.fans.enter_hold(t0);
+    assert!(r.fans.hold_active());
+    assert_eq!(r.fans.fans_on_bios(), Some(true));
+    assert!(!r.chip.manual(SYS_FAN1), "the hold returned every header to BIOS");
+
+    // An edit made while held is saved, not applied, and a tick writes no duty either.
+    let before = duty_write_count(&r.chip);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 70 }, t0).unwrap();
+    r.fans.tick(t0 + Duration::from_secs(1));
+    assert_eq!(duty_write_count(&r.chip), before, "no duty register was touched while held");
+    let saved = store::load_fans(&paths::fans_path(r.dir.path())).unwrap().unwrap();
+    assert_eq!(
+        saved.profiles[0].headers.get("sys_fan1"),
+        Some(&FanMode::Fixed { percent: 70 }),
+        "the edit was saved for when the hold ends"
+    );
+}
+
+#[test]
+fn a_failed_bios_restore_is_retried_and_reports_not_confirmed() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    // The chip refuses fan-mode writes, so the restore to BIOS cannot be read back.
+    r.chip.set_drop_mode_writes(true);
+
+    r.fans.enter_hold(t0);
+    assert_eq!(r.fans.fans_on_bios(), Some(false));
+    assert!(
+        !header(&r.fans.status(), "sys_fan1").on_bios,
+        "a failed header keeps manual_since so tick still drives it"
+    );
+    assert!(
+        r.fans.status().headers.iter().any(|h| !h.on_bios),
+        "at least the failed header is still not on BIOS"
+    );
+
+    // The retry is not early: a tick inside the 1 s window does not try again.
+    r.fans.tick(t0 + Duration::from_millis(500));
+    assert_eq!(r.fans.fans_on_bios(), Some(false));
+    // Once the chip accepts mode writes, the next retry releases everything.
+    r.chip.set_drop_mode_writes(false);
+    r.fans.tick(t0 + Duration::from_secs(1));
+    assert_eq!(r.fans.fans_on_bios(), Some(true));
+    assert!(header(&r.fans.status(), "sys_fan1").on_bios);
+}
+
+#[test]
+fn leaving_the_hold_applies_the_profile_saved_during_it() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    r.fans.enter_hold(t0);
+    let before = duty_write_count(&r.chip);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 70 }, t0).unwrap();
+    assert_eq!(duty_write_count(&r.chip), before, "still held");
+
+    r.fans.leave_hold(t0 + Duration::from_secs(2));
+    assert!(!r.fans.hold_active());
+    assert_eq!(r.fans.fans_on_bios(), None);
+    assert!(r.chip.manual(SYS_FAN1));
+    assert_eq!(r.chip.duty_raw(SYS_FAN1), ((70u32 * 255 + 50) / 100) as u8, "the saved profile is applied");
+}
+
+#[test]
+fn startup_in_safe_mode_restores_bios_and_does_not_apply_the_profile() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut config = FansFile::default();
+    config.profiles[0].headers.insert("sys_fan1".into(), FanMode::Fixed { percent: 70 });
+    let chip_box: Box<dyn FanChip> = Box::new(Nct6687::detect(chip.clone(), MSI_ALT1_MAP).unwrap());
+    let temps: BTreeMap<TempSource, Box<dyn TempReader>> =
+        BTreeMap::from([(TempSource::Cpu, Box::new(cpu.clone()) as Box<dyn TempReader>)]);
+    let mut fans = FanController::new(dir.path().to_path_buf(), Some(chip_box), None, temps, config, confirmed());
+    fans.startup_in_mode(t0, true);
+    assert!(fans.hold_active());
+    assert_eq!(fans.fans_on_bios(), Some(true));
+    assert!(!chip.manual(SYS_FAN1));
+    assert_eq!(duty_write_count(&chip), 0, "no profile duty was applied at a safe start");
+}
+
+#[test]
+fn b2_a_safe_startup_whose_bios_restore_fails_still_sets_the_hold() {
+    let t0 = Instant::now();
+    // A header an earlier run left manual, and a chip that then refuses the restore.
+    let mut earlier = rig(FansFile::default(), t0);
+    earlier.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    let chip = earlier.chip.clone();
+    chip.set_drop_mode_writes(true);
+    let dir = tempfile::tempdir().unwrap();
+    let chip_box: Box<dyn FanChip> = Box::new(Nct6687::detect(chip.clone(), MSI_ALT1_MAP).unwrap());
+    let mut fans = FanController::new(dir.path().to_path_buf(), Some(chip_box), None, BTreeMap::new(), FansFile::default(), confirmed());
+    fans.startup_in_mode(t0, true);
+    assert!(fans.hold_active(), "the hold is on although the restore failed");
+    assert_eq!(fans.fans_on_bios(), Some(false));
+    assert!(!header(&fans.status(), "sys_fan1").on_bios, "the status does not claim BIOS");
+}
+
+#[test]
+fn b2_a_bios_edit_during_the_hold_releases_the_stuck_header() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    r.chip.set_drop_mode_writes(true);
+    r.fans.enter_hold(t0);
+    assert!(r.chip.manual(SYS_FAN1), "the restore failed");
+    r.chip.set_drop_mode_writes(false);
+    r.fans.set_header_mode("sys_fan1", FanMode::Bios, t0).unwrap();
+    assert!(!r.chip.manual(SYS_FAN1), "the header is not left at its last duty");
+}
+
+/// R6: the BIOS restore is retried for as long as the hold lasts, every 30 s after the three
+/// quick tries, and the status turns true once the header is released.
+#[test]
+fn r6_a_stuck_header_keeps_retrying_until_it_is_released() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    r.chip.set_drop_mode_writes(true);
+    r.fans.enter_hold(t0);
+    // Seconds 1..=40: the first try, three more a second apart, and a fifth at 33 s all fail.
+    for s in 1..=40 {
+        r.fans.tick(t0 + Duration::from_secs(s));
+    }
+    assert_eq!(r.fans.fans_on_bios(), Some(false));
+    assert!(!header(&r.fans.status(), "sys_fan1").on_bios);
+    r.chip.set_drop_mode_writes(false);
+    // The next try is 30 s after the last one, not sooner.
+    r.fans.tick(t0 + Duration::from_secs(50));
+    assert_eq!(r.fans.fans_on_bios(), Some(false));
+    r.fans.tick(t0 + Duration::from_secs(63));
+    assert_eq!(r.fans.fans_on_bios(), Some(true));
+    assert!(!r.chip.manual(SYS_FAN1));
+    assert!(header(&r.fans.status(), "sys_fan1").on_bios);
+}

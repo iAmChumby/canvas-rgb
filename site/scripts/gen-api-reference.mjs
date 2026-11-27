@@ -38,6 +38,7 @@ const DESCRIPTIONS = {
   "STATUS:GET": "Reports the daemon's version, power state, brightness, frame rate, connected devices, active scene and the links to OpenRGB and to the fan and update service.",
   "ABOUT:GET": "Reports the app version, build, Windows edition, service version and how the previous run ended.",
   "ABOUT_REPORT:GET": "Returns the scrubbed support report the editor shows and copies, with the fields the bug report template fills.",
+  "SAFE_START:PUT": "Enters or leaves safe start. The daemon answers first, then the service restarts it in the asked mode; asking for the mode already in force changes nothing.",
   "OUTPUT:GET": "Reports the current power state, brightness and warmth of the lighting output.",
   "OUTPUT:PATCH": "Changes the power state, brightness or warmth of the lighting output.",
   "QUIT:POST": "Stops the daemon after applying its exit lighting setting and telling the fan and update service the stop was deliberate.",
@@ -138,6 +139,7 @@ const TITLES = {
   "/api/v1/status": "Status",
   "/api/v1/about": "About",
   "/api/v1/about/report": "About report",
+  "/api/v1/safe-start": "Safe start",
   "/api/v1/output": "Output",
   "/api/v1/quit": "Quit",
   "/api/v1/devices": "Devices",
@@ -377,10 +379,12 @@ const HAND_SHAPES = {
   },
 };
 
-// Two handlers answer with bytes or a small object instead of a named type.
+// Three handlers answer with bytes, a small object or a streamed body instead of a named type.
 const RESPONSE_OVERRIDES = {
   "EFFECT_THUMBNAIL:GET": "Binary thumbnail",
   "QUIT:POST": "JSON object",
+  // Safe start streams its body so the restart waits for the reply to be written (#577).
+  "SAFE_START:PUT": "SafeStartAnswer",
 };
 
 // Two handlers read a plain value and validate it into a type the spine publishes. Show that type
@@ -533,6 +537,7 @@ const EXAMPLE_BODIES = {
   "GROUP_MOVE:POST": { to: "scene:other", copy: true, expected_rev_from: 4, expected_rev_to: 1 },
   "GROUP_PROPS:PATCH": { speed: NUMBER_PROP },
   "SCENE_ACTIVE:PUT": { id: "everything" },
+  "SAFE_START:PUT": { mode: "normal" },
   "SETTINGS:PUT": {
     fps: 30,
     black_on_lock: false,
@@ -1059,6 +1064,9 @@ const FIELD_MEANINGS = {
   "Scene.name": "The name of the scene.",
   "Scene.rev": "The revision of the scene; it moves with every saved change.",
   "SceneActivePut.id": "The id of the scene to use.",
+  "SafeStartPut.mode": "The mode to restart in: normal or safe.",
+  "SafeStart.active": "True while this run is in safe start.",
+  "SafeStart.reason": "Why safe start is on; empty when the service gave no reason.",
   "SceneCreate.copy_of": "The id of a scene to copy the groups from.",
   "SceneCreate.dry_run": "True runs every check and saves nothing; the answer says saved false.",
   "SceneCreate.groups": "The groups the new scene holds, in order. The daemon mints each group's id and runs the scene rules before it saves.",
@@ -1208,6 +1216,13 @@ const ENUM_VALUE_MEANINGS = {
   "LastExit.clean": "The previous run ended on purpose.",
   "LastExit.unclean": "The previous run ended without a clean stop.",
   "LastExit.unknown": "There is no record of the previous run yet.",
+  "LastExit.planned": "The previous run was stopped by a reboot, a logoff, an update or a service stop.",
+  "LastExit.startup_failure": "The previous run failed while starting, before it was ready.",
+  "SafeStartMode.normal": "The saved scene, effects, fan profile and readings run as usual.",
+  "SafeStartMode.safe": "Safe start: the saved scene, effects and readings are off, the lights breathe and the fans stay on BIOS control.",
+  "SafeStartReason.unclean_once": "The previous run did not end cleanly.",
+  "SafeStartReason.crash_loop": "Several runs in a row did not end cleanly.",
+  "SafeStartReason.user_chose": "The user asked for safe start; it stays on until they start normally.",
   "AudioFlow.render": "An output, captured as the sound it plays.",
   "AudioFlow.capture": "An input such as a microphone or line-in, captured directly.",
   "AudioTestStatus.off": "No lease is held and no effect needs audio.",

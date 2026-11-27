@@ -19,10 +19,12 @@ import { Panel, StateDot } from "@/components/Panel";
 import { Receipt } from "@/components/Receipt";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { api } from "@/lib/endpoints";
+import { messageOf } from "@/lib/errors";
 import { openExternal } from "@/lib/host";
 import { useSnap } from "@/lib/store";
 import { settingsStatus } from "@/lib/updateWords";
 import { PageTitle } from "@/shell/PageHeader";
+import { SafeStartBanner } from "@/shell/GlobalBanners";
 import type { About } from "@/proto/About";
 import type { AboutReport } from "@/proto/AboutReport";
 import type { LastExit } from "@/proto/LastExit";
@@ -41,7 +43,9 @@ function shown(value: string | null | undefined): string {
 /** The enum's wire text is not a sentence (#574). */
 function lastExitWords(exit: LastExit | null | undefined): string {
   if (exit === "clean") return "ended normally";
+  if (exit === "planned") return "stopped by Windows or an update";
   if (exit === "unclean") return "crashed";
+  if (exit === "startup_failure") return "failed to start";
   return "unknown";
 }
 
@@ -76,6 +80,21 @@ export function HelpView() {
   const live = useRef(true);
   const update = useSnap((s) => s.update);
   const status = update ? settingsStatus(update) : null;
+  const snap = useSnap((s) => s.status);
+  const safe = snap?.safe_start?.active ?? false;
+  const [modeBusy, setModeBusy] = useState(false);
+
+  const setMode = async (mode: "normal" | "safe") => {
+    setModeBusy(true);
+    try {
+      await api.setSafeStart(mode);
+      // The service restarts the daemon in the chosen mode. The next status poll shows it.
+    } catch (e) {
+      notify(messageOf(e), "warn");
+    } finally {
+      setModeBusy(false);
+    }
+  };
 
   // Once per visit: neither the status poll nor a re-render asks again. Retry asks on purpose.
   const load = useCallback(() => {
@@ -125,7 +144,7 @@ export function HelpView() {
                 <BrandMark size={26} />
                 <Wordmark />
               </div>
-              <p className="help-hero-note">Facts from the daemon running on this PC.</p>
+              <p className="help-hero-note">Facts from canvas-rgb on this PC.</p>
               {failed ? (
                 <div className="help-error">
                   <p className="error-line">Identity and the system report could not be read.</p>
@@ -149,6 +168,9 @@ export function HelpView() {
                   <IdentityRow label="Last run">
                     {about ? lastExitWords(about.last_exit) : undefined}
                   </IdentityRow>
+                  <IdentityRow label="Safe start">
+                    {snap === null ? undefined : safe ? "on" : "off"}
+                  </IdentityRow>
                   <div className="help-fact">
                     <span className="help-fact-label">Updates</span>
                     <span className="help-fact-value" aria-busy={update === null || undefined}>
@@ -162,6 +184,13 @@ export function HelpView() {
                 </div>
               )}
               <div className="help-hero-link">
+                <Button
+                  icon={<ShieldCheck size={16} />}
+                  busy={modeBusy}
+                  onClick={() => void setMode(safe ? "normal" : "safe")}
+                >
+                  {safe ? "Start normally" : "Start in safe start"}
+                </Button>
                 <ButtonLink href="/updates/" size="sm" icon={<ArrowSquareOut size={14} />}>
                   Release notes for this version
                 </ButtonLink>
@@ -204,6 +233,8 @@ export function HelpView() {
           </div>
 
           <div className="help-side">
+            {/* Here and not above the page: the notice arriving must not push the hero (#577). */}
+            <SafeStartBanner onHelp />
             <Panel title="Go to">
               <div className="help-keys">
                 <KeyRow

@@ -895,6 +895,43 @@ html[data-motion="reduced"] *::after {
   margin-bottom: var(--s4);
 }
 
+/* A warning's fill is neutral (#577): amber mixed into a panel reads beige in light and olive in
+   dark. The tone stays on the border and the icon. */
+.banner-warn {
+  background: var(--raised);
+}
+
+.safe-lines p {
+  margin: 0;
+}
+
+.safe-acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s4);
+  margin-top: var(--s2);
+}
+
+.safe-help {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.safe-help:hover {
+  color: var(--a1);
+}
+
+.safe-help:focus-visible {
+  outline: 2px solid var(--a1);
+  outline-offset: 2px;
+}
+
+.safe-error {
+  margin: var(--s2) 0 0;
+}
+
 .panel {
   min-width: 0;
   padding: var(--s4);

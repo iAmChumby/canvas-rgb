@@ -6,7 +6,8 @@
 
 use canvas_adapters::frame_lane::FrameLane;
 use canvas_adapters::resume::ResumeBehavior;
-use canvas_proto::api::{LinkState, Status};
+use canvas_proto::api::{LastExit, LinkState, Power, SafeStart, SafeStartMode, Status};
+use canvas_proto::config::Settings;
 use canvas_proto::device::{DeviceId, DeviceInfo};
 use canvas_proto::fans::FansStatus;
 use canvas_proto::traits::{DeviceAdapter, Engine, FrameSink, GroupState, PreviewSink, RenderStats};
@@ -459,6 +460,13 @@ fn watch_groups(app: Arc<App>, stop: Arc<AtomicBool>) {
     }
 }
 
+/// The power and brightness safe start puts in place of the saved ones; `None` is the saved one.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SafeOutput {
+    pub power: Option<Power>,
+    pub brightness: Option<u8>,
+}
+
 /// The state every handler sees.
 pub struct App {
     /// The on-disk state. Written rarely (a settings change) and read often.
@@ -551,6 +559,22 @@ pub struct App {
     /// 503 (issue #225). The pipe client has no timeout of its own, so a hung service would
     /// otherwise hold the lock, and with it config export and every other fans writer.
     pub fans_pipe_limit: std::time::Duration,
+    /// The mode from the first service `Hello` (#577), latched for this run. `None` until it
+    /// arrives (or for ever when the pipe cannot be reached in time).
+    pub start_mode: Mutex<Option<SafeStartMode>>,
+    /// How the last daemon run ended, from the same reply. `About.last_exit` reads it.
+    pub last_exit: Mutex<LastExit>,
+    /// The status field every surface reads. Built once when the mode is latched, with the
+    /// fan line updated from the first fan status in safe mode.
+    pub safe_start: Mutex<Option<SafeStart>>,
+    /// The effect safe mode has on the lights, or `None` while there is no light to play on.
+    pub safe_effect: Mutex<Option<String>>,
+    /// The built-in effect safe mode plays: Breathing. A test names one that cannot be built.
+    pub safe_builtin: Mutex<String>,
+    /// Set once Breathing could not be built: safe mode shows one steady colour from then on.
+    pub safe_fallback: std::sync::atomic::AtomicBool,
+    /// What safe start shows in place of the saved power and brightness. In memory only.
+    pub safe_output: Mutex<SafeOutput>,
     /// SignalRGB conflicts, refreshed every 5 s.
     pub conflicts: tokio::sync::RwLock<Vec<canvas_proto::api::Conflict>>,
     /// Where OpenRGB is, as the daemon sees it.
@@ -746,6 +770,13 @@ impl App {
             fans: tokio::sync::RwLock::new(None),
             fans_last: tokio::sync::RwLock::new(None),
             fans_pipe_limit: FANS_LOCK_PIPE_LIMIT,
+            start_mode: Mutex::new(None),
+            last_exit: Mutex::new(LastExit::Unknown),
+            safe_start: Mutex::new(None),
+            safe_effect: Mutex::new(None),
+            safe_builtin: Mutex::new("breathing".into()),
+            safe_fallback: std::sync::atomic::AtomicBool::new(false),
+            safe_output: Mutex::new(SafeOutput::default()),
             conflicts: tokio::sync::RwLock::new(Vec::new()),
             openrgb: tokio::sync::RwLock::new(LinkState::Down),
             shutting_down: AtomicU32::new(0),
@@ -805,6 +836,91 @@ impl App {
     /// The service version, when the service has answered a `Hello`.
     pub fn service_version(&self) -> Option<String> {
         self.service_version.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The latched mode, or Normal when the first `Hello` never arrived (#577 R13).
+    pub fn start_mode(&self) -> SafeStartMode {
+        self.start_mode.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or_default()
+    }
+
+    /// The latched verdict for Help & About. `Unknown` until the first `Hello` arrives.
+    pub fn last_exit(&self) -> LastExit {
+        *self.last_exit.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Latches the first `Hello`'s decision with no record from the service.
+    pub fn latch_start(&self, mode: SafeStartMode, last_exit: LastExit) {
+        self.latch_start_from(mode, last_exit, None);
+    }
+
+    /// Latches the first `Hello`'s decision. Later replies never change it mid-run. The reason,
+    /// the streak and since when are the service's record; with none, they read as unknown.
+    /// Answers false when an earlier reply had already decided.
+    pub fn latch_start_from(&self, mode: SafeStartMode, last_exit: LastExit, record: Option<SafeStart>) -> bool {
+        let mut slot = self.start_mode.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(mode);
+        drop(slot);
+        *self.last_exit.lock().unwrap_or_else(|e| e.into_inner()) = last_exit;
+        *self.safe_start.lock().unwrap_or_else(|e| e.into_inner()) = (mode == SafeStartMode::Safe).then(|| {
+            let record = record.unwrap_or(SafeStart {
+                active: true,
+                reason: None,
+                unclean_streak: 0,
+                since: None,
+                fans_on_bios: None,
+                lights: None,
+            });
+            SafeStart { active: true, fans_on_bios: None, lights: None, ..record }
+        });
+        true
+    }
+
+    /// The power and brightness that are on the lights: the saved ones, except where safe start
+    /// holds its own.
+    pub fn effective_output(&self, settings: &Settings) -> (Power, u8) {
+        let held = *self.safe_output.lock().unwrap_or_else(|e| e.into_inner());
+        (held.power.unwrap_or(settings.power), held.brightness.unwrap_or(settings.brightness))
+    }
+
+    /// Safe start shows light whatever was saved (#577): power on, at least
+    /// [`crate::scenes::SAFE_MIN_BRIGHTNESS`] bright. Answers what to put on the engine.
+    pub fn raise_safe_output(&self, settings: &Settings) -> (Power, u8) {
+        let held = SafeOutput {
+            power: Some(Power::Running),
+            brightness: Some(settings.brightness.max(crate::scenes::SAFE_MIN_BRIGHTNESS)),
+        };
+        *self.safe_output.lock().unwrap_or_else(|e| e.into_inner()) = held;
+        self.effective_output(settings)
+    }
+
+    /// The owner chose a value: it replaces the one safe start holds.
+    pub fn owner_chose_output(&self, power: bool, brightness: bool) {
+        let mut held = self.safe_output.lock().unwrap_or_else(|e| e.into_inner());
+        if power {
+            held.power = None;
+        }
+        if brightness {
+            held.brightness = None;
+        }
+    }
+
+    /// Whether every fan header is on BIOS control, from the latest fan status. Unknown while
+    /// the service is not answering or has listed no header.
+    async fn fans_on_bios(&self) -> Option<bool> {
+        if self.service_down_ms.load(Ordering::SeqCst) != 0 {
+            return None;
+        }
+        let fans = self.fans.read().await;
+        let headers = &fans.as_ref()?.headers;
+        (!headers.is_empty()).then(|| headers.iter().all(|h| h.on_bios))
+    }
+
+    /// The status snapshot a surface reads, with the fan line the service confirmed.
+    pub fn safe_start_status(&self) -> Option<SafeStart> {
+        self.safe_start.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Replaces the scrubber. Tests pass a fake profile here; production uses the one built from
@@ -961,8 +1077,7 @@ impl App {
     pub async fn status(&self) -> Option<Status> {
         let stats = self.engine_stats().await?;
         let store = self.store.read().await;
-        let power = store.config.settings.power;
-        let brightness = store.config.settings.brightness;
+        let (power, brightness) = self.effective_output(&store.config.settings);
         let fps_target = store.config.settings.fps;
         let scene = crate::scenes::active_scene(&store.scenes);
         let active_scene = Some(canvas_proto::api::SceneRef { id: scene.id.clone(), name: scene.name.clone() });
@@ -979,6 +1094,31 @@ impl App {
         // dismisses it.
         let show_zone_panel = !store.config.zone_panel_dismissed;
         let onboarding_complete = store.config.onboarding_complete;
+        // #577: in safe start the synthetic scene is what is actually on the lights, and the
+        // saved scene is not run. The status names what plays, not what would play after a
+        // restart. Nothing here is written to the store.
+        let mut safe = self.safe_start_status();
+        let safe_effect = self.safe_effect.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(safe) = safe.as_mut() {
+            safe.fans_on_bios = self.fans_on_bios().await;
+            safe.lights = crate::scenes::safe_lights_words(
+                self.safe_fallback.load(Ordering::SeqCst),
+                safe_effect.is_some(),
+            )
+            .map(String::from);
+        }
+        let (active_scene, active_effects) = if safe.as_ref().is_some_and(|s| s.active) {
+            let effect = safe_effect;
+            (
+                Some(canvas_proto::api::SceneRef {
+                    id: crate::scenes::SAFE_SCENE.into(),
+                    name: crate::scenes::SAFE_SCENE_NAME.into(),
+                }),
+                effect.into_iter().collect::<Vec<_>>(),
+            )
+        } else {
+            (active_scene, active_effects)
+        };
         let openrgb = *self.openrgb.read().await;
         let conflicts = self.conflicts.read().await.clone();
         drop(store);
@@ -1006,6 +1146,8 @@ impl App {
             conflicts,
             show_zone_panel,
             onboarding_complete,
+            // #577: the value latched from the first Hello, with the service's fan answer.
+            safe_start: safe,
         })
     }
 

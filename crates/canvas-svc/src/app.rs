@@ -18,6 +18,7 @@ use crate::openrgb::{AdapterFactory, OpenRgbSupervisor};
 use crate::paths;
 use crate::pipe_server;
 use crate::process::{ProcessSpawner, StdSpawner};
+use crate::safe_start::{self, Book};
 use crate::secure::{windows_acl, SecureDir};
 use crate::service::{Core, PowerEvent};
 use crate::store::{self, ChipState};
@@ -39,7 +40,7 @@ use tokio::sync::Mutex as AsyncMutex;
 pub struct Boot {
     home: PathBuf,
     secure_error: Option<String>,
-    trust: Box<dyn SecureDir>,
+    trust: Arc<Mutex<Box<dyn SecureDir>>>,
 }
 
 impl Boot {
@@ -58,14 +59,21 @@ impl Boot {
     /// True when `path` may be read: the home is secured and the path's owner is SYSTEM or
     /// Administrators, and it is not a reparse point.
     pub fn trusted(&self, path: &Path) -> bool {
-        self.secured() && self.trust.trusted(path)
+        self.secured() && self.trust.lock().unwrap_or_else(|p| p.into_inner()).trusted(path)
+    }
+
+    /// The same owner check, for a caller that outlives the boot (safe start's writes).
+    pub fn trust_check(&self) -> impl Fn(&Path) -> bool + Send + 'static {
+        let secured = self.secured();
+        let trust = Arc::clone(&self.trust);
+        move |path: &Path| secured && trust.lock().unwrap_or_else(|p| p.into_inner()).trusted(path)
     }
 }
 
 /// Step 1: secures the machine home. A failure is recorded, not panicked on.
 pub fn secure_boot(home: &Path, mut secure: Box<dyn SecureDir>) -> Boot {
     let secure_error = secure.secure(home).err().map(|e| format!("{}: {e}", home.display()));
-    Boot { home: home.to_path_buf(), secure_error, trust: secure }
+    Boot { home: home.to_path_buf(), secure_error, trust: Arc::new(Mutex::new(secure)) }
 }
 
 /// Reads permission for one file: `false` (treated as missing) when it is not trusted.
@@ -85,6 +93,8 @@ pub struct Deps {
     pub launcher: Box<dyn SessionLauncher>,
     pub adapter: AdapterFactory,
     pub install_dir: PathBuf,
+    /// Opens the fan chip and the temperature sensors. Tests give fakes.
+    pub hardware: Box<dyn FnOnce() -> hardware::Hardware + Send>,
     /// The update installer. `None` builds the production one (when the home is secured).
     pub updates: Option<Arc<UpdateInstaller>>,
 }
@@ -97,6 +107,7 @@ pub fn production_deps() -> Deps {
         launcher: Box::new(crate::daemon::WtsLauncher),
         adapter: Box::new(|| Box::new(OpenRgbAdapter::new(OPENRGB_HOST, OPENRGB_PORT))),
         install_dir: install_dir(),
+        hardware: Box::new(hardware::open),
         updates: None,
     }
 }
@@ -114,7 +125,7 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
     let home = boot.home();
     let now = Instant::now();
     let (chip, chip_error, temps, file, confirmed, gpu_rated_max_c) = if boot.secured() {
-        let hardware = hardware::open();
+        let hardware = (deps.hardware)();
         let chip_path = paths::chip_path(home);
         let chip_state = if trusted_file(boot, &chip_path) {
             match store::load_chip_state(&chip_path) {
@@ -168,9 +179,24 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
             }
         }
     }
+    // #577: the mode is decided before fans.startup, so a safe start never applies a profile
+    // and there is no window where a header is driven before the hold begins.
+    let loaded = if boot.secured() {
+        let l = safe_start::load(home, |p| boot.trusted(p));
+        if l.untrusted_run {
+            tracing::error!(path = %safe_start::svc_run_path(home).display(), "svc-run.json is not trusted; leaving it alone");
+        }
+        if l.untrusted_state {
+            tracing::error!(path = %safe_start::safe_start_path(home).display(), "safe-start.json is not trusted; reading streak 0 and leaving it alone");
+        }
+        l
+    } else {
+        safe_start::Loaded::default()
+    };
+    let safe = loaded.persisted.mode == canvas_proto::api::SafeStartMode::Safe;
     if boot.secured() {
         fans.set_state_trusted(trusted_file(boot, &paths::bios_state_path(home)));
-        fans.startup(now);
+        fans.startup_in_mode(now, safe);
     }
 
     let config_dir = paths::openrgb_config_dir(home);
@@ -189,6 +215,13 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
     }
 
     let mut daemon = DaemonSupervisor::new(deps.install_dir.join(DAEMON_EXE), deps.launcher);
+    if boot.secured() {
+        let book = Book::open(home, loaded, boot.trust_check());
+        book.mark_running();
+        daemon.set_book(book);
+    } else {
+        daemon.set_book(Book::disabled(home));
+    }
     daemon.start(now);
     let mut core = Core::new(fans, openrgb, daemon);
     if boot.secured() {

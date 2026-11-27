@@ -1107,6 +1107,18 @@ impl PeripheralHub {
         result.map(|_| ())
     }
 
+    /// Closes every device an access was applied to in this run, without touching the saved
+    /// access. A run that applied none reaches no adapter: safe start at boot (#577).
+    pub async fn close_applied(&self) {
+        let applied: Vec<DeviceId> =
+            self.reads_applied.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+        for device in applied {
+            if let Err(error) = self.apply(&device, PeripheralAccess::default()).await {
+                tracing::debug!(device = %device, error = %error, "safe start could not close a peripheral");
+            }
+        }
+    }
+
     /// Applies the access to a device: opens it when reads are on, closes it when they are
     /// off, and follows the access with the adapter's write gate.
     ///
@@ -1269,6 +1281,10 @@ pub fn start_idle_refresh(app: Arc<App>) {
             ticker.tick().await;
             if app.shutting_down.load(std::sync::atomic::Ordering::SeqCst) != 0 {
                 return;
+            }
+            // A run that turned safe late reads nothing more (#577).
+            if crate::scenes::safe_mode(&app) {
+                continue;
             }
             let saved: Vec<DeviceId> = {
                 let store = app.store.read().await;

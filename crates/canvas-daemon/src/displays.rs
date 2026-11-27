@@ -520,7 +520,12 @@ pub async fn tick(app: &App, now: Instant) -> Duration {
     // so a DELETE that has removed its config and then takes the adapter lock sees every write
     // from before its removal finished.
     let mut adapter = hub.adapter.lock().await;
-    let configs = app.store.read().await.displays.displays.clone();
+    // Safe start (#577) drives no display: a run that turned safe late lets go of it here.
+    let configs = if crate::scenes::safe_mode(app) {
+        Default::default()
+    } else {
+        app.store.read().await.displays.displays.clone()
+    };
     {
         let mut runtime = hub.runtime.write().await;
         if generation != runtime.seen_generation {

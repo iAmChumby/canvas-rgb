@@ -459,7 +459,8 @@ pub fn first_frame_color() -> Rgb8 {
 
 /// Whether the first run still has to happen.
 pub async fn should_run(app: &std::sync::Arc<crate::state::App>) -> bool {
-    !app.store.read().await.config.first_run_done
+    // Safe start (#577) sizes no header and applies no scene.
+    !crate::scenes::safe_mode(app) && !app.store.read().await.config.first_run_done
 }
 
 /// The first run: size the JARGB headers, place the devices, activate the first effect.

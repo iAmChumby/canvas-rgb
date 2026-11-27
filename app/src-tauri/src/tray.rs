@@ -14,7 +14,8 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, Runtime};
 
 use canvas_proto::api::{
-    routes, ActivateEffect, Conflict, EffectsResponse, FanProfileName, PatchOutput, Power, Status,
+    routes, ActivateEffect, Conflict, EffectsResponse, FanProfileName, PatchOutput, Power,
+    SafeStartMode, SafeStartPut, Status,
 };
 use canvas_proto::fans::{FansStatus, PIPE_LOST_WARN_MS};
 use canvas_proto::tauri::EditorChoice;
@@ -43,6 +44,8 @@ pub struct Snapshot {
     pub favorites: Option<Vec<(String, String)>>,
     /// The fan profile menu data. `None` when the fan service did not answer (503).
     pub fans: Option<FanMenu>,
+    /// Safe start is on (#577): the menu offers "Start normally".
+    pub safe_start: bool,
     /// The daemon has lost the fan service for at least `PIPE_LOST_WARN_MS` (G4).
     pub fan_service_down: bool,
     pub signalrgb: bool,
@@ -74,6 +77,7 @@ impl Snapshot {
             active_effects: Vec::new(),
             favorites: None,
             fans: None,
+            safe_start: false,
             fan_service_down: false,
             signalrgb: false,
             show_zone_panel: false,
@@ -255,6 +259,7 @@ fn poll() -> Snapshot {
         active_effects: status.active_effects.clone(),
         favorites,
         fans,
+        safe_start: status.safe_start.as_ref().is_some_and(|s| s.active),
         fan_service_down: status.service_down_ms.is_some_and(|ms| ms >= PIPE_LOST_WARN_MS),
         signalrgb: status
             .conflicts
@@ -356,6 +361,17 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
     }
     items.extend::<Vec<Box<dyn IsMenuItem<R>>>>(vec![
         Box::new(MenuItem::with_id(app, power_id, power_text, snap.daemon, None::<&str>)?),
+    ]);
+    if snap.safe_start {
+        items.push(Box::new(MenuItem::with_id(
+            app,
+            "safe-start-normal",
+            "Start normally",
+            snap.daemon,
+            None::<&str>,
+        )?));
+    }
+    items.extend::<Vec<Box<dyn IsMenuItem<R>>>>(vec![
         Box::new(effects_submenu(app, snap)?),
         Box::new(fans_submenu(app, snap)?),
         Box::new(MenuItem::with_id(app, "fans", "Fans…", true, None::<&str>)?),
@@ -502,6 +518,14 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
             }
             "update" => {
                 editor::open(app, Some("updates"));
+            }
+            "safe-start-normal" => {
+                let body = SafeStartPut { mode: SafeStartMode::Normal };
+                act(app, "start normally", move |client| {
+                    client
+                        .put::<_, serde_json::Value>(routes::SAFE_START, &body)
+                        .map(drop)
+                });
             }
             "update-check" => update::check_in_background(app),
             "logs" => {
@@ -666,6 +690,14 @@ mod tests {
                 .collect();
         }
         Vec::new()
+    }
+
+    #[test]
+    fn safe_start_offers_start_normally() {
+        let plain = menu_ids(&snap());
+        assert!(!plain.contains(&"safe-start-normal".to_string()), "{plain:?}");
+        let safe = menu_ids(&Snapshot { safe_start: true, ..snap() });
+        assert!(safe.contains(&"safe-start-normal".to_string()), "{safe:?}");
     }
 
     #[test]

@@ -369,6 +369,9 @@ function racedAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined)
   });
 }
 
+/** Told of every write the daemon accepted. Scenes uses it to say when a save will apply (#577). */
+export const writeListeners = new Set<(method: Method, path: string) => void>();
+
 export async function request<T>(
   method: Method,
   path: string,
@@ -384,7 +387,7 @@ export async function request<T>(
     // ignored there. The caller drops the answer anyway.
     return (await demoRequest(method, path, body)) as T;
   }
-  return send(
+  const answer = await send<T>(
     method,
     path,
     body,
@@ -396,6 +399,8 @@ export async function request<T>(
     },
     opts,
   );
+  if (method !== "GET") for (const heard of writeListeners) heard(method, path);
+  return answer;
 }
 
 /** A GET whose answer is binary (the effect thumbnails). */

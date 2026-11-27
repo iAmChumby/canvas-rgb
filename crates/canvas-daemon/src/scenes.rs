@@ -710,6 +710,115 @@ pub async fn apply_active(app: &Arc<App>, fade: bool) {
     apply_with(app, &lock, fade).await;
 }
 
+// ---------------------------------------------------------------- safe start
+
+/// The id of the in-memory scene and group safe start runs (#577).
+pub const SAFE_SCENE: &str = "safe-start";
+
+/// The colour safe start paints when Breathing cannot be built, and what a surface calls it.
+const STEADY: (&str, canvas_proto::Rgb8) = ("One steady colour, blue", canvas_proto::Rgb8::new(40, 90, 160));
+
+/// What the safe-start record says the lights run (`SafeStart::lights`): the fallback colour by
+/// name, so no surface has to know it; `None` before anything plays.
+pub fn safe_lights_words(fallback: bool, playing: bool) -> Option<&'static str> {
+    if fallback {
+        Some(STEADY.0)
+    } else if playing {
+        Some("Breathing")
+    } else {
+        None
+    }
+}
+
+/// The name of the in-memory safe-start scene. Status always gives this short name; what the
+/// lights run is in `SafeStart::lights`.
+pub const SAFE_SCENE_NAME: &str = "Safe start";
+
+/// The least brightness safe start shows: a saved 0 must not leave the lights dark.
+pub const SAFE_MIN_BRIGHTNESS: u8 = 20;
+
+/// What a request that would put something of the owner's on the lights is told in safe start.
+pub const NOT_IN_SAFE_START: &str = "Not available in safe start";
+
+/// Turns the run safe, at start or when the service's answer comes late. The mode is latched
+/// first, so every apply from here on builds the safe scene. Then a draft or greeting leaves the
+/// lights, they come on, the opened peripherals are closed and a saved scene that is already
+/// playing gives way. Nothing is written to the store. Does nothing once the mode is decided.
+pub async fn enter_safe(app: &Arc<App>, last_exit: canvas_proto::api::LastExit, record: Option<canvas_proto::api::SafeStart>) {
+    if !app.latch_start_from(canvas_proto::api::SafeStartMode::Safe, last_exit, record) {
+        return;
+    }
+    {
+        let lock = app.scene.lock().await;
+        let replace = crate::draft::hold_for_replace(app).await;
+        app.transient.cancel();
+        let settings = app.store.read().await.config.settings.clone();
+        let (power, brightness) = app.raise_safe_output(&settings);
+        app.engine.set_brightness(brightness);
+        app.engine.set_power(power);
+        // At start nothing is on yet: the first device list puts the safe scene on.
+        if app.scene.is_on() || replace.ended_takeover() {
+            apply_with(app, &lock, false).await;
+        }
+        replace.settle();
+    }
+    app.peripherals.close_applied().await;
+    app.scene.notify();
+}
+
+/// True for the whole of a safe-start run: the saved scene is saved and never applied.
+pub fn safe_mode(app: &App) -> bool {
+    app.start_mode() == canvas_proto::api::SafeStartMode::Safe
+}
+
+/// Every light playing the built-in effect, or the steady colour once that has failed. It lives
+/// in memory only: nothing is written to the store and no saved scene is marked active.
+fn safe_scene(app: &App, lights: &[Light]) -> Scene {
+    let plays = if app.safe_fallback.load(Ordering::SeqCst) {
+        let props = Props::from([("color".to_string(), canvas_proto::props::PropValue::Color(STEADY.1))]);
+        Plays::Effect { effect: "solid".into(), props }
+    } else {
+        let effect = app.safe_builtin.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        Plays::Effect { effect, props: Props::new() }
+    };
+    let members: Vec<LightId> = lights.iter().map(|l| l.id.clone()).collect();
+    let group = Group {
+        id: SAFE_SCENE.into(),
+        name: SAFE_SCENE_NAME.into(),
+        members,
+        plays,
+        mode: GroupMode::default(),
+        brightness: GROUP_BRIGHTNESS_MAX,
+        sequence: None,
+    };
+    Scene {
+        id: SAFE_SCENE.into(),
+        name: SAFE_SCENE_NAME.into(),
+        rev: 0,
+        // With no light there is nothing to build, and that is not a failure.
+        groups: if lights.is_empty() { Vec::new() } else { vec![group] },
+    }
+}
+
+/// After a safe-start build: records what is on the lights, or turns to the steady colour when
+/// the effect failed. Answers true when the scene has to be built again.
+fn safe_built(app: &App, scene: &Scene, failures: &BTreeMap<String, String>) -> bool {
+    let playing = scene.groups.first().and_then(|g| match &g.plays {
+        Plays::Effect { effect, .. } => Some(effect.clone()),
+        Plays::Off => None,
+    });
+    if let Some(why) = failures.get(SAFE_SCENE) {
+        if !app.safe_fallback.swap(true, Ordering::SeqCst) {
+            tracing::warn!(error = %why, "safe start could not build Breathing; showing one steady colour");
+            return true;
+        }
+        tracing::error!(error = %why, "safe start could not build the steady colour either; writing it to the lights");
+        app.identify.paint_solid(app.engine.as_ref(), STEADY.1);
+    }
+    *app.safe_effect.lock().unwrap_or_else(|e| e.into_inner()) = playing;
+    false
+}
+
 /// [`apply_active`] for a caller that already orders the lights with the draft gate.
 ///
 /// The scene order is *not* taken here, and that is deliberate: a scene write holds the scene
@@ -778,7 +887,11 @@ pub async fn apply_for_devices(app: &Arc<App>) {
 async fn snapshot(app: &App) -> Applied {
     let (lights, scene) = {
         let store = app.store.read().await;
-        (store.lights.lights.clone(), active_scene(&store.scenes).clone())
+        let lights = store.lights.lights.clone();
+        // Safe start (#577): every apply, whoever asks, gets the safe scene instead of the
+        // saved one. This is the one place the saved scene reaches an apply from.
+        let scene = if safe_mode(app) { safe_scene(app, &lights) } else { active_scene(&store.scenes).clone() };
+        (lights, scene)
     };
     Applied { lights, devices: app.devices.read().await.clone(), scene }
 }
@@ -788,14 +901,28 @@ pub async fn apply_with(app: &Arc<App>, _lock: &SceneLock<'_>, fade: bool) {
     apply_body(app, fade).await;
 }
 
+/// Builds one snapshot's scene on a blocking thread and hands it to the engine.
+async fn build_key(app: &Arc<App>, key: &Applied, fade: bool) -> Result<BTreeMap<String, String>, tokio::task::JoinError> {
+    let app = Arc::clone(app);
+    let key = key.clone();
+    tokio::task::spawn_blocking(move || build_and_set(&app, &key.lights, &key.devices, &key.scene, fade)).await
+}
+
 /// The body of every apply: the active scene is built and handed to the engine.
 async fn apply_body(app: &Arc<App>, fade: bool) {
-    let key = snapshot(app).await;
-    let built = {
-        let app = Arc::clone(app);
-        let key = key.clone();
-        tokio::task::spawn_blocking(move || build_and_set(&app, &key.lights, &key.devices, &key.scene, fade)).await
-    };
+    let mut key = snapshot(app).await;
+    let mut built = build_key(app, &key, fade).await;
+    if safe_mode(app) {
+        if let Ok(failures) = &built {
+            if safe_built(app, &key.scene, failures) {
+                key = snapshot(app).await;
+                built = build_key(app, &key, fade).await;
+                if let Ok(failures) = &built {
+                    safe_built(app, &key.scene, failures);
+                }
+            }
+        }
+    }
     match built {
         Ok(failures) => {
             *app.scene.failures.lock().unwrap_or_else(|e| e.into_inner()) = failures;
@@ -810,8 +937,10 @@ async fn apply_body(app: &Arc<App>, fade: bool) {
             app.scene.set_held(held);
             app.scene.notify();
             // The masks of the groups follow the scene: a stack resolves its layers in the group
-            // it plays in.
-            publish_group_areas(app).await;
+            // it plays in. Safe start runs no stack.
+            if !safe_mode(app) {
+                publish_group_areas(app).await;
+            }
         }
         Err(e) => {
             // The build task failed: nothing was built, so the takeover is over and the
@@ -1164,6 +1293,10 @@ pub async fn apply_takeover(
     ready: Option<(String, Box<dyn Effect>)>,
     build: EffectBuilder,
 ) -> Result<Vec<String>, String> {
+    // Safe start (#577): nothing of the owner's goes on the lights, a draft included.
+    if safe_mode(app) {
+        return Ok(Vec::new());
+    }
     let target = takeover_groups(app, effect).await;
     let (scene, lights, devices) = {
         let store = app.store.read().await;
@@ -1366,6 +1499,9 @@ pub async fn apply_pattern_takeover(
     app: &Arc<App>,
     pattern: &canvas_proto::pattern::Pattern,
 ) -> Result<usize, String> {
+    if safe_mode(app) {
+        return Ok(0);
+    }
     let (scene, lights, devices) = {
         let store = app.store.read().await;
         (
@@ -1599,6 +1735,11 @@ fn effect_named(plays: &Plays) -> Option<&str> {
 /// takeover ends (its restore applies the active scene). A change of the scene's shape needs the
 /// whole scene, which would put the scene over the takeover, so it waits for the takeover too.
 pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scene, new: &Scene) {
+    // Safe start (#577): the change is saved, and applies when the owner starts normally.
+    if safe_mode(app) {
+        app.scene.notify();
+        return;
+    }
     let held = app.scene.held().takeover;
     let taken_over = !held.is_empty();
     if !same_shape(old, new) {
@@ -1717,6 +1858,9 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
 /// The frame budget is one answer for the whole scene, so the groups it left dark are tried again
 /// here: a pattern that shrank elsewhere can bring them back without a full build (#518).
 pub async fn pattern_changed(app: &Arc<App>, id: &str) {
+    if safe_mode(app) {
+        return;
+    }
     // The scene order, as a save takes it: a scene write and this change never interleave.
     let _lock = app.scene.lock().await;
     let scene = {

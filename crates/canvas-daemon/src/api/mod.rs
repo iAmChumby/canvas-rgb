@@ -17,6 +17,7 @@ pub mod output;
 pub mod patterns;
 pub mod peripherals;
 pub mod preview;
+pub mod safe_start;
 pub mod scenes;
 pub mod settings;
 pub mod stack_preview;
@@ -37,6 +38,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::STATUS, get(status::status))
         .route(routes::ABOUT, get(about::about))
         .route(routes::ABOUT_REPORT, get(about::report))
+        .route(routes::SAFE_START, put(safe_start::put_safe_start))
         .route(routes::OUTPUT, get(output::get_output).patch(output::patch_output))
         .route(routes::DEVICES, get(devices::list_devices))
         .route(

@@ -346,3 +346,282 @@ fn issue146_an_unknown_header_is_refused() {
     }
     assert!(saved_overrides(&home).is_empty(), "a refused word is not saved");
 }
+
+// ---- safe start: the Hello reply and the restart budget (#577 sections 1, 5, 9) ----
+
+/// A core whose daemon supervisor owns a book in this test's home.
+fn core_with_book(home: &TempDir, mode: canvas_proto::api::SafeStartMode, streak: u32) -> (Core, FakeProcesses) {
+    let (mut core, processes) = core(19430, Rgb8::BLACK, home);
+    let state = crate::safe_start::Persisted {
+        unclean_streak: streak,
+        mode,
+        reason: (mode == canvas_proto::api::SafeStartMode::Safe)
+            .then_some(canvas_proto::api::SafeStartReason::CrashLoop),
+        since: Some("2026-11-26T00:00:00Z".into()),
+        ..Default::default()
+    };
+    crate::safe_start::save(home.path(), &state).unwrap();
+    core.daemon.set_book(crate::safe_start::Book::open(
+        home.path(),
+        crate::safe_start::load(home.path(), |_| true),
+        |_| true,
+    ));
+    (core, processes)
+}
+
+#[test]
+fn hello_carries_the_decision_and_the_last_verdict() {
+    use canvas_proto::api::{LastExit, SafeStartMode};
+    let home = tempfile::tempdir().unwrap();
+    let (mut core, processes) = core_with_book(&home, SafeStartMode::Safe, 2);
+    let hello = PipeRequest::Hello { protocol: canvas_proto::pipe::PROTOCOL_VERSION, daemon_pid: 1 };
+    let reply = core.handle(hello.clone(), Instant::now());
+    assert!(
+        matches!(&reply, PipeResponse::Hello { start_mode, last_exit, .. }
+            if *start_mode == SafeStartMode::Safe && *last_exit == LastExit::Unknown),
+        "{reply:?}"
+    );
+
+    let t0 = Instant::now();
+    core.daemon.start(t0);
+    processes.exit_last_with(0xC000_0005u32 as i32);
+    core.daemon.tick(t0 + Duration::from_secs(1));
+    let reply = core.handle(hello, Instant::now());
+    assert!(
+        matches!(&reply, PipeResponse::Hello { start_mode, last_exit, .. }
+            if *start_mode == SafeStartMode::Safe && *last_exit == LastExit::Unclean),
+        "{reply:?}"
+    );
+    assert!(crate::safe_start::load(home.path(), |_| true).persisted.unclean_streak >= 3);
+}
+
+#[test]
+fn exit_zero_without_a_notice_does_not_spend_a_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let (mut core, processes) = core_with_book(&home, canvas_proto::api::SafeStartMode::Normal, 0);
+    let t0 = Instant::now();
+    core.daemon.start(t0);
+    for i in 1..=(canvas_proto::consts::DAEMON_RESTART_LIMIT + 2) {
+        processes.exit_last_with(0);
+        // Spaced out, so the start-rate limit (its own test) delays none of them.
+        let action = core.daemon.tick(t0 + Duration::from_secs(3 * i as u64));
+        assert_eq!(action, crate::daemon::DaemonAction::None, "exit 0 was treated as a crash at {i}");
+    }
+    assert!(!core.daemon.stopped(), "the daemon was crash-stopped by clean exits");
+    assert_eq!(processes.spawns().len() as u32, canvas_proto::consts::DAEMON_RESTART_LIMIT + 3);
+}
+
+#[test]
+fn a_clean_stop_removes_the_service_run_marker_but_not_the_streak() {
+    let home = tempfile::tempdir().unwrap();
+    let (mut core, _processes) = core_with_book(&home, canvas_proto::api::SafeStartMode::Safe, 2);
+    crate::safe_start::write_svc_run(home.path()).unwrap();
+    assert!(crate::safe_start::svc_run_path(home.path()).exists());
+    core.shutdown("test stop");
+    assert!(!crate::safe_start::svc_run_path(home.path()).exists());
+    let saved = crate::safe_start::load(home.path(), |_| true);
+    assert_eq!(saved.persisted.unclean_streak, 2, "a stop does not delete safe-start.json");
+    assert!(!saved.leftover);
+}
+
+// ---- #577 fix pass 1 ----
+
+const CRASH: i32 = 0xC000_0005u32 as i32;
+const LOGOFF: i32 = 0x4001_0004u32 as i32;
+
+#[tokio::test]
+async fn b1_the_fan_hold_follows_a_runtime_crash_and_the_return_to_normal() {
+    use canvas_proto::api::SafeStartMode;
+    let home = tempfile::tempdir().unwrap();
+    let (mut core, processes) = core_with_book(&home, SafeStartMode::Normal, 0);
+    // No OpenRGB spawn, so "the last spawn" is always the daemon.
+    core.openrgb.disable("test");
+    let t0 = Instant::now();
+    core.daemon.start(t0);
+    assert!(!core.fans.hold_active());
+    processes.exit_last_with(CRASH);
+    core.tick(t0 + Duration::from_secs(1)).await;
+    assert_eq!(processes.spawns().iter().filter(|s| s.0.ends_with("canvas-rgbd.exe")).count(), 2);
+    assert!(core.fans.hold_active(), "an unclean end relaunches in safe start with the hold on");
+    processes.exit_last_with(0);
+    core.tick(t0 + Duration::from_secs(20)).await;
+    assert!(!core.fans.hold_active(), "the return to normal releases the hold");
+}
+
+#[test]
+fn h1_a_stale_daemon_at_start_does_not_change_a_persisted_safe_mode() {
+    use canvas_proto::api::{SafeStartMode, SafeStartReason};
+    let home = tempfile::tempdir().unwrap();
+    let state = crate::safe_start::Persisted {
+        unclean_streak: 1,
+        mode: SafeStartMode::Safe,
+        reason: Some(SafeStartReason::UncleanOnce),
+        since: Some("t0".into()),
+        ..Default::default()
+    };
+    crate::safe_start::save(home.path(), &state).unwrap();
+    let (mut core, processes) = core(19430, Rgb8::BLACK, &home);
+    core.daemon.set_book(crate::safe_start::Book::open(home.path(), crate::safe_start::load(home.path(), |_| true), |_| true));
+    processes.add_running(4242, r"C:\svc\canvas-rgbd.exe", 1);
+    processes.set_console(1);
+    core.daemon.start(Instant::now());
+    assert_eq!(core.daemon.start_decision().0, SafeStartMode::Safe);
+}
+
+#[test]
+fn h1_an_unclean_end_of_a_chosen_safe_run_stays_user_chose() {
+    use canvas_proto::api::{LastExit, SafeStartMode, SafeStartReason};
+    let home = tempfile::tempdir().unwrap();
+    let mut book = crate::safe_start::Book::open(home.path(), crate::safe_start::load(home.path(), |_| true), |_| true);
+    book.set_user_choice(SafeStartMode::Safe, "t0");
+    book.record_end(LastExit::Unclean, "t1");
+    assert_eq!(book.reason(), Some(SafeStartReason::UserChose));
+    assert_eq!(book.persisted.unclean_streak, 1, "the streak still counts");
+}
+
+#[test]
+fn h2_a_crash_code_during_a_logoff_records_planned_only_and_leaks_no_streak() {
+    use canvas_proto::api::{LastExit, SafeStartMode};
+    let home = tempfile::tempdir().unwrap();
+    let (mut core, processes) = core_with_book(&home, SafeStartMode::Normal, 0);
+    let t0 = Instant::now();
+    processes.set_console(1);
+    core.daemon.start(t0);
+    processes.log_off(1);
+    processes.exit_last_with(CRASH);
+    core.daemon.tick(t0 + Duration::from_secs(1));
+    assert_eq!(core.daemon.start_decision(), (SafeStartMode::Normal, LastExit::Planned));
+    assert_eq!(crate::safe_start::load(home.path(), |_| true).persisted.unclean_streak, 0);
+}
+
+#[test]
+fn h2_a_session_end_code_records_planned_only() {
+    use canvas_proto::api::{LastExit, SafeStartMode};
+    let home = tempfile::tempdir().unwrap();
+    let (mut core, processes) = core_with_book(&home, SafeStartMode::Normal, 0);
+    let t0 = Instant::now();
+    core.daemon.start(t0);
+    processes.exit_last_with(LOGOFF);
+    core.daemon.tick(t0 + Duration::from_secs(1));
+    assert_eq!(core.daemon.start_decision(), (SafeStartMode::Normal, LastExit::Planned));
+}
+
+#[test]
+fn r3_a_clean_end_does_not_leave_a_crash_loop() {
+    use canvas_proto::api::SafeStartMode;
+    let home = tempfile::tempdir().unwrap();
+    let (mut core, processes) = core_with_book(&home, SafeStartMode::Safe, 3);
+    let t0 = Instant::now();
+    core.daemon.start(t0);
+    processes.exit_last_with(0);
+    core.daemon.tick(t0 + Duration::from_secs(1));
+    let kept = crate::safe_start::load(home.path(), |_| true).persisted;
+    assert_eq!((kept.mode, kept.unclean_streak), (SafeStartMode::Safe, 3));
+}
+
+#[test]
+fn h3_every_kind_of_exit_is_rate_limited_and_backs_off() {
+    use canvas_proto::api::SafeStartMode;
+    let home = tempfile::tempdir().unwrap();
+    let (mut core, processes) = core_with_book(&home, SafeStartMode::Normal, 0);
+    let t0 = Instant::now();
+    core.daemon.start(t0);
+    // A daemon that ends cleanly the moment it starts, ticked once a second for a minute.
+    let mut at = Vec::new();
+    let mut seen = processes.spawns().len();
+    for s in 1..=300u64 {
+        if core.daemon.daemon_pid().is_some() {
+            processes.exit_last_with(0);
+        }
+        core.daemon.tick(t0 + Duration::from_secs(s));
+        if processes.spawns().len() > seen {
+            seen = processes.spawns().len();
+            at.push(s);
+        }
+    }
+    assert!(!core.daemon.stopped(), "a clean exit is not a crash");
+    assert!(at.len() <= 15, "{} relaunches in 300 s: {at:?}", at.len());
+    let gaps: Vec<u64> = at.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(gaps.iter().all(|g| *g <= 62), "the back-off is capped at 60 s: {gaps:?}");
+    assert!(gaps.iter().any(|g| *g >= 60), "the back-off reaches its cap: {gaps:?}");
+}
+
+#[test]
+fn m2_hello_carries_the_record_and_the_last_exit_survives_a_service_restart() {
+    use canvas_proto::api::{LastExit, SafeStartMode, SafeStartReason};
+    let home = tempfile::tempdir().unwrap();
+    let (mut core, processes) = core_with_book(&home, SafeStartMode::Normal, 0);
+    let t0 = Instant::now();
+    core.daemon.start(t0);
+    processes.exit_last_with(CRASH);
+    core.daemon.tick(t0 + Duration::from_secs(1));
+    let hello = PipeRequest::Hello { protocol: canvas_proto::pipe::PROTOCOL_VERSION, daemon_pid: 1 };
+    let PipeResponse::Hello { safe_start: Some(record), .. } = core.handle(hello, t0) else {
+        panic!("no safe-start record on the Hello");
+    };
+    assert!(record.active);
+    assert_eq!(record.reason, Some(SafeStartReason::UncleanOnce));
+    assert_eq!(record.unclean_streak, 1);
+    let since = record.since.expect("since");
+    assert!(since.len() == 20 && since.ends_with('Z'), "RFC 3339: {since}");
+    assert_eq!(record.fans_on_bios, None, "the daemon fills this");
+    let reopened = crate::safe_start::Book::open(home.path(), crate::safe_start::load(home.path(), |_| true), |_| true);
+    assert_eq!(reopened.last_exit(), LastExit::Unclean);
+}
+
+#[test]
+fn l2_a_mode_change_to_the_mode_in_force_does_nothing() {
+    use canvas_proto::api::SafeStartMode;
+    let home = tempfile::tempdir().unwrap();
+    let (mut core, processes) = core_with_book(&home, SafeStartMode::Normal, 1);
+    core.daemon.start(Instant::now());
+    assert_eq!(core.handle(PipeRequest::LeaveSafeStart, Instant::now()), PipeResponse::Ok);
+    assert_eq!(processes.spawns().len(), 1, "no restart");
+    assert_eq!(crate::safe_start::load(home.path(), |_| true).persisted.unclean_streak, 1, "streak kept");
+}
+
+/// M1: a file that is not trusted is never renamed over, whatever the service learns later.
+#[test]
+fn m1_an_untrusted_state_file_is_never_written_over() {
+    use canvas_proto::api::{LastExit, SafeStartMode};
+    let home = tempfile::tempdir().unwrap();
+    let path = crate::safe_start::safe_start_path(home.path());
+    std::fs::write(&path, b"planted").unwrap();
+    let mut book = crate::safe_start::Book::open(home.path(), crate::safe_start::load(home.path(), |p| p != path.as_path()), {
+        let path = path.clone();
+        move |p: &std::path::Path| p != path.as_path()
+    });
+    book.record_end(LastExit::Unclean, "t0");
+    assert_eq!(book.mode(), SafeStartMode::Safe, "the service keeps running in memory");
+    book.set_user_choice(SafeStartMode::Normal, "t1");
+    assert_eq!(std::fs::read(&path).unwrap(), b"planted");
+}
+
+/// M1: the run marker follows the same rule. An untrusted marker is neither written over nor
+/// deleted, and an untrusted temp name blocks the write that would rename it.
+#[test]
+fn m1_an_untrusted_run_marker_is_never_written_over_or_deleted() {
+    let planted = |name: &str| {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(name);
+        std::fs::write(&path, b"planted").unwrap();
+        let bad = path.clone();
+        let book = crate::safe_start::Book::open(
+            home.path(),
+            crate::safe_start::load(home.path(), |p| p != path.as_path()),
+            move |p: &std::path::Path| p != bad.as_path(),
+        );
+        (home, path, book)
+    };
+
+    let (_home, marker, book) = planted(crate::safe_start::SVC_RUN_FILE);
+    book.mark_running();
+    assert_eq!(std::fs::read(&marker).unwrap(), b"planted");
+    book.mark_stopped();
+    assert_eq!(std::fs::read(&marker).unwrap(), b"planted");
+
+    let (home, temp, book) = planted(&format!("{}.tmp", crate::safe_start::SVC_RUN_FILE));
+    book.mark_running();
+    assert_eq!(std::fs::read(&temp).unwrap(), b"planted");
+    assert!(!home.path().join(crate::safe_start::SVC_RUN_FILE).exists());
+}

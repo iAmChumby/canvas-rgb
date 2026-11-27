@@ -25,6 +25,8 @@
 //! their own.
 
 use crate::process::ChildProcess;
+use crate::safe_start::{self, Beat, Book, EndCause};
+use canvas_proto::api::{LastExit, SafeStartMode};
 use canvas_proto::consts::{DAEMON_RESTART_LIMIT, DAEMON_RESTART_WINDOW_S};
 use std::collections::VecDeque;
 use std::io;
@@ -101,6 +103,14 @@ pub const SESSION_END_HOLD: Duration = Duration::from_secs(60);
 fn is_session_end_code(code: i32) -> bool {
     matches!(code as u32, 0x4001_0004 | 0xC000_026B)
 }
+
+/// How many launches [`START_WINDOW`] allows before the next relaunch waits (#577), the way
+/// systemd's `StartLimitBurst` and `StartLimitIntervalSec` do it. It covers every kind of exit,
+/// also the ones that do not count as a crash.
+pub const START_BURST: usize = 5;
+pub const START_WINDOW: Duration = Duration::from_secs(10);
+/// The longest delay between relaunches. A run that lasted this long starts the count again.
+pub const START_BACKOFF_CAP: Duration = Duration::from_secs(60);
 
 /// The relaunch held after an exit that ended with the session (#6).
 #[derive(Debug, Clone, Copy)]
@@ -407,6 +417,15 @@ pub struct DaemonSupervisor {
     /// The daemon `stop()` could not end (#81): the OpenRGB stop line says that instead of
     /// claiming the daemon was terminated.
     unended_daemon: Option<u32>,
+    /// The service-owned safe-start book (#577). `None` only in tests that build a supervisor
+    /// without a machine home; the production core always sets one before the first launch.
+    book: Option<Book>,
+    /// The latest launches, oldest first, at most [`START_BURST`] of them (#577).
+    recent_starts: VecDeque<Instant>,
+    /// How many relaunches in a row have been delayed; zero while the rate is fine.
+    backoff_level: u32,
+    /// A delayed relaunch is due at this time. No daemon runs until then.
+    retry_at: Option<Instant>,
 }
 
 impl DaemonSupervisor {
@@ -433,14 +452,127 @@ impl DaemonSupervisor {
             pending_console: None,
             stopped_daemon: None,
             unended_daemon: None,
+            book: None,
+            recent_starts: VecDeque::new(),
+            backoff_level: 0,
+            retry_at: None,
         }
+    }
+
+    /// Gives the supervisor the fail-closed state read at service start. Must be called before
+    /// [`DaemonSupervisor::start`], so the first daemon's `Hello` carries the decision.
+    pub fn set_book(&mut self, book: Book) {
+        self.book = Some(book);
+    }
+
+    /// What the next daemon should start in, and how the last one ended (#577 section 5).
+    pub fn start_decision(&self) -> (SafeStartMode, LastExit) {
+        self.book
+            .as_ref()
+            .map_or((SafeStartMode::Normal, LastExit::Unknown), |b| (b.mode(), b.last_exit()))
+    }
+
+    /// The safe-start record the next `Hello` carries (#577).
+    pub fn safe_record(&self) -> Option<canvas_proto::api::SafeStart> {
+        self.book.as_ref().and_then(Book::record)
+    }
+
+    /// The service stopped cleanly: its run marker goes.
+    pub fn mark_service_stopped(&self) {
+        if let Some(book) = self.book.as_ref() {
+            book.mark_stopped();
+        }
+    }
+
+    /// The book, for the pipe server's Enter/Leave handling.
+    pub fn book_mut(&mut self) -> Option<&mut Book> {
+        self.book.as_mut()
+    }
+
+    /// The spec's name for the budget the running daemon is on (#577 section 1).
+    fn safe_beat(&self) -> Beat {
+        if self.beat_budget() == BeatBudget::First { Beat::BeforeFirst } else { Beat::AfterFirst }
+    }
+
+    /// Classes an end, updates the streak and the mode, and persists it before the next launch.
+    fn record(&mut self, cause: EndCause, code: Option<i32>, beat: Beat) -> LastExit {
+        let v = safe_start::verdict(cause, code, beat);
+        if let Some(book) = self.book.as_mut() {
+            // Neither is the end of a run this service watched, so neither decides the mode.
+            if matches!(cause, EndCause::StaleAtStart | EndCause::LaunchFailure) {
+                book.note_end(v);
+            } else {
+                book.record_end(v, &safe_start::stamp_now());
+            }
+        }
+        v
+    }
+
+    /// "Start normally" / "Start in safe start": end this daemon with a planned kill and
+    /// launch a new one. The daemon does not run `quit_sequence`, so no `DaemonQuitting`
+    /// arrives to block the relaunch (#577 R15); the chain-restore record it left is replayed
+    /// when the next daemon's device list arrives.
+    pub fn restart_in_new_mode(&mut self, now: Instant) {
+        if let Some(mut child) = self.child.take() {
+            // The kill is the mode change itself, not an end of a daemon run: recording it as
+            // Planned would let the streak re-decide the mode the owner just chose.
+            let pid = child.id();
+            let _ = terminate_daemon(child.as_mut(), "safe start mode change");
+            wait_for_exit(child.as_mut(), pid);
+            self.clear_heartbeat_clock();
+        }
+        // The owner asked for this start: it does not wait on the restarts before it.
+        self.reset_start_limit();
+        self.relaunch(now);
+    }
+
+    /// Relaunches after an end. Only an unclean end or a startup failure spends a restart; a
+    /// clean exit 0 with no notice is relaunched just like today but does not count (#577 #1).
+    fn restart(&mut self, now: Instant, v: LastExit, reason: &str) -> DaemonAction {
+        if safe_start::counts_toward_restart(v) {
+            return self.crashed(now, reason);
+        }
+        tracing::info!(reason, verdict = ?v, "the daemon ended; starting it again without spending a restart");
+        self.relaunch(now);
+        DaemonAction::None
+    }
+
+    /// The one way a daemon is launched, at a bounded rate: [`START_BURST`] attempts in
+    /// [`START_WINDOW`], then 1 s, 2 s, 4 s and so on up to [`START_BACKOFF_CAP`] (#577). Only
+    /// a delay that has been served calls [`DaemonSupervisor::launch`] directly.
+    fn relaunch(&mut self, now: Instant) {
+        let age = |at: &Instant| now.saturating_duration_since(*at);
+        if self.recent_starts.back().is_some_and(|at| age(at) >= START_BACKOFF_CAP) {
+            self.reset_start_limit();
+        }
+        let burst = self.recent_starts.iter().filter(|at| age(at) < START_WINDOW).count();
+        if self.backoff_level == 0 && burst < START_BURST {
+            self.launch(now);
+            return;
+        }
+        let delay = Duration::from_secs(1u64 << self.backoff_level.min(6)).min(START_BACKOFF_CAP);
+        self.backoff_level = self.backoff_level.saturating_add(1);
+        self.retry_at = Some(now + delay);
+        self.clear_heartbeat_clock();
+        tracing::warn!(
+            delay_s = delay.as_secs(),
+            burst = START_BURST,
+            window_s = START_WINDOW.as_secs(),
+            "the daemon has been started too often; waiting before the next start"
+        );
+    }
+
+    fn reset_start_limit(&mut self) {
+        self.recent_starts.clear();
+        self.backoff_level = 0;
+        self.retry_at = None;
     }
 
     /// Starts the daemon for the first time (service start).
     pub fn start(&mut self, now: Instant) {
         self.started = true;
         self.end_stale_daemons();
-        self.launch(now);
+        self.relaunch(now);
     }
 
     /// Ends a `canvas-rgbd` left over from a previous service instance. It holds the API port, so
@@ -465,6 +597,8 @@ impl DaemonSupervisor {
             if terminate_daemon(stale.process.as_mut(), "a stale daemon from a previous service instance").is_err() {
                 continue;
             }
+            // A daemon left by another service instance is never evidence of a crash (#577 R16).
+            self.record(EndCause::StaleAtStart, Some(1), Beat::BeforeFirst);
             let deadline = Instant::now() + STALE_EXIT_WAIT;
             loop {
                 match stale.process.try_wait() {
@@ -522,10 +656,12 @@ impl DaemonSupervisor {
     }
 
     fn launch(&mut self, now: Instant) {
+        self.retry_at = None;
         let session = self.launcher.console_session();
         match self.launcher.launch(&self.exe) {
             Ok(child) => {
                 let pid = child.id();
+                self.count_start(now);
                 self.child = Some(child);
                 self.child_session = session;
                 self.waiting_for_session = false;
@@ -554,11 +690,21 @@ impl DaemonSupervisor {
                 self.waiting_for_session = true;
             }
             Err(e) => {
+                self.count_start(now);
                 self.child = None;
                 self.waiting_for_session = false;
                 self.clear_heartbeat_clock();
                 tracing::error!(error = %e, "could not start the daemon");
             }
+        }
+    }
+
+    /// Counts a launch attempt against the start-rate limit, a failed one too. Waiting for a
+    /// logon is no attempt: there is nobody to launch for, and a logon starts at once.
+    fn count_start(&mut self, now: Instant) {
+        self.recent_starts.push_back(now);
+        if self.recent_starts.len() > START_BURST {
+            self.recent_starts.pop_front();
         }
     }
 
@@ -618,6 +764,11 @@ impl DaemonSupervisor {
     /// Without this a service restart leaves the old daemon holding the API port, so the new
     /// service's daemon cannot bind and crash-loops (lighting session 2).
     pub fn stop(&mut self) {
+        // With no daemon running there is no run to end, and nothing to decide.
+        if self.child.is_some() {
+            let beat = self.safe_beat();
+            self.record(EndCause::ServiceStop, None, beat);
+        }
         self.service_stopped = true;
         self.heartbeat_clock().mark_stopped();
         if let Some(mut child) = self.child.take() {
@@ -664,6 +815,8 @@ impl DaemonSupervisor {
     /// The daemon is quitting on purpose; its exit is not a crash. A new console session ends
     /// the quit (#6): the daemon that quit belonged to the session that is gone.
     pub fn on_quitting(&mut self) {
+        let beat = self.safe_beat();
+        self.record(EndCause::QuitNotice, None, beat);
         tracing::info!("daemon announced a quit; it will not be restarted");
         self.quitting = true;
     }
@@ -721,6 +874,7 @@ impl DaemonSupervisor {
         self.session_ends = 0;
         self.budget_session = Some(session);
         self.hold = None;
+        self.reset_start_limit();
     }
 
     /// The daemon that quit on purpose is on its way out, and the new session gets a daemon of
@@ -734,7 +888,8 @@ impl DaemonSupervisor {
         match child.try_wait() {
             // It is already gone: there is nothing to end.
             Ok(Some(_)) => {}
-            // It is still running: end it, so the next daemon can bind the port.
+            // It is still running: end it, so the next daemon can bind the port. Its run
+            // was already recorded by the quit notice.
             Ok(None) | Err(_) => {
                 let _ = terminate_daemon(
                     child.as_mut(),
@@ -846,7 +1001,7 @@ impl DaemonSupervisor {
         // must strand the next user until the service restarts.
         if self.watch_for_new_session(now) && self.child.is_none() {
             // The daemon is started again in the new session.
-            self.launch(now);
+            self.relaunch(now);
             return DaemonAction::None;
         }
         if self.quitting {
@@ -859,18 +1014,27 @@ impl DaemonSupervisor {
             match child.try_wait() {
                 Ok(Some(code)) => {
                     self.child = None;
+                    // The budget belongs to the run that just ended: read it before the clock is
+                    // cleared, or an exit after the first beat would read as a startup failure.
+                    let beat = self.safe_beat();
                     self.clear_heartbeat_clock();
                     let was = self.child_session;
-                    if is_session_end_code(code) {
+                    // Whether the session took it is settled before anything is recorded: a
+                    // crash code during a logoff is a planned end and nothing else (#577).
+                    let session_code = is_session_end_code(code);
+                    let session_gone = !session_code && self.session_ended(was);
+                    let cause = if session_code || session_gone { EndCause::SessionEnd } else { EndCause::Exited };
+                    let v = self.record(cause, Some(code), beat);
+                    if session_code {
                         return self.session_end(now, code, was);
                     }
-                    if self.session_ended(was) {
+                    if session_gone {
                         // Its session logged off or lost the console: the exit is not a crash.
                         tracing::info!(code, "the daemon ended with its session; starting one in the active session");
-                        self.launch(now);
+                        self.relaunch(now);
                         return DaemonAction::None;
                     }
-                    return self.crashed(now, &exited_reason(code));
+                    return self.restart(now, v, &exited_reason(code));
                 }
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "could not query the daemon process"),
@@ -878,12 +1042,14 @@ impl DaemonSupervisor {
             if self.session_changed(now) {
                 self.pending_move = None;
                 if let Some(mut child) = self.child.take() {
+                    let beat = self.safe_beat();
+                    self.record(EndCause::ServiceKill, Some(1), beat);
                     let _ = terminate_daemon(child.as_mut(), "the active console session changed");
                     let pid = child.id();
                     wait_for_exit(child.as_mut(), pid);
                     self.clear_heartbeat_clock();
                 }
-                self.launch(now);
+                self.relaunch(now);
                 return DaemonAction::None;
             }
             // A daemon that has not said it is up yet has the grace (#163); after its first beat
@@ -894,12 +1060,21 @@ impl DaemonSupervisor {
                 .is_some_and(|hb| budget.expired(now.saturating_duration_since(hb)));
             if stale {
                 if let Some(mut child) = self.child.take() {
+                    let phase = if budget == BeatBudget::First { Beat::BeforeFirst } else { Beat::AfterFirst };
+                    let v = self.record(EndCause::MissedHeartbeat, None, phase);
                     let _ = terminate_daemon(child.as_mut(), &budget.kill_reason());
                     let pid = child.id();
                     wait_for_exit(child.as_mut(), pid);
                     self.clear_heartbeat_clock();
+                    return self.restart(now, v, &budget.crash_reason());
                 }
-                return self.crashed(now, &budget.crash_reason());
+            }
+            return DaemonAction::None;
+        }
+        // A delayed relaunch (#577): nothing ran, so nothing is recorded while it waits.
+        if let Some(at) = self.retry_at {
+            if now >= at {
+                self.launch(now);
             }
             return DaemonAction::None;
         }
@@ -919,16 +1094,18 @@ impl DaemonSupervisor {
             }
             self.hold = None;
             tracing::info!("the session-end hold is over; starting the daemon again");
-            self.launch(now);
+            self.relaunch(now);
             return DaemonAction::None;
         }
         // No process because no user was logged on: launch again, no crash counted (#6).
         if self.waiting_for_session {
-            self.launch(now);
+            self.relaunch(now);
             return DaemonAction::None;
         }
-        // No process: the last launch failed, so count it as a crash and try again.
-        self.crashed(now, "not running after a failed launch")
+        // No process: the last launch failed. That is a startup failure: it is reported and
+        // spends a restart, and since no daemon ran it decides nothing about safe start.
+        let v = self.record(EndCause::LaunchFailure, None, Beat::BeforeFirst);
+        self.restart(now, v, "not running after a failed launch")
     }
 
     /// The daemon exited with a code that says its session ended. That is not a crash (#6): it
@@ -953,6 +1130,9 @@ impl DaemonSupervisor {
                 limit = SESSION_END_LIMIT,
                 "the daemon ended with its session too often; counting it as a crash"
             );
+            // The separate session-end budget is used up: from here these exits count as
+            // crashes again, as they did before #577. The verdict still says Planned (#577
+            // table); only the decision to stop restarting changes.
             return self.crashed(now, &exited_reason(code));
         }
         self.session_ends += 1;
@@ -970,7 +1150,7 @@ impl DaemonSupervisor {
                     console_session = settled,
                     "the console settled on another session; the daemon starts there at once"
                 );
-                self.launch(now);
+                self.relaunch(now);
                 return DaemonAction::None;
             }
         }
@@ -1008,7 +1188,7 @@ impl DaemonSupervisor {
         }
         self.restarts.push_back(now);
         tracing::warn!(reason, restart = self.restarts.len(), "daemon crashed; restarting it");
-        self.launch(now);
+        self.relaunch(now);
         DaemonAction::None
     }
 }
@@ -1256,6 +1436,91 @@ mod tests {
         assert!(sup.stopped());
         assert_eq!(sup.tick(t0 + Duration::from_secs(10)), DaemonAction::None);
         assert_eq!(processes.spawns().len(), 1);
+    }
+
+    /// Ticks once a second for `secs`, ending the running daemon with `exit` (if any) before
+    /// each tick, and answers how many daemons were started in all.
+    fn spawns_over(
+        sup: &mut DaemonSupervisor,
+        processes: &FakeProcesses,
+        t0: Instant,
+        secs: u64,
+        exit: Option<i32>,
+    ) -> usize {
+        for s in 1..=secs {
+            let now = t0 + Duration::from_secs(s);
+            match exit {
+                Some(code) if sup.daemon_pid().is_some() => processes.exit_last_with(code),
+                _ => sup.on_heartbeat(now),
+            }
+            sup.tick(now);
+        }
+        processes.spawns().len()
+    }
+
+    #[test]
+    fn r1_crashes_startup_failures_and_failed_launches_stay_bounded() {
+        // A crash code, and an exit 1 before the first beat (a startup failure).
+        for code in [0xC000_0005u32 as i32, 1] {
+            let (mut sup, processes) = supervisor();
+            let t0 = Instant::now();
+            sup.start(t0);
+            assert_eq!(spawns_over(&mut sup, &processes, t0, 600, Some(code)), 4, "code {code:#x}");
+            assert!(sup.stopped());
+        }
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.fail_spawns(1000);
+        sup.start(t0);
+        assert_eq!(spawns_over(&mut sup, &processes, t0, 600, None), 0);
+        assert!(sup.stopped(), "a launch that keeps failing reaches the crash stop");
+    }
+
+    /// The liveness query for the daemon's session keeps failing while launches work: every tick
+    /// finds that session gone, with no settle time in between.
+    #[test]
+    fn r1_a_session_that_keeps_ending_does_not_launch_every_second() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        processes.report_dead(1);
+        let started = spawns_over(&mut sup, &processes, t0, 120, None);
+        assert!(started <= 15, "{started} daemons started in 120 s");
+        assert!(started >= 5, "the burst is still allowed: {started}");
+    }
+
+    #[test]
+    fn r1_a_failed_launch_counts_toward_the_start_limit() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.fail_spawns(3);
+        sup.start(t0);
+        // Three failed launches, then the fourth attempt makes a daemon.
+        assert_eq!(spawns_over(&mut sup, &processes, t0, 3, None), 1);
+        // Two clean exits, a second apart: attempt five is allowed, the sixth waits.
+        for s in 4..=5 {
+            processes.exit_last_with(0);
+            sup.tick(t0 + Duration::from_secs(s));
+        }
+        assert_eq!(processes.spawns().len(), 2, "five attempts in 10 s, failed ones included");
+    }
+
+    #[test]
+    fn r2_repeated_unknown_exits_after_the_first_beat_crash_stop() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let mut action = DaemonAction::None;
+        for s in 1..=4 {
+            let now = t0 + Duration::from_secs(s * 20);
+            sup.on_heartbeat(now);
+            processes.exit_last_with(2);
+            action = sup.tick(now);
+        }
+        assert_eq!(action, DaemonAction::WriteBlack);
+        assert!(sup.stopped());
+        assert_eq!(processes.spawns().len(), 4);
     }
 
     #[test]

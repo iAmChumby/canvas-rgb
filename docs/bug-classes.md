@@ -1613,3 +1613,12 @@ error: a slow or stalled disk looked exactly like a dead daemon (#241).
 - **How to check a new store write:** it goes through `store_save` (or `store_edit` when it does
   not write). A `Store` save called directly while an `app.store.write()` guard is held is this
   bug again.
+
+## Known limit: crash detection (#577)
+
+Safe start's verdict comes from the service, which sees every process exit and heartbeat
+(`crates/canvas-svc/src/safe_start.rs`). Two ends are deliberately not detected: a panic on a
+non-main thread is logged by `exit_log.rs` (`OtherThread`) and the daemon carries on, and a
+frozen render thread that keeps sending heartbeats looks healthy. Neither produces an unclean
+verdict, so neither turns safe start on. Both are UNKNOWN by construction, not a pass: a test
+that needs them must make the daemon's own threads report the fault.

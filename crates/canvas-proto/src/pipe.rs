@@ -44,6 +44,13 @@ pub enum PipeRequest {
     FailSensor { source: TempSource, failed: bool },
     /// Daemon is quitting on purpose; do not restart it (G3).
     DaemonQuitting,
+    /// The owner chose safe start (#577). Admitted only from the daemon this service launched,
+    /// like `DaemonQuitting`. The service records it, holds the fans on BIOS, and restarts the
+    /// daemon in safe start with a planned kill.
+    EnterSafeStart,
+    /// The owner chose Start normally (#577). Admitted like `EnterSafeStart`. The service resets
+    /// the streak, ends the fan hold, and restarts the daemon normally.
+    LeaveSafeStart,
     /// Install a signed canvas-rgb installer as SYSTEM, with no permission prompt (#43). The
     /// service reads `installer` as the pipe client (impersonating it, never as SYSTEM), stages a
     /// copy in [`crate::consts::update_staging_dir`], checks `signature` (the `.sig` file's text)
@@ -66,7 +73,21 @@ pub enum OpenRgbServerState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "result")]
 pub enum PipeResponse {
-    Hello { protocol: u32, service_version: String },
+    Hello {
+        protocol: u32,
+        service_version: String,
+        /// The mode this daemon run starts in (#577). An older service sends none: Normal.
+        #[serde(default)]
+        start_mode: crate::api::SafeStartMode,
+        /// How the previous daemon run ended (#577). An older service sends none: Unknown.
+        #[serde(default)]
+        last_exit: crate::api::LastExit,
+        /// The service's safe-start record for this run (#577): why safe start is on, the crash
+        /// streak and since when. `fans_on_bios` is not set here; the daemon measures it from the
+        /// fan status. `None` when the mode is Normal, and from an older service.
+        #[serde(default)]
+        safe_start: Option<crate::api::SafeStart>,
+    },
     Ok,
     FanStatus { status: FansStatus },
     /// The answer to [`PipeRequest::GetFanConfig`].

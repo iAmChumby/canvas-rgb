@@ -19,6 +19,7 @@ pub mod paths;
 pub mod pawnio;
 pub mod pipe_server;
 pub mod process;
+pub mod safe_start;
 pub mod secure;
 pub mod service;
 pub mod store;
@@ -34,6 +35,8 @@ mod fans_tests;
 mod gpu_fans_tests;
 #[cfg(test)]
 mod openrgb_tests;
+#[cfg(test)]
+mod safe_start_tests;
 #[cfg(test)]
 mod service_tests;
 #[cfg(test)]

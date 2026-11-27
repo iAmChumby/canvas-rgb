@@ -4135,6 +4135,60 @@
       "queryType": {}
     },
     {
+      "path": "/api/v1/safe-start",
+      "title": "Safe start",
+      "area": "Other",
+      "methods": [
+        "PUT"
+      ],
+      "pathParams": [],
+      "descriptions": {
+        "PUT": "Enters or leaves safe start. The daemon answers first, then the service restarts it in the asked mode; asking for the mode already in force changes nothing."
+      },
+      "examples": {
+        "PUT": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X PUT -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"mode\":\"normal\"}' \"http://127.0.0.1:9430/api/v1/safe-start\""
+      },
+      "requestType": {
+        "PUT": "SafeStartPut"
+      },
+      "responseType": {
+        "PUT": "SafeStartAnswer"
+      },
+      "requestShape": {
+        "PUT": {
+          "label": "SafeStartPut",
+          "fields": [
+            {
+              "name": "mode",
+              "type": "SafeStartMode",
+              "meaning": "The mode to restart in: normal or safe."
+            }
+          ]
+        }
+      },
+      "responseShape": {
+        "PUT": {
+          "label": "SafeStartAnswer",
+          "fields": [
+            {
+              "name": "mode",
+              "type": "SafeStartMode",
+              "meaning": "The mode that was asked for"
+            },
+            {
+              "name": "restarting",
+              "type": "boolean",
+              "meaning": "True when the daemon is about to restart in that mode; false when it was already in force"
+            }
+          ]
+        }
+      },
+      "queryParams": {
+        "PUT": []
+      },
+      "queryType": {}
+    },
+    {
       "path": "/api/v1/scenes",
       "title": "Scenes",
       "area": "Scenes and chains",
@@ -5239,6 +5293,12 @@
               "name": "onboarding_complete",
               "type": "boolean",
               "meaning": "False until the person finishes the first-run onboarding. While it is false the tray opens the window by itself onto the onboarding."
+            },
+            {
+              "name": "safe_start",
+              "type": "SafeStart or null",
+              "meaning": "Safe start. `null` (and a daemon from before it, which sends none) reads as not active",
+              "optional": true
             }
           ]
         }
@@ -6814,6 +6874,32 @@
         }
       ]
     },
+    "SafeStartPut": {
+      "fields": [
+        {
+          "name": "mode",
+          "type": "SafeStartMode",
+          "optional": false,
+          "meaning": "The mode to restart in: normal or safe."
+        }
+      ]
+    },
+    "SafeStartAnswer": {
+      "fields": [
+        {
+          "name": "mode",
+          "type": "SafeStartMode",
+          "optional": false,
+          "meaning": "The mode that was asked for"
+        },
+        {
+          "name": "restarting",
+          "type": "boolean",
+          "optional": false,
+          "meaning": "True when the daemon is about to restart in that mode; false when it was already in force"
+        }
+      ]
+    },
     "ScenesResponse": {
       "fields": [
         {
@@ -7327,6 +7413,12 @@
           "type": "boolean",
           "optional": false,
           "meaning": "False until the person finishes the first-run onboarding. While it is false the tray opens the window by itself onto the onboarding."
+        },
+        {
+          "name": "safe_start",
+          "type": "SafeStart or null",
+          "optional": true,
+          "meaning": "Safe start. `null` (and a daemon from before it, which sends none) reads as not active"
         }
       ]
     },
@@ -7470,15 +7562,23 @@
     },
     "LastExit": {
       "fields": [],
-      "note": "One of: \"clean\", \"unclean\", \"unknown\".",
+      "note": "One of: \"clean\", \"planned\", \"unclean\", \"startup_failure\", \"unknown\".",
       "values": [
         {
           "value": "clean",
           "meaning": "The previous run ended on purpose."
         },
         {
+          "value": "planned",
+          "meaning": "The previous run was stopped by a reboot, a logoff, an update or a service stop."
+        },
+        {
           "value": "unclean",
           "meaning": "The previous run ended without a clean stop."
+        },
+        {
+          "value": "startup_failure",
+          "meaning": "The previous run failed while starting, before it was ready."
         },
         {
           "value": "unknown",
@@ -8808,6 +8908,20 @@
         }
       ]
     },
+    "SafeStartMode": {
+      "fields": [],
+      "note": "One of: \"normal\", \"safe\".",
+      "values": [
+        {
+          "value": "normal",
+          "meaning": "The saved scene, effects, fan profile and readings run as usual."
+        },
+        {
+          "value": "safe",
+          "meaning": "Safe start: the saved scene, effects and readings are off, the lights breathe and the fans stay on BIOS control."
+        }
+      ]
+    },
     "GroupState": {
       "fields": [
         {
@@ -9168,6 +9282,46 @@
         {
           "value": "signal_rgb",
           "meaning": "SignalRGB is running and will fight canvas-rgb for the devices."
+        }
+      ]
+    },
+    "SafeStart": {
+      "fields": [
+        {
+          "name": "active",
+          "type": "boolean",
+          "optional": false,
+          "meaning": "True while this run is in safe start."
+        },
+        {
+          "name": "reason",
+          "type": "SafeStartReason or null",
+          "optional": true,
+          "meaning": "Why safe start is on; empty when the service gave no reason."
+        },
+        {
+          "name": "unclean_streak",
+          "type": "number",
+          "optional": false,
+          "meaning": "Crashes in a row, as the service counts them"
+        },
+        {
+          "name": "since",
+          "type": "string or null",
+          "optional": true,
+          "meaning": "When safe start began, RFC 3339"
+        },
+        {
+          "name": "fans_on_bios",
+          "type": "boolean or null",
+          "optional": true,
+          "meaning": "`true` once the service confirms every fan header is on BIOS control, `false` when a header could not be released, `null` while unknown"
+        },
+        {
+          "name": "lights",
+          "type": "string or null",
+          "optional": true,
+          "meaning": "What the lights run, in words: \"Breathing\", or the fallback such as \"One steady colour, blue\". The daemon fills it; `null` from the service and before the lights start"
         }
       ]
     },
@@ -9808,6 +9962,24 @@
           "type": "number",
           "optional": false,
           "meaning": "How strongly the mask applies, from 0 to 100. 0 leaves the layer whole; 100 applies it fully."
+        }
+      ]
+    },
+    "SafeStartReason": {
+      "fields": [],
+      "note": "One of: \"unclean_once\", \"crash_loop\", \"user_chose\".",
+      "values": [
+        {
+          "value": "unclean_once",
+          "meaning": "The previous run did not end cleanly."
+        },
+        {
+          "value": "crash_loop",
+          "meaning": "Several runs in a row did not end cleanly."
+        },
+        {
+          "value": "user_chose",
+          "meaning": "The user asked for safe start; it stays on until they start normally."
         }
       ]
     },

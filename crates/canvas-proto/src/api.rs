@@ -22,6 +22,9 @@ pub mod routes {
     /// The shareable report Help & About shows, copies and pre-fills (#574, #575). The daemon builds
     /// and scrubs it, because only the daemon can read the user, machine and profile names to remove.
     pub const ABOUT_REPORT: &str = "/api/v1/about/report";
+    /// Enter or leave safe start (#577): `PUT` with [`SafeStartPut`]. The daemon answers first, then
+    /// the service restarts it in the asked mode.
+    pub const SAFE_START: &str = "/api/v1/safe-start";
     pub const OUTPUT: &str = "/api/v1/output";
     pub const DEVICES: &str = "/api/v1/devices";
     /// `PATCH` with [`super::PatchZone`].
@@ -335,14 +338,91 @@ pub struct AboutReport {
     pub other_rgb_apps: String,
 }
 
-/// How the daemon's previous run ended (#577). `Unknown` on a first run, or when the marker could not be read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// How the daemon's previous run ended, as the service saw it (#577). Only `Unclean` counts
+/// toward safe start: a provable crash (a missed heartbeat after the first beat, or a crash exit
+/// code). Anything the service cannot prove is `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum LastExit {
+    /// The daemon said it was quitting, or exited 0.
     Clean,
+    /// The service or Windows ended it on purpose: a service stop, shutdown, logoff, user switch.
+    Planned,
+    /// A provable crash.
     Unclean,
+    /// It never got going: the first heartbeat never came, or it exited 1 before it.
+    StartupFailure,
+    #[default]
     Unknown,
+}
+
+/// The mode the service starts the daemon in (#577).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum SafeStartMode {
+    #[default]
+    Normal,
+    Safe,
+}
+
+/// Why safe start is on (#577).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum SafeStartReason {
+    /// The last run crashed; this start only.
+    UncleanOnce,
+    /// Two or more runs in a row crashed; until the owner chooses Start normally.
+    CrashLoop,
+    /// The owner chose it; until they choose Start normally.
+    UserChose,
+}
+
+/// Safe start as every surface shows it (#577): the editor banner, the strip, the tray, the CLI
+/// and Help & About read this one value.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SafeStart {
+    pub active: bool,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub reason: Option<SafeStartReason>,
+    /// Crashes in a row, as the service counts them.
+    #[serde(default)]
+    pub unclean_streak: u32,
+    /// When safe start began, RFC 3339.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub since: Option<String>,
+    /// `Some(true)` once the service confirms every fan header is on BIOS control, `Some(false)`
+    /// when a header could not be released, `None` while unknown.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub fans_on_bios: Option<bool>,
+    /// What the lights run, in words: "Breathing", or the fallback such as "One steady colour,
+    /// blue". The daemon fills it; `None` from the service and before the lights start.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub lights: Option<String>,
+}
+
+/// `PUT /api/v1/safe-start`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SafeStartPut {
+    pub mode: SafeStartMode,
+}
+
+/// The answer to `PUT /api/v1/safe-start`, sent before the service restarts the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SafeStartAnswer {
+    /// The mode that was asked for.
+    pub mode: SafeStartMode,
+    /// True when the daemon is about to restart in that mode; false when it was already in force.
+    pub restarting: bool,
 }
 
 /// The facts Help & About shows and copies (#574). Every field is safe to share as it is: no
@@ -413,6 +493,11 @@ pub struct Status {
     /// the tray opens the window by itself (a few times) onto the onboarding.
     #[serde(default)]
     pub onboarding_complete: bool,
+    /// Safe start (#577). `None` (and a daemon from before it, which sends none) reads as not
+    /// active.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub safe_start: Option<SafeStart>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

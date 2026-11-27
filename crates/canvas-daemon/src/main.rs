@@ -108,7 +108,6 @@ const BLACK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 const SERVICE_NOTICE_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 const ENGINE_STOP_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
 const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
-
 /// The daemon's main loop. Returns the process exit code.
 ///
 /// `fakes` is the debug-only fakes mode (#199): every real touchpoint is
@@ -262,13 +261,22 @@ async fn daemon_main(fakes: bool) -> Exit {
     // first frame.
     app.set_input_source(Some(app.capture_source()));
 
+    // #577: decide the mode from the service's first Hello before anything is restored or
+    // played. The first-beat grace covers this wait, and a service that cannot answer gives
+    // Normal - detection that cannot prove a crash must not turn the lights safe.
+    let mode = canvas_daemon::pipe_client::read_start_decision(&app).await;
+    let safe = mode == canvas_proto::api::SafeStartMode::Safe;
+
     // The peripherals the owner allowed are opened; the others stay closed. In fakes mode this
     // applies to the in-memory fakes, so a saved access is honoured there too (#243).
-    canvas_daemon::peripherals::apply_saved(&app).await;
-    // The values a device has are read only while the person is away (#127): a view open never
-    // triggers a read, so the refresh runs here in the background, gated on Windows' last-input
-    // time. In fakes mode it reads the in-memory fakes.
-    canvas_daemon::peripherals::start_idle_refresh(app.clone());
+    // Safe start skips these: no saved file is read and no background read is started.
+    if !safe {
+        canvas_daemon::peripherals::apply_saved(&app).await;
+        // The values a device has are read only while the person is away (#127): a view open never
+        // triggers a read, so the refresh runs here in the background, gated on Windows' last-input
+        // time. In fakes mode it reads the in-memory fakes.
+        canvas_daemon::peripherals::start_idle_refresh(app.clone());
+    }
 
     // The zone sizes from disk.
     {
@@ -279,17 +287,21 @@ async fn daemon_main(fakes: bool) -> Exit {
 
     tracing::info!(version = %canvas_daemon::version(), "canvas-rgbd is starting");
 
-    // The user HTML effects are listed before the API answers; the watcher keeps them current.
-    app.user_effects.rescan(&app.effects_dir);
-    // The stacks are read again now the effects folder is known: a stack's name may not be a
-    // user effect's name, and a layer may name one (D95.1.4).
-    app.stacks.reload(&app.user_effects);
+    // Safe start runs no user HTML effect, no stack and no saved scene. Every apply, the first
+    // device list's included, puts the in-memory Breathing scene on the lights instead.
+    if !safe {
+        // The user HTML effects are listed before the API answers; the watcher keeps them current.
+        app.user_effects.rescan(&app.effects_dir);
+        // The stacks are read again now the effects folder is known: a stack's name may not be a
+        // user effect's name, and a layer may name one (D95.1.4).
+        app.stacks.reload(&app.user_effects);
 
-    // The active scene runs again, so a restart does not leave the lights black until something
-    // plays an effect. Its groups' effects are built here; a group whose effect is missing (a
-    // deleted HTML file) is dark and named in the log, and the others run. The device list that
-    // arrives next applies the scene to the real devices.
-    canvas_daemon::scenes::restore_active(&app).await;
+        // The active scene runs again, so a restart does not leave the lights black until
+        // something plays an effect. Its groups' effects are built here; a group whose effect
+        // is missing (a deleted HTML file) is dark and named in the log. The device list that
+        // arrives next applies the scene to the real devices.
+        canvas_daemon::scenes::restore_active(&app).await;
+    }
 
     // The background tasks. Fakes mode gates off every task that touches a
     // real touchpoint (see `canvas_daemon::fakes`); the OpenRGB supervisor
@@ -299,7 +311,7 @@ async fn daemon_main(fakes: bool) -> Exit {
         spawn_pipe_client(app.clone());
         spawn_fan_poller(app.clone());
     }
-    if canvas_daemon::fakes::real_display_enabled(fakes) {
+    if !safe && canvas_daemon::fakes::real_display_enabled(fakes) {
         spawn_display_task(app.clone());
     }
     if canvas_daemon::fakes::real_conflict_check_enabled(fakes) {
@@ -308,10 +320,12 @@ async fn daemon_main(fakes: bool) -> Exit {
     if canvas_daemon::fakes::real_power_watcher_enabled(fakes) {
         spawn_power_watcher(app.clone());
     }
-    if canvas_daemon::fakes::real_first_run_enabled(fakes) {
+    if !safe && canvas_daemon::fakes::real_first_run_enabled(fakes) {
         spawn_first_run(app.clone());
     }
-    spawn_user_effects_watch(app.clone());
+    if !safe {
+        spawn_user_effects_watch(app.clone());
+    }
     canvas_daemon::draft::spawn_sweeper(app.clone());
     canvas_daemon::api::audio::spawn_sweeper(app.clone());
     // The engine's numbers are kept fresh by the daemon's own threads, so a route never
@@ -597,12 +611,24 @@ fn spawn_pipe_client(app: Arc<App>) {
                     daemon_pid: std::process::id(),
                 };
                 match client.request(&hello).await {
-                        Ok(canvas_proto::pipe::PipeResponse::Hello { protocol, service_version }) => {
+                        Ok(canvas_proto::pipe::PipeResponse::Hello {
+                            protocol,
+                            service_version,
+                            start_mode,
+                            last_exit,
+                            safe_start,
+                        }) => {
                             tracing::info!(protocol, service_version, "the service is up");
                             // Help & About shows the service that answered, not a guess (#574 R6).
                             app.set_service_version(service_version.clone());
                             app.service_down_ms.store(0, Ordering::SeqCst);
                             down_since = std::time::Instant::now();
+                            // A start that got no answer learns its mode here (#577). On its
+                            // own task: the heartbeats do not wait for the lights.
+                            let late = app.clone();
+                            tokio::spawn(async move {
+                                canvas_daemon::pipe_client::apply_hello(&late, start_mode, last_exit, safe_start).await;
+                            });
                             // The heartbeat goes every second.
                             loop {
                                 tokio::time::sleep(std::time::Duration::from_millis(
@@ -683,6 +709,10 @@ fn spawn_user_effects_watch(app: Arc<App>) {
         let dir = app.effects_dir.clone();
         loop {
             tokio::time::sleep(canvas_daemon::user_effects::RESCAN_INTERVAL).await;
+            // A run that turned safe late loads no more user effects (#577).
+            if canvas_daemon::scenes::safe_mode(&app) {
+                continue;
+            }
             let user = app.user_effects.clone();
             let dir = dir.clone();
             // Parsing an effect can take a while; keep it off the async workers.

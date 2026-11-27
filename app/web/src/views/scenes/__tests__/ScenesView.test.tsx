@@ -27,9 +27,16 @@ const { api } = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/endpoints", () => ({ api }));
 
+const { notified } = vi.hoisted(() => ({ notified: vi.fn() }));
+vi.mock("@/components/Notify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/Notify")>();
+  notified.mockImplementation(actual.notify);
+  return { ...actual, notify: notified };
+});
+
 const scene = vi.hoisted(() => ({ current: null as unknown }));
 vi.mock("@/views/scenes/useScene", () => ({ useScene: () => scene.current }));
-vi.mock("@/views/scenes/useLightFeed", () => ({ useLightFeed: () => () => null }));
+vi.mock("@/views/scenes/useLightFeed", () => ({ useLightFeed: () => () => null, onLightFrame: () => () => {} }));
 
 const { chainSetup } = vi.hoisted(() => ({ chainSetup: { request: vi.fn() } }));
 vi.mock("@/views/chain/request", () => ({
@@ -41,6 +48,7 @@ vi.mock("@/views/chain/request", () => ({
 
 import { patchSnap } from "@/lib/store";
 import { DEMO_LIGHTS, DEMO_SCENES } from "@/lib/fixtures";
+import { writeListeners } from "@/lib/api";
 import { htmlLimitSentence } from "@/lib/htmlLimit";
 import { Rail } from "@/shell/Rail";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -854,5 +862,39 @@ describe("the order of the groups inside a scene", () => {
     ]);
     // Every group kept its own colour.
     expect(tonesByGroup()).toEqual(before);
+  });
+});
+
+describe("the Scenes page in safe start (#577)", () => {
+  const safe = {
+    active_scene: { id: "safe-start", name: "Safe start" },
+    active_effects: ["breathing"],
+    conflicts: [],
+    onboarding_complete: true,
+    safe_start: { active: true },
+  } as unknown as Status;
+
+  it("marks the saved scene as off, and the rail says Safe", () => {
+    patchSnap({ status: safe });
+    mount(fake());
+    // In the page, not the status strip: a phone's strip drops its context.
+    expect(screen.getByText("Off in safe start").closest(".rd-title")).toBeNull();
+    expect(Array.from(document.querySelectorAll(".rail-value"), (n) => n.textContent)).toContain("Safe");
+  });
+
+  it("says a saved edit applies at the next normal start, and says nothing for another write", () => {
+    patchSnap({ status: safe });
+    mount(fake());
+    notified.mockClear();
+    act(() => writeListeners.forEach((heard) => heard("PUT", "/api/v1/output")));
+    expect(notified).not.toHaveBeenCalled();
+    act(() => writeListeners.forEach((heard) => heard("PUT", "/api/v1/scenes/gaming")));
+    expect(notified).toHaveBeenCalledWith("Saved. Applies when you start normally.", "ok");
+  });
+
+  it("says none of this in normal mode", () => {
+    mount(fake());
+    expect(screen.queryByText("Off in safe start")).toBeNull();
+    expect(writeListeners.size).toBe(0);
   });
 });

@@ -60,7 +60,11 @@ impl Core {
             // its clock (#163).
             self.daemon.refresh_heartbeat(now);
         }
-        if self.daemon.tick(now) == DaemonAction::WriteBlack {
+        let action = self.daemon.tick(now);
+        // In the same pass as any launch the tick made, and before the new daemon can be
+        // answered: the hold follows the mode that launch was decided in (#577).
+        self.fans.sync_hold(self.daemon.start_decision().0, now);
+        if action == DaemonAction::WriteBlack {
             // Not "whoever is listed right now": the same wait for detection as the boot color.
             self.openrgb.request_black(now);
         }
@@ -90,6 +94,9 @@ impl Core {
         self.fans.restore_all(reason);
         self.daemon.stop();
         self.openrgb.stop(reason, self.daemon.before_openrgb_stop());
+        // A clean SCM stop (Stop, Shutdown and PreShutdown all come here) leaves no marker,
+        // so the next start does not read a false Unknown.
+        self.daemon.mark_service_stopped();
     }
 
     /// Answers one request. Every fan value is validated before anything is written.
@@ -102,7 +109,14 @@ impl Core {
                         format!("protocol {protocol} is not supported; the service speaks {PROTOCOL_VERSION}"),
                     );
                 }
-                PipeResponse::Hello { protocol: PROTOCOL_VERSION, service_version: env!("CARGO_PKG_VERSION").into() }
+                let (start_mode, last_exit) = self.daemon.start_decision();
+                PipeResponse::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    service_version: env!("CARGO_PKG_VERSION").into(),
+                    start_mode,
+                    last_exit,
+                    safe_start: self.daemon.safe_record(),
+                }
             }
             PipeRequest::Heartbeat => {
                 self.daemon.on_heartbeat(now);
@@ -137,6 +151,26 @@ impl Core {
             }
             PipeRequest::DaemonQuitting => {
                 self.daemon.on_quitting();
+                PipeResponse::Ok
+            }
+            // #577: the pipe server has already checked that this came from the launched
+            // daemon. The mode is persisted, the fan hold is set or cleared, and the daemon is
+            // killed on purpose and relaunched in the new mode. It never sends DaemonQuitting.
+            PipeRequest::EnterSafeStart | PipeRequest::LeaveSafeStart => {
+                let mode = if matches!(request, PipeRequest::EnterSafeStart) {
+                    canvas_proto::api::SafeStartMode::Safe
+                } else {
+                    canvas_proto::api::SafeStartMode::Normal
+                };
+                // The mode already in force changes nothing: no restart, and the streak stays.
+                if mode == self.daemon.start_decision().0 {
+                    return PipeResponse::Ok;
+                }
+                if let Some(book) = self.daemon.book_mut() {
+                    book.set_user_choice(mode, &crate::safe_start::stamp_now());
+                }
+                self.fans.sync_hold(self.daemon.start_decision().0, now);
+                self.daemon.restart_in_new_mode(now);
                 PipeResponse::Ok
             }
             // The pipe server answers this one itself: it reads a file as the client and blocks, which

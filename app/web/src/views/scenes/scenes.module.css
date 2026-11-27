@@ -55,6 +55,12 @@
   min-width: 0;
 }
 
+/* Safe start (#577): the saved scene above is shown and not played. */
+.safeOff {
+  display: flex;
+  flex: 0 0 auto;
+}
+
 /* The slot for the "N new" key is always there, at the same size, so the strip never changes
    width when a light arrives or is dismissed. */
 .newSlot {
@@ -994,6 +1000,11 @@
 
 .stage[data-state="pattern"] .stageDots {
   height: 28px;
+}
+
+/* Safe start (#577): nothing plays, and the box says so quietly. */
+.stage[data-state="safe"] .stageMark {
+  color: var(--mute);
 }
 
 /* The caption under the picture: it is always there, so the picture's box never moves. */

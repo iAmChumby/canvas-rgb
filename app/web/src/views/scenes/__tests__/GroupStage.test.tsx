@@ -20,6 +20,7 @@ import { GROUP_PREVIEW_QUIET_MS } from "@/views/scenes/useGroupPreview";
 import { patchSnap } from "@/lib/store";
 import type { ApiConfig } from "@/proto/ApiConfig";
 import type { Group } from "@/proto/Group";
+import type { Status } from "@/proto/Status";
 
 const CONFIG: ApiConfig = { base_url: "http://127.0.0.1:9430", token: "tok" };
 
@@ -253,5 +254,16 @@ describe("the stage in the demo", () => {
     await settle();
     expect(screen.getByText("The preview stopped.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+});
+
+describe("the stage in safe start (#577)", () => {
+  it("says it is not playing, and opens no preview", async () => {
+    patchSnap({ status: { safe_start: { active: true } } as unknown as Status });
+    render(stage());
+    await settle();
+    expect(screen.getByText("Not playing")).toBeTruthy();
+    expect(screen.getByTestId("group-stage").getAttribute("data-state")).toBe("safe");
+    expect(FakeSocket.opened).toHaveLength(0);
   });
 });
