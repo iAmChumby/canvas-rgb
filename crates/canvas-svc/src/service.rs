@@ -102,7 +102,13 @@ impl Core {
                         format!("protocol {protocol} is not supported; the service speaks {PROTOCOL_VERSION}"),
                     );
                 }
-                PipeResponse::Hello { protocol: PROTOCOL_VERSION, service_version: env!("CARGO_PKG_VERSION").into() }
+                PipeResponse::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    service_version: env!("CARGO_PKG_VERSION").into(),
+                    // #577 fills these from the service's verdict; until then the daemon starts normally.
+                    start_mode: Default::default(),
+                    last_exit: Default::default(),
+                }
             }
             PipeRequest::Heartbeat => {
                 self.daemon.on_heartbeat(now);
@@ -138,6 +144,10 @@ impl Core {
             PipeRequest::DaemonQuitting => {
                 self.daemon.on_quitting();
                 PipeResponse::Ok
+            }
+            // #577 builds safe start; until then the service refuses both, so nothing changes mode.
+            PipeRequest::EnterSafeStart | PipeRequest::LeaveSafeStart => {
+                error(error_codes::VALIDATION, "safe start is not built yet (#577)")
             }
             // The pipe server answers this one itself: it reads a file as the client and blocks, which
             // must not happen under the core lock.

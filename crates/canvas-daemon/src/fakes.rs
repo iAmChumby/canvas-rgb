@@ -741,6 +741,8 @@ impl crate::pipe_client::PipeLink for FakePipeLink {
             PipeRequest::Hello { .. } => Ok(PipeResponse::Hello {
                 protocol: canvas_proto::pipe::PROTOCOL_VERSION,
                 service_version: "fake".into(),
+                start_mode: Default::default(),
+                last_exit: Default::default(),
             }),
             PipeRequest::FanStatus => Ok(PipeResponse::FanStatus { status: fake_fans_status() }),
             PipeRequest::OpenRgbState => Ok(PipeResponse::OpenRgb {

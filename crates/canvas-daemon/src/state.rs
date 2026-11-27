@@ -1006,6 +1006,8 @@ impl App {
             conflicts,
             show_zone_panel,
             onboarding_complete,
+            // #577 fills this from the service's Hello; until then it reads not active.
+            safe_start: None,
         })
     }
 

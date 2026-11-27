@@ -597,7 +597,7 @@ fn spawn_pipe_client(app: Arc<App>) {
                     daemon_pid: std::process::id(),
                 };
                 match client.request(&hello).await {
-                        Ok(canvas_proto::pipe::PipeResponse::Hello { protocol, service_version }) => {
+                        Ok(canvas_proto::pipe::PipeResponse::Hello { protocol, service_version, .. }) => {
                             tracing::info!(protocol, service_version, "the service is up");
                             // Help & About shows the service that answered, not a guess (#574 R6).
                             app.set_service_version(service_version.clone());

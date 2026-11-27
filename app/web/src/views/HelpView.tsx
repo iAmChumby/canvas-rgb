@@ -41,7 +41,9 @@ function shown(value: string | null | undefined): string {
 /** The enum's wire text is not a sentence (#574). */
 function lastExitWords(exit: LastExit | null | undefined): string {
   if (exit === "clean") return "ended normally";
+  if (exit === "planned") return "stopped by Windows or an update";
   if (exit === "unclean") return "crashed";
+  if (exit === "startup_failure") return "failed to start";
   return "unknown";
 }
 

@@ -2,6 +2,7 @@
 import type { Conflict } from "./Conflict";
 import type { LinkState } from "./LinkState";
 import type { Power } from "./Power";
+import type { SafeStart } from "./SafeStart";
 import type { SceneRef } from "./SceneRef";
 
 export type Status = { version: string, power: Power, brightness: number, fps_target: number, 
@@ -43,4 +44,9 @@ show_zone_panel: boolean,
  * False until the owner finishes the first-run onboarding (maps their PC). While false,
  * the tray opens the window by itself (a few times) onto the onboarding.
  */
-onboarding_complete: boolean, };
+onboarding_complete: boolean, 
+/**
+ * Safe start (#577). `None` (and a daemon from before it, which sends none) reads as not
+ * active.
+ */
+safe_start?: SafeStart | null, };

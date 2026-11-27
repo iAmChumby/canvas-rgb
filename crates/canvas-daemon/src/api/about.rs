@@ -73,7 +73,9 @@ fn os_label(product: Option<String>, build_number: u32) -> String {
 fn last_exit_words(exit: LastExit) -> &'static str {
     match exit {
         LastExit::Clean => "ended normally",
+        LastExit::Planned => "stopped by Windows or an update",
         LastExit::Unclean => "crashed",
+        LastExit::StartupFailure => "failed to start",
         LastExit::Unknown => "unknown",
     }
 }
