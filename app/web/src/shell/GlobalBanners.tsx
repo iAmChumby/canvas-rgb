@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ArrowCircleUp, FolderOpen, WarningCircle, FilmSlate, Lightning, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button, ButtonLink } from "@/components/Button";
+import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { canUpdate, openLogsFolder, tauriHost, updateInstall, updateLater, updateSkip } from "@/lib/host";
 import { sendUpdate } from "@/lib/updateActions";
@@ -36,6 +37,20 @@ export function StandingNotices() {
   // it, so the banner would say it twice and push the page down.
   const onScenes = pathname === "/";
   const noScene = status !== null && !status.active_scene && !onScenes;
+  const safe = status?.safe_start?.active ? status.safe_start : null;
+
+  const startNormally = async () => {
+    setErr(null);
+    try {
+      await api.setSafeStart("normal");
+      // The service restarts the daemon in normal mode; the next status poll shows the saved
+      // scene back on the lights. Nothing is claimed here before that answer arrives.
+    } catch (e) {
+      const message = messageOf(e);
+      setErr(message);
+      notify(message, "warn");
+    }
+  };
 
   const dismissPanel = async () => {
     setErr(null);
@@ -60,10 +75,53 @@ export function StandingNotices() {
     });
   };
 
-  if (!conflict && !noScene && !status?.show_zone_panel) return null;
+  if (!safe && !conflict && !noScene && !status?.show_zone_panel) return null;
+
+  // The lights line names what is actually playing; the safe reason and the fan line come from
+  // fields the daemon measured, never from a guess (#577, cause:unchecked-state).
+  const effect = status?.active_effects?.[0];
+  const lightsLine =
+    effect === "breathing"
+      ? "Lights run Breathing."
+      : effect === "steady-color"
+        ? "Lights show one steady blue colour."
+        : "Lights run a built-in effect.";
+  const reasonLine =
+    safe?.reason === "user_chose"
+      ? "You started safe start."
+      : safe?.reason === "crash_loop"
+        ? `The last ${safe.unclean_streak} runs did not end cleanly.`
+        : "The last run did not end cleanly.";
+  const fanLine =
+    safe?.fans_on_bios === true
+      ? "Fans are on BIOS control."
+      : safe?.fans_on_bios === false
+        ? "Fans are not confirmed on BIOS."
+        : "Fan state is unknown.";
 
   return (
     <div className="banners-flow">
+      {safe && (
+        <Banner
+          tone="warn"
+          icon={<Warning size={20} weight="fill" />}
+          title="Started in safe start"
+          actions={
+            <>
+              <Button variant="primary" size="sm" onClick={() => void startNormally()}>
+                Start normally
+              </Button>
+              <ButtonLink href="/help/" size="sm">
+                Help &amp; About
+              </ButtonLink>
+            </>
+          }
+        >
+          {reasonLine} User effects, stacks, the saved scene, display readings and background
+          peripheral reads are off. {lightsLine} {fanLine}
+          {err && <span className="error-line"> {err}</span>}
+        </Banner>
+      )}
       {conflict && (
         <Banner
           tone="warn"

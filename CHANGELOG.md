@@ -10,6 +10,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Help & About: a new page with the app's version, build, Windows edition and service version, a scrubbed copy of the support report, and links to the docs, source, release notes, privacy and credits. (#574)
 - Docs: `docs/privacy.md` lists, in plain words and with file-by-file evidence, the app's network requests — the daily update check (including a probe of a failed feed), the optional experimental feed, the signed installer, the OpenRGB download during setup and a shipped setup helper that downloads only when run by hand — and everything that stays local. The site is out of scope. (#581)
+- Safe start: after a daemon run the service can prove crashed, the app starts with fans on BIOS control, user effects and the saved scene off, and every light playing the built-in Breathing effect. A banner, the status strip, the tray, `canvas-rgb status` and Help & About show the state and offer Start normally. (#577)
 
 ### Fixed
 

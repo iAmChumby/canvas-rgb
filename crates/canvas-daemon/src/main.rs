@@ -108,50 +108,6 @@ const BLACK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 const SERVICE_NOTICE_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 const ENGINE_STOP_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
 const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
-/// How long a start waits for the service's first `Hello`. Inside the 30 s first-heartbeat
-/// grace; a service that cannot answer in time gives Normal and `Unknown` (#577 R13).
-const FIRST_HELLO_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Reads the mode the service chose for this run from its first `Hello`, before anything is
-/// restored or played. A missing or old service answers Normal / `Unknown`. The mode is latched
-/// once here; later replies cannot change it mid-run (#577 R13).
-async fn read_start_decision(app: &std::sync::Arc<App>) -> canvas_proto::api::SafeStartMode {
-    use canvas_proto::api::{LastExit, SafeStartMode};
-    use canvas_proto::pipe::{PipeRequest, PipeResponse};
-    let hello = PipeRequest::Hello {
-        protocol: canvas_proto::pipe::PROTOCOL_VERSION,
-        daemon_pid: std::process::id(),
-    };
-    let (mode, last_exit) = match tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&hello)).await {
-        Ok(Ok(PipeResponse::Hello { start_mode, last_exit, .. })) => (start_mode, last_exit),
-        Ok(other) => {
-            tracing::debug!(response = ?other, "the service answered the start hello differently; starting normally");
-            (SafeStartMode::Normal, LastExit::Unknown)
-        }
-        Err(_) => {
-            tracing::info!("the service did not answer before the start hello timed out; starting normally");
-            (SafeStartMode::Normal, LastExit::Unknown)
-        }
-    };
-    app.latch_start(mode, last_exit);
-    mode
-}
-
-/// In safe start, the fan line comes from the headers the service actually reports, not from a
-/// claim: no reply is unknown, a header still manual is "not confirmed", all on BIOS is confirmed.
-async fn read_fan_hold(app: &std::sync::Arc<App>) {
-    use canvas_proto::pipe::{PipeRequest, PipeResponse};
-    let reply = tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&PipeRequest::FanStatus)).await;
-    if let Ok(Ok(PipeResponse::FanStatus { status })) = reply {
-        let on_bios = if status.headers.is_empty() {
-            None
-        } else {
-            Some(status.headers.iter().all(|h| h.on_bios))
-        };
-        app.set_fans_on_bios(on_bios);
-    }
-}
-
 /// What safe start puts on the lights: one in-memory scene of every light playing Breathing.
 /// Nothing is saved. If the effect cannot be built, one steady colour is painted and the status
 /// names that instead.
@@ -325,10 +281,10 @@ async fn daemon_main(fakes: bool) -> Exit {
     // #577: decide the mode from the service's first Hello before anything is restored or
     // played. The first-beat grace covers this wait, and a service that cannot answer gives
     // Normal - detection that cannot prove a crash must not turn the lights safe.
-    let mode = read_start_decision(&app).await;
+    let mode = canvas_daemon::pipe_client::read_start_decision(&app).await;
     let safe = mode == canvas_proto::api::SafeStartMode::Safe;
     if safe {
-        read_fan_hold(&app).await;
+        canvas_daemon::pipe_client::read_fan_hold(&app).await;
     }
 
     // The peripherals the owner allowed are opened; the others stay closed. In fakes mode this

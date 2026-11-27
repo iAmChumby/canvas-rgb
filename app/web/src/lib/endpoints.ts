@@ -7,6 +7,7 @@ import { routes } from "@/proto/routes";
 import type { Status } from "@/proto/Status";
 import type { About } from "@/proto/About";
 import type { AboutReport } from "@/proto/AboutReport";
+import type { SafeStartMode } from "@/proto/SafeStartMode";
 import type { OutputState } from "@/proto/OutputState";
 import type { PatchOutput } from "@/proto/PatchOutput";
 import type { DevicesResponse } from "@/proto/DevicesResponse";
@@ -90,6 +91,8 @@ import type { AudioTestState } from "@/proto/AudioTestState";
  */
 const ABOUT = "/api/v1/about";
 const ABOUT_REPORT = "/api/v1/about/report";
+/** `PUT /api/v1/safe-start` (#577); the TS route mirror does not carry it yet. */
+const SAFE_START = "/api/v1/safe-start";
 const CHAINS = "/api/v1/chains";
 /**
  * The pattern routes (`routes::PATTERNS`, `routes::PATTERN`, 0.16.0). `proto/routes.ts` mirrors the
@@ -134,6 +137,8 @@ export const api = {
   about: () => request<About>("GET", ABOUT),
   /** The finished markdown and template fields; never rebuilt by the editor (#574 R1). */
   aboutReport: () => request<AboutReport>("GET", ABOUT_REPORT),
+  /** Enter or leave safe start (#577). The daemon answers first, then the service relaunches it. */
+  setSafeStart: (mode: SafeStartMode) => request<{ mode: SafeStartMode; restarting: boolean }>("PUT", SAFE_START, { mode }),
 
   output: () => request<OutputState>("GET", routes.output),
   patchOutput: (body: PatchOutput) => request<OutputState>("PATCH", routes.output, body),

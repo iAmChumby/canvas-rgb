@@ -92,6 +92,52 @@ impl PipeLink for ServicePipe {
     }
 }
 
+/// How long a start waits for the service's first `Hello`. Inside the 30 s first-heartbeat
+/// grace; a service that cannot answer in time gives Normal and `Unknown` (#577 R13).
+pub const FIRST_HELLO_LIMIT: Duration = Duration::from_secs(2);
+
+/// Reads the mode the service chose for this run from its first `Hello`, before anything is
+/// restored or played. A missing or old service answers Normal / `Unknown`. The mode is latched
+/// once here; later replies cannot change it mid-run (#577 R13).
+pub async fn read_start_decision(app: &std::sync::Arc<crate::state::App>) -> canvas_proto::api::SafeStartMode {
+    use canvas_proto::api::{LastExit, SafeStartMode};
+    use canvas_proto::pipe::{PipeRequest, PipeResponse};
+    let hello = PipeRequest::Hello {
+        protocol: canvas_proto::pipe::PROTOCOL_VERSION,
+        daemon_pid: std::process::id(),
+    };
+    let (mode, last_exit) = match tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&hello)).await {
+        Ok(Ok(PipeResponse::Hello { start_mode, last_exit, .. })) => (start_mode, last_exit),
+        Ok(other) => {
+            tracing::debug!(response = ?other, "the service answered the start hello differently; starting normally");
+            (SafeStartMode::Normal, LastExit::Unknown)
+        }
+        Err(_) => {
+            tracing::info!("the service did not answer before the start hello timed out; starting normally");
+            (SafeStartMode::Normal, LastExit::Unknown)
+        }
+    };
+    app.latch_start(mode, last_exit);
+    // The latch, not this reply, is the mode for the rest of the run: an earlier reply in the
+    // same run cannot be overridden by a later one.
+    app.start_mode()
+}
+
+/// In safe start, the fan line comes from the headers the service actually reports, not from a
+/// claim: no reply is unknown, a header still manual is "not confirmed", all on BIOS is confirmed.
+pub async fn read_fan_hold(app: &std::sync::Arc<crate::state::App>) {
+    use canvas_proto::pipe::{PipeRequest, PipeResponse};
+    let reply = tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&PipeRequest::FanStatus)).await;
+    if let Ok(Ok(PipeResponse::FanStatus { status })) = reply {
+        let on_bios = if status.headers.is_empty() {
+            None
+        } else {
+            Some(status.headers.iter().all(|h| h.on_bios))
+        };
+        app.set_fans_on_bios(on_bios);
+    }
+}
+
 /// Sends one request to the service through the app's pipe.
 ///
 /// A missing pipe is reported as an error, which the API turns into 503
