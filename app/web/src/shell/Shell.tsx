@@ -21,7 +21,7 @@ import { RailResizeHandle } from "@/components/RailResizeHandle";
 import { links, playingLine } from "@/lib/status";
 import { sceneCommands } from "@/shell/commands";
 import { useTakeover } from "@/views/editor/takeover";
-import { StripSlotsProvider } from "@/shell/PageHeader";
+import { StripSlotsProvider, useContextInBody } from "@/shell/PageHeader";
 import { PAGE_PATHS } from "@/shell/pagePaths";
 
 /**
@@ -29,6 +29,19 @@ import { PAGE_PATHS } from "@/shell/pagePaths";
  * global banners, then the page. It owns the sync loop, the preview socket (open only while the
  * window is visible), the live-hue tint, and the tray's navigate event.
  */
+/** B8: the strip's status words and the now-playing detail get a visible home in the page body
+ *  whenever the strip had to give them up. The popover keeps the same words one click away. */
+function StatusBodyLine() {
+  const inBody = useContextInBody();
+  const status = useSnap((s) => s.status);
+  const statusFault = useSnap((s) => s.statusFault);
+  const effects = useSnap((s) => s.effects);
+  if (!inBody || !status) return null;
+  const playing = playingLine(status, effects);
+  const linkWords = links(status, statusFault).map((l) => `${l.name} ${l.state}`).join(" · ");
+  return <p className="bar-context-mirror status-body-line">{playing} · {linkWords}</p>;
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   return (
     <StripSlotsProvider>
@@ -278,6 +291,7 @@ function Frame({ children }: { children: ReactNode }) {
             a size container, and a size container is the containing block of a fixed box, which
             would pull the lane up under the status strip. */}
         <NotifyHost />
+        <StatusBodyLine />
         <main className="content">
           {/* canvas-rgb is up and its render engine is not answering (#241): the daemon's
               own words are shown, and starting it again would not help. */}

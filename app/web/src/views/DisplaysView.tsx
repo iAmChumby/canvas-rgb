@@ -22,7 +22,7 @@ import type { DisplayUnit } from "@/proto/DisplayUnit";
 import type { FansStatus } from "@/proto/FansStatus";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useTweenNumber } from "@/components/Motion";
-import { PageTitle } from "@/shell/PageHeader";
+import { BarContextMirror, PageTitle } from "@/shell/PageHeader";
 
 /** The source of a display, as one string: the picker works on keys, not on the spine's shape. */
 function sourceKey(source: DisplaySource): string {
@@ -434,6 +434,7 @@ export function DisplaysView() {
   return (
     <div className="rd-page rd-displays">
       <PageTitle title="Displays" context={<>{connectedCount} connected</>} />
+      <BarContextMirror className="fig">{connectedCount} connected</BarContextMirror>
 
       {stale && (
         <div className="rule rule-warn" role="status">

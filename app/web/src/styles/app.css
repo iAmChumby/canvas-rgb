@@ -534,6 +534,12 @@ html[data-motion="reduced"] *::after {
 
 /* The controls sit at the end of the row. The mark's text grows into the space beside them and
    they do not move. */
+.strip-page-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
 .strip-controls {
   display: inline-flex;
   align-items: center;
@@ -549,15 +555,19 @@ html[data-motion="reduced"] *::after {
    the primary action (96 px), a mark (90 px), the gaps and the 48 px padding, and 1150 px keeps
    all of them whole. 900 px: the now-playing name (4) becomes a swatch, secondary keys (5) move
    to the existing overflow, and a segmented switch (6) becomes a dropdown of its active value. */
-@container strip (min-width: 1151px) {
-  /* The rail deck carries now playing while the strip is wide. */
-  .strip-now {
-    display: none;
-  }
+/* B11: one rule. The rail deck owns now playing while it is on screen; the strip owns it while
+   the deck is collapsed. The two are never drawn together. */
+:root[data-now-where="rail"] .strip-now {
+  display: none;
+}
+
+/* B9: the context leaves only when the strip's own measurement says it does not fit (the JS sets
+   the attribute), and CSS uses the very same attribute, so there is no 1150/1151 gap. */
+:root[data-bar-context="body"] .rd-context {
+  display: none;
 }
 
 @container strip (max-width: 1150px) {
-  .rd-context,
   .strip-now-detail,
   .strip-mark-text,
   .strip-power-text {
@@ -599,9 +609,7 @@ html[data-motion="reduced"] *::after {
 }
 
 @container strip (max-width: 900px) {
-  .strip-effect-name {
-    display: none;
-  }
+  /* The scene's name stays visible at 768 and on a phone (B11); only the detail steps down. */
 
   /* Rank 6: the profile switch becomes a dropdown whose visible text is the active value and
      whose accessible name names the control ("Fan profile: Quiet"). */
@@ -846,11 +854,11 @@ html[data-motion="reduced"] *::after {
 /* A name a person typed gives way in the middle; the JS keeps twelve characters and the full
    words in title/aria-label. */
 .rd-title h1[data-bar-user-title] {
+  /* B7: the JS cuts on code points from the bar's room, so the heading itself never ellipsizes. */
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 46vw;
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
 }
 
 .rd-context {
@@ -5896,6 +5904,11 @@ button.chip:hover {
   .strip[data-bar-rows="2"] .strip-controls {
     order: 4;
     margin-left: auto;
+  }
+  .strip[data-bar-rows="2"] .strip-page-actions {
+    order: 5;
+    flex-basis: 100%;
+    margin-left: 0;
   }
 
   .rd-title,

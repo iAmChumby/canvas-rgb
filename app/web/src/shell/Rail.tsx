@@ -266,6 +266,10 @@ function RailValue({ value, className, children }: { value: string; className?: 
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
+    // B15: the whole value is a tooltip on the focusable row, not an aria-label on a role-less
+    // span that is hidden from the accessibility tree.
+    const link = el.closest<HTMLElement>(".rail-link");
+    if (link) link.title = `${link.dataset.label ?? ""} ${value}`.trim();
     return () => ro.disconnect();
   }, [value]);
   return (
@@ -274,7 +278,7 @@ function RailValue({ value, className, children }: { value: string; className?: 
       className={className ? `rail-value ${className}` : "rail-value"}
       data-fits={fits ? "true" : "false"}
       title={value}
-      aria-label={value}
+      aria-hidden={fits ? undefined : "true"}
     >
       {children ?? value}
     </span>

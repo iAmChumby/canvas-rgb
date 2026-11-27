@@ -59,7 +59,7 @@ import type { PropertyDef } from "@/proto/PropertyDef";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { Props } from "@/proto/props";
-import { PageActions, PageTitle } from "@/shell/PageHeader";
+import { BarContextMirror, PageActions, PageTitle } from "@/shell/PageHeader";
 import { Tooltip } from "@/components/Tooltip";
 
 /** The icon each kind of peripheral wears. */
@@ -681,6 +681,7 @@ export function PeripheralsView() {
   return (
     <div className="rd-page rd-peripherals">
       <PageTitle title="Peripherals" contextBusy={list === null && !listError} context={list === null && !listError ? <InlineSkeleton width="8ch" /> : <>{rows.length} found</>} />
+      {list && <BarContextMirror className="fig">{rows.length} found</BarContextMirror>}
       {/* The pending changes and the way to send them sit in the strip, beside the save (R4). */}
       <PageActions>
         {changedCount > 0 && (

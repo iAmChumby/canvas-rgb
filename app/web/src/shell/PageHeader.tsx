@@ -104,28 +104,36 @@ export function UserTitle({ title }: { title: string }) {
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
+    // B7: measure the room from the bar row, never from the heading: measuring the heading ratchets
+    // (a name that shortened never grows back). The row is a stable box owned by the strip.
+    const row = el.closest(".strip-row") as HTMLElement | null;
     const measure = () => {
       const ctx = document.createElement("canvas").getContext("2d");
       if (!ctx) return;
       const cs = getComputedStyle(el);
       ctx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-      const available = el.clientWidth;
+      const titleBox = el.closest(".rd-title") as HTMLElement | null;
+      const gap = titleBox ? parseFloat(getComputedStyle(titleBox).columnGap || "0") || 0 : 0;
+      // B5/B7: the stable room is the title slot, not the heading that shrinks with its own text.
+      const beside = titleBox
+        ? [...titleBox.children].filter((c) => c !== el.parentElement && !c.contains(el)).reduce((n, c) => n + (c as HTMLElement).getBoundingClientRect().width, 0)
+        : 0;
+      const available = titleBox ? titleBox.getBoundingClientRect().width - beside - gap : 0;
       const full = ctx.measureText(title).width;
-      if (full <= available || available <= 0) {
-        setShown(title);
-        return;
-      }
-      const keep = Math.min(title.length, Math.max(USER_TITLE_FLOOR, Math.floor((available / full) * title.length) - 1));
-      if (keep >= title.length) {
-        setShown(title);
-        return;
-      }
+      if (available <= 0 || full <= available) { setShown(title); return; }
+      // B7: cut on code points, never inside a surrogate pair (an emoji stays whole).
+      const chars = Array.from(title);
+      const keep = Math.min(chars.length, Math.max(USER_TITLE_FLOOR, Math.floor((available / full) * chars.length) - 1));
+      if (keep >= chars.length) { setShown(title); return; }
       const left = Math.ceil(keep / 2);
-      setShown(`${title.slice(0, left)}…${title.slice(title.length - (keep - left))}`);
+      setShown(`${chars.slice(0, left).join("")}…${chars.slice(chars.length - (keep - left)).join("")}`);
     };
     measure();
     const ro = new ResizeObserver(measure);
-    ro.observe(el);
+    if (row) ro.observe(row);
+    // The title slot grows when the context moves to the body: the name must grow back with it.
+    const titleBox = el.closest(".rd-title");
+    if (titleBox) ro.observe(titleBox);
     return () => ro.disconnect();
   }, [title]);
   return (
@@ -170,8 +178,48 @@ export function PageTitle({
 }
 
 /** The page's own actions, on the strip's right, before Pause and Search. */
+/**
+ * The visible home of a fact that had to leave the bar (#586 B8). The strip publishes where the
+ * context lives; CSS shows exactly one copy, and the body copy wraps instead of ellipsizing.
+ */
+export function BarContextMirror({ children, className }: { children: ReactNode; className?: string }) {
+  return <p className={className ? `bar-context-mirror ${className}` : "bar-context-mirror"}>{children}</p>;
+}
+
+/** True when the strip measured that the context had to leave the bar (B8). */
+export function useContextInBody(): boolean {
+  const [inBody, setInBody] = useState(false);
+  useEffect(() => {
+    const read = () => setInBody(document.documentElement.dataset.barContext === "body");
+    read();
+    const mo = new MutationObserver(read);
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-bar-context"] });
+    return () => mo.disconnect();
+  }, []);
+  return inBody;
+}
+
 export function PageActions({ children }: { children: ReactNode }) {
   const slot = useSlot(pickActions);
   if (!slot) return null;
   return createPortal(<span className="rd-actions">{children}</span>, slot);
+}
+
+/**
+ * True when the strip's own content box is too narrow to show secondary keys. A view uses this to
+ * render the same actions in the overflow menu the moment they leave the bar (B10). It measures the
+ * container, not the window: the rail takes width the viewport does not know about.
+ */
+export function useStripCompact(): boolean {
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    const row = document.querySelector<HTMLElement>(".strip-row");
+    if (!row) return;
+    const read = () => setCompact(row.clientWidth <= 1150);
+    read();
+    const ro = new ResizeObserver(read);
+    ro.observe(row);
+    return () => ro.disconnect();
+  }, []);
+  return compact;
 }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CaretLeft,
+  DotsThreeOutline,
   FileHtml,
   MagnifyingGlass,
   MonitorPlay,
@@ -45,7 +46,7 @@ import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
 import { getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
-import { PageActions, PageTitle } from "@/shell/PageHeader";
+import { BarContextMirror, PageActions, PageTitle, useStripCompact } from "@/shell/PageHeader";
 import { Popover } from "@/components/Popover";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
 import { requestNavigation } from "@/lib/navigationGuard";
@@ -117,6 +118,10 @@ export function EffectsView() {
   const activeId = firstPlaying ?? activeEffects[0] ?? null;
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("effects"));
+  // B10: the keys that leave the bar stay reachable from one overflow menu.
+  const stripCompact = useStripCompact();
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLSpanElement>(null);
   const [filter, setFilter] = useState<"all" | "favorites">("all");
   const [category, setCategory] = useState<EffectCategory | null>(null);
   const [query, setQuery] = useState("");
@@ -1381,6 +1386,9 @@ export function EffectsView() {
           </span>
         }
       />
+      <BarContextMirror className="fig">
+        {effects === null || listStale ? "Effects could not be read" : `${list.length} effects`}
+      </BarContextMirror>
       <PageActions>
         {groupHref && (
           <ButtonLink
@@ -1423,6 +1431,23 @@ export function EffectsView() {
           <span className="rd-btn-text">Import</span>
         </FileButton>
         </span>
+        {stripCompact && (
+          <>
+            <span ref={moreRef}>
+              <IconButton label="More page actions" size="sm" icon={<DotsThreeOutline size={16} />} onClick={() => setMoreOpen((v) => !v)} />
+            </span>
+            <Popover anchor={moreRef} open={moreOpen} onClose={() => setMoreOpen(false)} label="More page actions">
+              {groupHref && (
+                <ButtonLink href={groupHref} variant="ghost" size="sm" icon={<CaretLeft size={15} />} label={groupName ? `Back to ${groupName}` : "Back to the scene"}>
+                  <span className="rd-btn-text">{groupName ? `Back to ${groupName}` : "Back to the scene"}</span>
+                </ButtonLink>
+              )}
+              <FileButton accept=".html,text/html" icon={<UploadSimple size={16} />} disabled={editing} busy={importing} label="Import" onFile={(file) => void sendImport(file, false)}>
+                <span className="rd-btn-text">Import</span>
+              </FileButton>
+            </Popover>
+          </>
+        )}
       </PageActions>
 
       {/* New effect's three ways in. The menu is a popover, so opening it takes no room in the

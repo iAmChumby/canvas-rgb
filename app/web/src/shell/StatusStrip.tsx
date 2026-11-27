@@ -74,39 +74,58 @@ export function StatusStrip({
   const rowRef = useRef<HTMLDivElement>(null);
   const markRef = useRef<HTMLButtonElement>(null);
 
-  // The strip's own room, its row count and its height are published together for the page body
-  // and for the overlays that sit under the strip. The height must be republished when the row
-  // count changes: the page's actions arrive through a portal after the strip has mounted.
+  // One rule, measured from the strip's own content box (#586 fix pass 1 B9, B13):
+  //  - the context stays in the bar while it fits; otherwise its page renders the same words at
+  //    the head of its body (CSS shows one copy, with no 1150/1151 gap);
+  //  - a second row appears only when a primary action cannot fit beside the other controls;
+  //  - now playing lives in the strip only while the rail's deck is collapsed, never twice.
+  // All three are decided from the strip's box, never from a viewport guess.
   useEffect(() => {
     const strip = stripRef.current;
     const row = rowRef.current;
     if (!strip || !row) return;
     const publishHeight = () => {
-      // Let the stylesheet choose the seeded height first (one row or two); the inline value is
-      // only a copy of that measurement for the overlays, never a lock on the old row count.
       document.documentElement.style.removeProperty("--strip-h");
       document.documentElement.style.setProperty("--strip-h", `${strip.offsetHeight}px`);
     };
-    const rows = () => {
-      const two = strip.querySelector(".rd-actions") !== null && window.innerWidth <= 720;
-      strip.dataset.barRows = two ? "2" : "1";
+    const update = () => {
+      const root = document.documentElement;
+      root.dataset.barContext = "bar";
+      const gap = parseFloat(getComputedStyle(row).columnGap || "0") || 0;
+      const kids = [...row.children] as HTMLElement[];
+      const width = (el: HTMLElement) => el.getBoundingClientRect().width;
+      const actions = row.querySelector<HTMLElement>(".strip-page-actions");
+      const primary = actions?.querySelector("[data-bar-primary]");
+      const main = kids.filter((k) => k !== actions);
+      const used = main.reduce((n, k) => n + width(k), 0) + gap * Math.max(0, main.length - 1);
+      const actionsWidth = actions ? width(actions) : 0;
+      // The context is part of the title slot: it moves out when it is itself cut or when the
+      // whole row no longer fits. Measuring scrollWidth here is what makes the rule per page.
+      const context = row.querySelector<HTMLElement>(".rd-context");
+      let contextCut = false;
+      if (context) {
+        const range = document.createRange();
+        range.selectNodeContents(context);
+        contextCut = range.getBoundingClientRect().right > row.getBoundingClientRect().right - 1
+          || context.scrollWidth > context.clientWidth + 1;
+      }
+      root.dataset.barContext = contextCut || used + actionsWidth + (actions ? gap : 0) > row.clientWidth + 1 ? "body" : "bar";
+      // A second row exists only when a primary action cannot fit beside the other controls. The
+      // 85% margin keeps the decision stable once the actions have moved to their own row.
+      const actionsBox = actions?.getBoundingClientRect();
+      const overflowing = !!actionsBox && actionsBox.right > row.getBoundingClientRect().right - 1;
+      const fitsEasily = used + actionsWidth + gap <= row.clientWidth * 0.85;
+      strip.dataset.barRows = primary && (overflowing || !fitsEasily) ? "2" : "1";
+      const deck = document.querySelector<HTMLElement>(".rail-deck");
+      root.dataset.nowWhere = deck && getComputedStyle(deck).display !== "none" ? "rail" : "strip";
       publishHeight();
     };
-    const room = () => {
-      const cs = getComputedStyle(row);
-      const content = row.clientWidth - parseFloat(cs.paddingLeft || "0") - parseFloat(cs.paddingRight || "0");
-      document.documentElement.dataset.barContext = content >= STRIP_CONTEXT_ROOM ? "bar" : "body";
-    };
-    rows();
-    room();
-    const ro = new ResizeObserver(() => {
-      room();
-      publishHeight();
-    });
+    update();
+    const ro = new ResizeObserver(update);
     ro.observe(row);
     ro.observe(strip);
-    const mo = new MutationObserver(rows);
-    mo.observe(strip, { childList: true, subtree: true });
+    const mo = new MutationObserver(update);
+    mo.observe(strip, { childList: true, subtree: true, characterData: true });
     return () => {
       ro.disconnect();
       mo.disconnect();
@@ -244,9 +263,14 @@ export function StatusStrip({
           </Crossfade>
         </button>
 
-        <span className="strip-controls">
-          {/* The page's own actions, before Pause and Search (R2, R4). */}
+        {/* The page's keys own their slot: on a phone only a primary action that cannot fit in
+            the first row moves to the second. Pause and search stay in the same place on every
+            page (B12). */}
+        <span className="strip-page-actions">
           <StripSlot kind="actions" />
+        </span>
+
+        <span className="strip-controls">
           {known ? (
             <Button
               size="sm"

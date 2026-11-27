@@ -71,6 +71,7 @@ jobs:
               - 'crates/canvas-proto/**'
               - 'tools/nav-check.mjs'
               - 'tools/bar-check.mjs'
+              - 'tools/tests/bar-check.test.mjs'
               - 'tools/poison-compare/js/**'
             rust:
               # Every crate, the Tauri shell, the workspace's manifests and lock file, the

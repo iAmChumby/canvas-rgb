@@ -14,7 +14,7 @@ import { openExternal } from "@/lib/host";
 import { LicenceDisclosure } from "@/components/LicenceDisclosure";
 import { Panel } from "@/components/Panel";
 import { SkeletonLines } from "@/components/Skeleton";
-import { PageTitle } from "@/shell/PageHeader";
+import { BarContextMirror, PageTitle } from "@/shell/PageHeader";
 import s from "./credits.module.css";
 
 type Credit = { name: string; url: string; body: string };
@@ -59,6 +59,7 @@ export function CreditsView() {
   return (
     <div className={`rd-page ${s.page}`} data-state={data ? "ready" : failed ? "error" : "loading"}>
       <PageTitle title="Credits" context="People, projects and licences behind canvas-rgb" />
+      <BarContextMirror>People, projects and licences behind canvas-rgb</BarContextMirror>
       {!data ? (
         failed ? (
           <Panel title="Credits">
