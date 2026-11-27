@@ -74,6 +74,11 @@ jobs:
             rust:
               # Every crate, the Tauri shell, the workspace's manifests and lock file, the
               # advisory and licence policy and the workspace member under tools/.
+              # The privacy drift test scans the editor and installer too, so a change to
+              # either or to its allow-list must reach the job that runs that test.
+              - 'app/web/**'
+              - 'installer/**'
+              - 'docs/privacy-allowlist.txt'
               - 'crates/**'
               - 'app/src-tauri/**'
               - 'Cargo.toml'
