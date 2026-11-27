@@ -38,6 +38,7 @@ fn watch_paths(git_dir: &Path) -> Vec<PathBuf> {
 
 /// Runs git quietly, returning trimmed stdout only on success.
 fn git(args: &[&str]) -> Option<String> {
+    // token: none. git only reads this repo's history for the commit and the build date.
     let output = Command::new("git").args(args).output().ok()?;
     if !output.status.success() {
         return None;

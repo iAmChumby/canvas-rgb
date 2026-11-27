@@ -50,6 +50,7 @@ export const PAGES = [
   { name: "peripherals", url: "/peripherals/", label: "Peripherals" },
   { name: "fans", url: "/fans/", label: "Fans" },
   { name: "settings", url: "/settings/", label: "Settings" },
+  { name: "help", url: "/help/", label: "Help & About" },
 ];
 const MIN_FONT_PX = 14;
 

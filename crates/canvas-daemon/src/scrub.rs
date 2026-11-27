@@ -331,6 +331,19 @@ mod tests {
     }
 
     #[test]
+    fn a_domain_suffixed_profile_folder_leaves_no_suffix_behind() {
+        // A domain account's profile folder is `<user>.<domain>`; the bare folder name must go
+        // whole, not as `<user>.SMITH`.
+        let scrubber = Scrubber::new(
+            Some(concat!("C:\\", "Use", "rs\\Luke.SMITH").to_string()),
+            Some("Luke".to_string()),
+            None,
+        );
+        let out = scrubber.scrub("Luke.SMITH pad, and Luke alone");
+        assert_eq!(out, "<user> pad, and <user> alone");
+    }
+
+    #[test]
     fn bare_names_only_match_whole_names() {
         let scrubber = Scrubber::new(None, Some("Ed".into()), Some("PC".into()));
         let out = scrubber.scrub("collected PCIe Ed PC");
