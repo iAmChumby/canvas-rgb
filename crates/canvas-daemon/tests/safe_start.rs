@@ -492,6 +492,40 @@ async fn r4_a_late_safe_answer_ends_the_draft_on_the_lights() {
 }
 
 #[tokio::test]
+async fn r4_peripherals_are_closed_by_a_late_safe_answer_and_untouched_at_boot() {
+    for late in [false, true] {
+        let home = TempHome::new();
+        let mouse = common::FakePeripheral::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            canvas_daemon::storage::Store::at(&home.0),
+            Arc::new(FakeEngine::default()),
+            Box::new(FakeAdapter::default()),
+            TOKEN.into(),
+            "test".into(),
+            tx,
+        )
+        .with_peripherals(vec![Box::new(mouse.clone())]);
+        app.pipe = Arc::new(RecordPipe);
+        let app = Arc::new(app);
+        let access = canvas_proto::peripheral::PeripheralAccess { reads: true, writes: true };
+        app.store.write().await.peripherals.peripherals.insert(mouse.id().0, access);
+        if late {
+            // A start that got no answer opened what the owner allowed.
+            canvas_daemon::peripherals::apply_saved(&app).await;
+            assert!(mouse.log().connected);
+        }
+        pipe_client::read_start_decision(&app).await;
+        assert!(!mouse.log().connected, "late={late}");
+        assert!(!mouse.log().writes_enabled, "late={late}");
+        if !late {
+            assert_eq!((mouse.log().describes, mouse.log().connects), (0, 0), "boot touched the adapter");
+        }
+        assert_eq!(app.store.read().await.peripherals.peripherals[&mouse.id().0], access);
+    }
+}
+
+#[tokio::test]
 async fn r5_safe_start_lights_the_lights_whatever_was_saved() {
     for (saved, shown) in [(0u8, 20u8), (5, 20), (80, 80)] {
         let (mut app, engine, _home) = build();

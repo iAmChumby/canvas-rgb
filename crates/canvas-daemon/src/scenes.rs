@@ -762,13 +762,7 @@ pub async fn enter_safe(app: &Arc<App>, last_exit: canvas_proto::api::LastExit, 
         }
         replace.settle();
     }
-    let saved: Vec<_> = app.store.read().await.peripherals.peripherals.keys().cloned().collect();
-    for id in saved {
-        let id = canvas_proto::device::DeviceId(id);
-        if let Err(error) = app.peripherals.apply(&id, Default::default()).await {
-            tracing::debug!(device = %id, error = %error, "safe start could not close a peripheral");
-        }
-    }
+    app.peripherals.close_applied().await;
     app.scene.notify();
 }
 
