@@ -8,6 +8,8 @@ Markdown twin at the same URL with `.md` appended.
 - [Developer docs](https://iamchumby.github.io/canvas-rgb/docs.md): The local API, the command line client and the effect file format.
 - [API getting started](https://iamchumby.github.io/canvas-rgb/docs/getting-started.md): The token, the guards and two short requests to the loopback API.
 - [API reference](https://iamchumby.github.io/canvas-rgb/docs/api.md): Every local API route, grouped by area, with its body and answer shapes.
+- [About](https://iamchumby.github.io/canvas-rgb/docs/api/about.md): Reports the app version, build, Windows edition, service version and how the previous run ended.
+- [About report](https://iamchumby.github.io/canvas-rgb/docs/api/about-report.md): Returns the scrubbed support report the editor shows and copies, with the fields the bug report template fills.
 - [Output](https://iamchumby.github.io/canvas-rgb/docs/api/output.md): Reports the current power state, brightness and warmth of the lighting output.
 - [Quit](https://iamchumby.github.io/canvas-rgb/docs/api/quit.md): Stops the daemon after applying its exit lighting setting and telling the fan and update service the stop was deliberate.
 - [Status](https://iamchumby.github.io/canvas-rgb/docs/api/status.md): Reports the daemon's version, power state, brightness, frame rate, connected devices, active scene and the links to OpenRGB and to the fan and update service.
@@ -112,7 +114,7 @@ Markdown twin at the same URL with `.md` appended.
 
 ## Machine-readable data
 
-- [API reference](https://iamchumby.github.io/canvas-rgb/docs/api-reference.json): all 66 routes, their methods, bodies, answers, parameters and tested examples.
+- [API reference](https://iamchumby.github.io/canvas-rgb/docs/api-reference.json): all 68 routes, their methods, bodies, answers, parameters and tested examples.
 - [Search index](https://iamchumby.github.io/canvas-rgb/docs/search-index.json): titles and URLs for the docs search.
 
 ## Full text

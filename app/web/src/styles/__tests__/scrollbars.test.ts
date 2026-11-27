@@ -126,6 +126,8 @@ const SCROLL_PANES = [
   ".chainStage",
   ".takeover",
   ".frameScroll",
+  ".rd-help .help-scroll",
+  ".receipt-text",
 ];
 
 /**

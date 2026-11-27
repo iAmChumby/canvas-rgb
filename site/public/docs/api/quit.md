@@ -45,6 +45,8 @@ The fields the daemon sends: the stop request was accepted.
 
 | Method / path | Body | Answer |
 | --- | --- | --- |
+| GET `/api/v1/about` | none | About |
+| GET `/api/v1/about/report` | none | AboutReport |
 | GET `/api/v1/output` | none | OutputState |
 | PATCH `/api/v1/output` | PatchOutput | OutputState |
 | POST `/api/v1/quit` | none | JSON object |

@@ -10,7 +10,7 @@ An effect is one HTML file. The runtime reads the head for the name and properti
 
 ## Start from a task
 
-The getting-started page covers the token and the guards. The reference lists all 66 routes with their request and answer shapes, checked against the route definitions. The CLI page lists the commands and flags. The effects page shows how to write and check a file.
+The getting-started page covers the token and the guards. The reference lists all 68 routes with their request and answer shapes, checked against the route definitions. The CLI page lists the commands and flags. The effects page shows how to write and check a file.
 
 ## Before the first request
 

@@ -599,6 +599,8 @@ fn spawn_pipe_client(app: Arc<App>) {
                 match client.request(&hello).await {
                         Ok(canvas_proto::pipe::PipeResponse::Hello { protocol, service_version }) => {
                             tracing::info!(protocol, service_version, "the service is up");
+                            // Help & About shows the service that answered, not a guess (#574 R6).
+                            app.set_service_version(service_version.clone());
                             app.service_down_ms.store(0, Ordering::SeqCst);
                             down_since = std::time::Instant::now();
                             // The heartbeat goes every second.
@@ -621,7 +623,9 @@ fn spawn_pipe_client(app: Arc<App>) {
                     }
             }
 
-            // The service is down.
+            // The service is down: the old `Hello` no longer describes what answers now, so
+            // Help & About must not keep showing it (#574).
+            app.clear_service_version();
             let down = down_since.elapsed().as_millis() as u64;
             app.service_down_ms.store(down.max(1), Ordering::SeqCst);
             tokio::time::sleep(canvas_daemon::pipe_client::RECONNECT_INTERVAL).await;
