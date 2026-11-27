@@ -29,7 +29,8 @@ export type GroupStageState =
   | "pattern"
   | "off"
   | "stopped"
-  | "failed";
+  | "failed"
+  | "safe";
 
 /** The words of the states that have no picture. */
 export const STAGE_WORDS = {
@@ -38,6 +39,7 @@ export const STAGE_WORDS = {
   stopped: "The preview stopped.",
   pattern: "A pattern is drawn on the lights only. The LEDs show it.",
   off: "Off. Nothing is drawn.",
+  safe: "Not playing",
 } as const;
 
 /** What the caption's tooltip says: the picture is the group's, not the scene's. */
@@ -91,9 +93,13 @@ export function GroupStage({
   // A pattern has no picture, so it opens no socket at all. A group set to Off does open one:
   // the daemon sends it black frames, and the stage says "Off" from the group's own state
   // rather than reading it out of the frames.
-  const preview = useGroupPreview({ groupId: pattern ? null : group.id, saved });
+  // Safe start (#577): the saved scene is not playing, so there is no picture to ask for.
+  const safe = useSnap((st) => st.status?.safe_start?.active ?? false);
+  const preview = useGroupPreview({ groupId: pattern || safe ? null : group.id, saved });
 
-  const state: GroupStageState = failed
+  const state: GroupStageState = safe
+    ? "safe"
+    : failed
     ? "failed"
     : off
       ? "off"
@@ -148,7 +154,7 @@ export function GroupStage({
           />
           {state !== "live" && (
             <div className={s.stageMark}>
-              {state === "off" && <Moon size={22} aria-hidden="true" />}
+              {(state === "off" || state === "safe") && <Moon size={22} aria-hidden="true" />}
               {(state === "stopped" || state === "failed") && (
                 <WarningCircle size={22} weight="fill" aria-hidden="true" />
               )}

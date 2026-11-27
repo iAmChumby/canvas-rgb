@@ -47,8 +47,10 @@ export function useRailData(): RailValues {
   return useMemo(() => {
     // The status names the active scene; the scenes list names it too, and answers first when
     // the status has not come yet.
-    const scene =
-      status?.active_scene?.name ?? scenes?.scenes.find((x) => x.id === scenes.active)?.name ?? null;
+    // Safe start's row says "Safe": the longer scene name would clip in the rail (#577).
+    const scene = status?.safe_start?.active
+      ? "Safe"
+      : (status?.active_scene?.name ?? scenes?.scenes.find((x) => x.id === scenes.active)?.name ?? null);
 
     // A scene is named on the scene row, so no one effect's name goes on the Effects row.
     const effectId = status?.active_scene ? null : (status?.active_effects?.[0] ?? null);

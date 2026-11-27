@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowCircleUp, FolderOpen, WarningCircle, FilmSlate, Lightning, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button, ButtonLink } from "@/components/Button";
@@ -16,6 +17,8 @@ import { requestNavigation } from "@/lib/navigationGuard";
 import { patchSnap, useSnap } from "@/lib/store";
 import { UpdatedToast } from "@/shell/UpdatedToast";
 import { requestChainSetup } from "@/views/chain/request";
+import type { SafeStart } from "@/proto/SafeStart";
+import type { Status } from "@/proto/Status";
 
 /** The service banner appears after this many ms without the fan service (G4). */
 const SERVICE_BANNER_MS = 10_000;
@@ -37,20 +40,8 @@ export function StandingNotices() {
   // it, so the banner would say it twice and push the page down.
   const onScenes = pathname === "/";
   const noScene = status !== null && !status.active_scene && !onScenes;
-  const safe = status?.safe_start?.active ? status.safe_start : null;
-
-  const startNormally = async () => {
-    setErr(null);
-    try {
-      await api.setSafeStart("normal");
-      // The service restarts the daemon in normal mode; the next status poll shows the saved
-      // scene back on the lights. Nothing is claimed here before that answer arrives.
-    } catch (e) {
-      const message = messageOf(e);
-      setErr(message);
-      notify(message, "warn");
-    }
-  };
+  // Help & About draws the safe-start notice beside its hero, so the hero never moves (#577).
+  const safe = (status?.safe_start?.active ?? false) && !pathname.startsWith("/help");
 
   const dismissPanel = async () => {
     setErr(null);
@@ -77,51 +68,9 @@ export function StandingNotices() {
 
   if (!safe && !conflict && !noScene && !status?.show_zone_panel) return null;
 
-  // The lights line names what is actually playing; the safe reason and the fan line come from
-  // fields the daemon measured, never from a guess (#577, cause:unchecked-state).
-  const effect = status?.active_effects?.[0];
-  const lightsLine =
-    effect === "breathing"
-      ? "Lights run Breathing."
-      : effect === "steady-color"
-        ? "Lights show one steady blue colour."
-        : "Lights run a built-in effect.";
-  const reasonLine =
-    safe?.reason === "user_chose"
-      ? "You started safe start."
-      : safe?.reason === "crash_loop"
-        ? `The last ${safe.unclean_streak} runs did not end cleanly.`
-        : "The last run did not end cleanly.";
-  const fanLine =
-    safe?.fans_on_bios === true
-      ? "Fans are on BIOS control."
-      : safe?.fans_on_bios === false
-        ? "Fans are not confirmed on BIOS."
-        : "Fan state is unknown.";
-
   return (
     <div className="banners-flow">
-      {safe && (
-        <Banner
-          tone="warn"
-          icon={<Warning size={20} weight="fill" />}
-          title="Started in safe start"
-          actions={
-            <>
-              <Button variant="primary" size="sm" onClick={() => void startNormally()}>
-                Start normally
-              </Button>
-              <ButtonLink href="/help/" size="sm">
-                Help &amp; About
-              </ButtonLink>
-            </>
-          }
-        >
-          {reasonLine} User effects, stacks, the saved scene, display readings and background
-          peripheral reads are off. {lightsLine} {fanLine}
-          {err && <span className="error-line"> {err}</span>}
-        </Banner>
-      )}
+      {safe && <SafeStartBanner />}
       {conflict && (
         <Banner
           tone="warn"
@@ -291,5 +240,102 @@ export function GlobalBanners() {
         )}
       </div>
     </div>
+  );
+}
+
+/** How long a restart may take before the banner stops waiting and says it did not happen. */
+export const RESTART_WAIT_MS = 30_000;
+
+function reasonLine(safe: SafeStart): string | null {
+  if (safe.reason === "user_chose") return "You chose safe start.";
+  if (safe.reason === "unclean_once") return "The last run did not end cleanly.";
+  if (safe.reason === "crash_loop") return `The last ${safe.unclean_streak} runs did not end cleanly.`;
+  return null;
+}
+
+/**
+ * What the lights run. Breathing is named by its effect id. Anything else is the fallback, and the
+ * daemon names it in the synthetic scene ("One steady colour, ..."), so the editor knows no colour.
+ */
+function lightsLine(status: Status): string {
+  const effect = status.active_effects?.[0];
+  if (effect === "breathing") return "Lights: Breathing.";
+  const name = status.active_scene?.name;
+  if (!effect || !name) return "Lights: not started yet.";
+  return `Lights: ${name.charAt(0).toLowerCase()}${name.slice(1)}.`;
+}
+
+function fanLine(onBios: boolean | null | undefined): string {
+  if (onBios === true) return "Fans: on BIOS control.";
+  if (onBios === false) return "Fans: not confirmed on BIOS yet.";
+  return "Fans: state unknown.";
+}
+
+/**
+ * The standing notice of safe start (#577): short lines, the body before the actions at every
+ * width. On Help & About the hero already has the key and the page is the help, so neither is
+ * repeated there.
+ */
+export function SafeStartBanner({ onHelp = false }: { onHelp?: boolean }) {
+  const status = useSnap((s) => s.status);
+  const [asked, setAsked] = useState(false);
+  const [stalled, setStalled] = useState(false);
+  const [refused, setRefused] = useState<string | null>(null);
+  const safe = status?.safe_start?.active ? status.safe_start : null;
+
+  // A restart that never comes is said, and the key is given back.
+  const waiting = asked && safe !== null;
+  useEffect(() => {
+    if (!waiting || stalled) return;
+    const timer = setTimeout(() => setStalled(true), RESTART_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [waiting, stalled]);
+  const restarting = asked && !stalled;
+  const error = stalled ? "canvas-rgb did not restart. Try again." : refused;
+
+  if (!status || !safe) return null;
+
+  const startNormally = async () => {
+    setRefused(null);
+    setStalled(false);
+    setAsked(true);
+    try {
+      await api.setSafeStart("normal");
+      // Nothing is claimed here: the banner goes when the status says normal.
+    } catch (e) {
+      setAsked(false);
+      setRefused(messageOf(e));
+    }
+  };
+  const reason = reasonLine(safe);
+
+  return (
+    <Banner tone="warn" icon={<Warning size={20} weight="fill" />} title="Started in safe start">
+      <div className="safe-lines">
+        {reason && <p>{reason}</p>}
+        <p>Off until you start normally: your saved scene, effects, and display and peripheral readings.</p>
+        <p>{lightsLine(status)}</p>
+        <p>{fanLine(safe.fans_on_bios)}</p>
+      </div>
+      {!onHelp && (
+        <div className="safe-acts">
+          <Button variant="primary" size="sm" busy={restarting} onClick={() => void startNormally()}>
+            Start normally
+          </Button>
+          {restarting ? (
+            <span className="safe-wait">Restarting in normal mode…</span>
+          ) : (
+            <Link href="/help/" prefetch={false} className="safe-help">
+              Help
+            </Link>
+          )}
+        </div>
+      )}
+      {error && (
+        <p className="error-line safe-error" role="alert">
+          {error}
+        </p>
+      )}
+    </Banner>
   );
 }

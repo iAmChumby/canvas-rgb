@@ -24,6 +24,7 @@ import { openExternal } from "@/lib/host";
 import { useSnap } from "@/lib/store";
 import { settingsStatus } from "@/lib/updateWords";
 import { PageTitle } from "@/shell/PageHeader";
+import { SafeStartBanner } from "@/shell/GlobalBanners";
 import type { About } from "@/proto/About";
 import type { AboutReport } from "@/proto/AboutReport";
 import type { LastExit } from "@/proto/LastExit";
@@ -143,7 +144,7 @@ export function HelpView() {
                 <BrandMark size={26} />
                 <Wordmark />
               </div>
-              <p className="help-hero-note">Facts from the daemon running on this PC.</p>
+              <p className="help-hero-note">Facts from canvas-rgb on this PC.</p>
               {failed ? (
                 <div className="help-error">
                   <p className="error-line">Identity and the system report could not be read.</p>
@@ -232,6 +233,8 @@ export function HelpView() {
           </div>
 
           <div className="help-side">
+            {/* Here and not above the page: the notice arriving must not push the hero (#577). */}
+            <SafeStartBanner onHelp />
             <Panel title="Go to">
               <div className="help-keys">
                 <KeyRow

@@ -32,7 +32,7 @@ export function Banner({
 }) {
   const style = { "--tone": `var(--${tone})` } as CSSProperties;
   return (
-    <div className="banner" style={style} role={tone === "down" ? "alert" : "status"}>
+    <div className={`banner banner-${tone}`} style={style} role={tone === "down" ? "alert" : "status"}>
       <span aria-hidden="true" className="banner-icon">
         {icon}
       </span>
