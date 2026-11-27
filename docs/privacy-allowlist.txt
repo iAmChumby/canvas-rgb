@@ -1,0 +1,57 @@
+# Hosts and connection constructors that may appear in shipped source.
+# This file sits beside docs/privacy.md and is read by the cargo test in
+# crates/canvas-client/tests/privacy_allowlist.rs on every CI run.
+#
+# To add a network call: update the table in docs/privacy.md first, then add its
+# host, or its constructor with the repo-relative path of the one file that may
+# use it, below in the SAME commit, then run:
+#   cargo test -p canvas-client --test privacy_allowlist
+#
+# [constructors] entries are "<token> = <repo-relative path>". A token allowed
+# in one file is not allowed in another: add one line per file. Repeat the token
+# rather than listing several paths on one line.
+#
+# Known limits: a listed token is allowed anywhere in its file, so a second call of the same
+# kind in that file passes; the scan counts in the test are a tripwire, so a new shipped file
+# fails CI until the count is updated; download commands with no token here (BITS, WinHTTP,
+# DownloadFile, curl, winget) are not scanned.
+
+[hosts]
+# Update feed and signed installer (docs/privacy.md, outbound rows 1-3)
+github.com
+objects.githubusercontent.com
+release-assets.githubusercontent.com
+# Pinned OpenRGB zip downloaded by setup (outbound row 4)
+codeberg.org
+# Tauri config schema: a build-time $schema URL, never fetched by the app
+schema.tauri.app
+
+[constructors]
+# Local daemon API clients (loopback only)
+ureq::Agent::config_builder = app/src-tauri/src/api.rs
+ureq::Agent::config_builder = app/src-tauri/src/update/mod.rs
+ureq::Agent::config_builder = crates/canvas-daemon/src/cli.rs
+# Tauri updater: feed and signed installer. reqwest only sets its redirect policy.
+tauri_plugin_updater = app/src-tauri/src/main.rs
+tauri_plugin_updater = app/src-tauri/src/update/mod.rs
+# OpenRGB SDK socket and the supervisor's listener check
+TcpStream::connect = crates/canvas-adapters/src/openrgb.rs
+TcpStream::connect = crates/canvas-daemon/src/openrgb_supervisor.rs
+# The editor's API calls and preview sockets, plus the link opener
+fetch( = app/web/src/lib/api.ts
+fetch( = app/web/src/lib/endpoints.ts
+fetch( = app/web/src/lib/preview.ts
+fetch( = app/web/src/lib/thumb-demo.ts
+# The updater's install path: start_install and fetch(), the signed installer download
+# (docs/privacy.md, outbound row 3).
+fetch( = app/src-tauri/src/update/mod.rs
+new WebSocket = app/web/src/lib/preview.ts
+new WebSocket = app/web/src/lib/stackPreview.ts
+new WebSocket = app/web/src/views/scenes/useGroupPreview.ts
+new WebSocket = app/web/src/views/scenes/useLightFeed.ts
+plugin:opener|open_url = app/web/src/lib/host.ts
+# Setup's pinned OpenRGB download. The pin script is shipped but setup never runs it.
+Invoke-WebRequest = installer/lib.ps1
+Invoke-WebRequest = installer/pin-openrgb.ps1
+# The Tauri CSP allows the editor's loopback socket scheme.
+ws:// = app/src-tauri/tauri.conf.json

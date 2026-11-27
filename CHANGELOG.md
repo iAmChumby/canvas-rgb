@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - Help & About: a new page with the app's version, build, Windows edition and service version, a scrubbed copy of the support report, and links to the docs, source, release notes, privacy and credits. (#574)
+- Docs: `docs/privacy.md` lists, in plain words and with file-by-file evidence, the app's network requests — the daily update check (including a probe of a failed feed), the optional experimental feed, the signed installer, the OpenRGB download during setup and a shipped setup helper that downloads only when run by hand — and everything that stays local. The site is out of scope. (#581)
 
 ## [0.20.0] - 2026-11-26
 
