@@ -1315,7 +1315,7 @@ pub fn status(app: &App) -> canvas_proto::api::DraftStatus {
             lease_remaining_ms: 0,
             heartbeat_ms,
             lease_ms,
-            note: app.draft.last_note(),
+            note: crate::api::scrub_errors::scrub_optional(app, app.draft.last_note()),
             applied: None,
             epoch: None,
             seq: None,
