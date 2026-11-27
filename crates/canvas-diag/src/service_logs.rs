@@ -360,6 +360,7 @@ mod windows_tests {
 
     /// A directory junction needs no Developer Mode or elevation (unlike symlink_dir).
     fn junction(target: &Path, link: &Path) -> std::io::Result<()> {
+        // token: the current user's, not elevated (a test making a junction with mklink).
         let output = std::process::Command::new("cmd")
             .args(["/c", "mklink", "/J"])
             .arg(link)
