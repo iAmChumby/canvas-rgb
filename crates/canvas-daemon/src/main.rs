@@ -108,23 +108,6 @@ const BLACK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 const SERVICE_NOTICE_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 const ENGINE_STOP_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
 const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
-/// What safe start puts on the lights: one in-memory scene of every light playing Breathing.
-/// Nothing is saved. If the effect cannot be built, one steady colour is painted and the status
-/// names that instead.
-async fn play_safe_lights(app: &std::sync::Arc<App>) {
-    const STEADY: canvas_proto::Rgb8 = canvas_proto::Rgb8::new(40, 90, 160);
-    match canvas_daemon::scenes::play_builtin_on_all(app, "breathing").await {
-        Ok(()) => {
-            *app.safe_effect.lock().unwrap_or_else(|e| e.into_inner()) = Some("breathing".into());
-        }
-        Err(why) => {
-            tracing::warn!(error = %why, "safe start could not build Breathing; painting one steady colour");
-            app.identify.paint_solid(app.engine.as_ref(), STEADY);
-            *app.safe_effect.lock().unwrap_or_else(|e| e.into_inner()) = Some("steady-color".into());
-        }
-    }
-}
-
 /// The daemon's main loop. Returns the process exit code.
 ///
 /// `fakes` is the debug-only fakes mode (#199): every real touchpoint is
@@ -283,9 +266,6 @@ async fn daemon_main(fakes: bool) -> Exit {
     // Normal - detection that cannot prove a crash must not turn the lights safe.
     let mode = canvas_daemon::pipe_client::read_start_decision(&app).await;
     let safe = mode == canvas_proto::api::SafeStartMode::Safe;
-    if safe {
-        canvas_daemon::pipe_client::read_fan_hold(&app).await;
-    }
 
     // The peripherals the owner allowed are opened; the others stay closed. In fakes mode this
     // applies to the in-memory fakes, so a saved access is honoured there too (#243).
@@ -307,11 +287,9 @@ async fn daemon_main(fakes: bool) -> Exit {
 
     tracing::info!(version = %canvas_daemon::version(), "canvas-rgbd is starting");
 
-    if safe {
-        // Safe start runs no user HTML effect, no stack and no saved scene. Instead one
-        // in-memory scene of every light plays the built-in Breathing effect.
-        play_safe_lights(&app).await;
-    } else {
+    // Safe start runs no user HTML effect, no stack and no saved scene. Every apply, the first
+    // device list's included, puts the in-memory Breathing scene on the lights instead.
+    if !safe {
         // The user HTML effects are listed before the API answers; the watcher keeps them current.
         app.user_effects.rescan(&app.effects_dir);
         // The stacks are read again now the effects folder is known: a stack's name may not be a

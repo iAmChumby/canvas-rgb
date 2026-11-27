@@ -559,8 +559,12 @@ pub struct App {
     /// The status field every surface reads. Built once when the mode is latched, with the
     /// fan line updated from the first fan status in safe mode.
     pub safe_start: Mutex<Option<SafeStart>>,
-    /// The built-in effect playing in safe mode, or `None` when the fallback solid is in use.
+    /// The effect safe mode has on the lights, or `None` while there is no light to play on.
     pub safe_effect: Mutex<Option<String>>,
+    /// The built-in effect safe mode plays: Breathing. A test names one that cannot be built.
+    pub safe_builtin: Mutex<String>,
+    /// Set once Breathing could not be built: safe mode shows one steady colour from then on.
+    pub safe_fallback: std::sync::atomic::AtomicBool,
     /// SignalRGB conflicts, refreshed every 5 s.
     pub conflicts: tokio::sync::RwLock<Vec<canvas_proto::api::Conflict>>,
     /// Where OpenRGB is, as the daemon sees it.
@@ -760,6 +764,8 @@ impl App {
             last_exit: Mutex::new(LastExit::Unknown),
             safe_start: Mutex::new(None),
             safe_effect: Mutex::new(None),
+            safe_builtin: Mutex::new("breathing".into()),
+            safe_fallback: std::sync::atomic::AtomicBool::new(false),
             conflicts: tokio::sync::RwLock::new(Vec::new()),
             openrgb: tokio::sync::RwLock::new(LinkState::Down),
             shutting_down: AtomicU32::new(0),
@@ -831,8 +837,14 @@ impl App {
         *self.last_exit.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Latches the first `Hello`'s decision. Later replies never change it mid-run.
+    /// Latches the first `Hello`'s decision with no record from the service.
     pub fn latch_start(&self, mode: SafeStartMode, last_exit: LastExit) {
+        self.latch_start_from(mode, last_exit, None);
+    }
+
+    /// Latches the first `Hello`'s decision. Later replies never change it mid-run. The reason,
+    /// the streak and since when are the service's record; with none, they read as unknown.
+    pub fn latch_start_from(&self, mode: SafeStartMode, last_exit: LastExit, record: Option<SafeStart>) {
         let mut slot = self.start_mode.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_some() {
             return;
@@ -840,32 +852,27 @@ impl App {
         *slot = Some(mode);
         drop(slot);
         *self.last_exit.lock().unwrap_or_else(|e| e.into_inner()) = last_exit;
-        if mode == SafeStartMode::Safe {
-            // The service's Hello carries only the mode and the last verdict (spine #577).
-            // A crash that ended the last run gets `UncleanOnce`; a deliberate choice from
-            // Help & About ends with a planned verdict and reads as `UserChose`.
-            let reason = if last_exit == LastExit::Unclean {
-                Some(canvas_proto::api::SafeStartReason::UncleanOnce)
-            } else {
-                Some(canvas_proto::api::SafeStartReason::UserChose)
-            };
-            *self.safe_start.lock().unwrap_or_else(|e| e.into_inner()) = Some(SafeStart {
+        *self.safe_start.lock().unwrap_or_else(|e| e.into_inner()) = (mode == SafeStartMode::Safe).then(|| {
+            let record = record.unwrap_or(SafeStart {
                 active: true,
-                reason,
-                unclean_streak: u32::from(last_exit == LastExit::Unclean),
+                reason: None,
+                unclean_streak: 0,
                 since: None,
                 fans_on_bios: None,
             });
-        } else {
-            *self.safe_start.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        }
+            SafeStart { active: true, fans_on_bios: None, ..record }
+        });
     }
 
-    /// The service's answer to `EnterSafeStart`: whether every header is on BIOS control.
-    pub fn set_fans_on_bios(&self, on_bios: Option<bool>) {
-        if let Some(status) = self.safe_start.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            status.fans_on_bios = on_bios;
+    /// Whether every fan header is on BIOS control, from the latest fan status. Unknown while
+    /// the service is not answering or has listed no header.
+    async fn fans_on_bios(&self) -> Option<bool> {
+        if self.service_down_ms.load(Ordering::SeqCst) != 0 {
+            return None;
         }
+        let fans = self.fans.read().await;
+        let headers = &fans.as_ref()?.headers;
+        (!headers.is_empty()).then(|| headers.iter().all(|h| h.on_bios))
     }
 
     /// The status snapshot a surface reads, with the fan line the service confirmed.
@@ -1048,11 +1055,17 @@ impl App {
         // #577: in safe start the synthetic scene is what is actually on the lights, and the
         // saved scene is not run. The status names what plays, not what would play after a
         // restart. Nothing here is written to the store.
-        let safe = self.safe_start_status();
+        let mut safe = self.safe_start_status();
+        if let Some(safe) = safe.as_mut() {
+            safe.fans_on_bios = self.fans_on_bios().await;
+        }
         let (active_scene, active_effects) = if safe.as_ref().is_some_and(|s| s.active) {
             let effect = self.safe_effect.lock().unwrap_or_else(|e| e.into_inner()).clone();
             (
-                Some(canvas_proto::api::SceneRef { id: "safe-start".into(), name: "Safe start".into() }),
+                Some(canvas_proto::api::SceneRef {
+                    id: crate::scenes::SAFE_SCENE.into(),
+                    name: crate::scenes::safe_scene_name(self.safe_fallback.load(Ordering::SeqCst)).into(),
+                }),
                 effect.into_iter().collect::<Vec<_>>(),
             )
         } else {

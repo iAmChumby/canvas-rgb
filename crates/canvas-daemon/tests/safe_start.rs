@@ -130,8 +130,8 @@ async fn the_mode_is_latched_from_the_first_hello() {
     assert_eq!(app.last_exit(), LastExit::Unclean);
     let status = app.safe_start_status().unwrap();
     assert!(status.active);
-    assert_eq!(status.reason, Some(canvas_proto::api::SafeStartReason::UncleanOnce));
-    assert_eq!(status.unclean_streak, 1);
+    assert_eq!(status.reason, None, "no record from the service: nothing is guessed");
+    assert_eq!(status.unclean_streak, 0);
 
     let hello_seen = Arc::new(Mutex::new(0));
     Arc::get_mut(&mut app).unwrap().pipe = Arc::new(StubPipe {
@@ -153,9 +153,8 @@ async fn a_safe_mode_plays_breathing_on_every_saved_light_without_writing_the_st
         store.scenes = scenes.clone();
     }
     app.latch_start(SafeStartMode::Safe, LastExit::Unclean);
-    *app.safe_effect.lock().unwrap() = Some("breathing".into());
 
-    canvas_daemon::scenes::play_builtin_on_all(&app, "breathing").await.unwrap();
+    canvas_daemon::scenes::apply_active(&app, false).await;
     assert_eq!(engine.scene.lock().unwrap().len(), 1);
     assert_eq!(engine.scene.lock().unwrap()[0].1.as_deref(), Some("breathing"));
     assert_eq!(engine.scene_lights.lock().unwrap().len(), lights.lights.len());
@@ -244,6 +243,7 @@ async fn the_put_answers_before_the_service_sees_the_relaunch() {
         entered: entered_tx,
         release: Arc::new(tokio::sync::Mutex::new(Some(release_rx))),
     });
+    app.latch_start(SafeStartMode::Safe, LastExit::Unclean);
     let router = api::router(app.clone());
 
     let body = serde_json::to_string(&SafeStartPut { mode: SafeStartMode::Normal }).unwrap();
@@ -270,4 +270,130 @@ async fn the_put_answers_before_the_service_sees_the_relaunch() {
 
     // The daemon does not run quit_sequence for this: no DaemonQuitting goes over the pipe.
     assert!(!matches!(*seen.lock().unwrap(), Some(PipeRequest::DaemonQuitting)));
+}
+
+// ---- #577 fix pass 1 ----
+
+async fn saved_solid(app: &Arc<App>) {
+    let (lights, scenes) = a_scene("rainbow_wave", &Props::new());
+    let mut store = app.store.write().await;
+    store.lights = lights;
+    store.scenes = scenes;
+}
+
+fn playing(engine: &FakeEngine) -> Vec<Option<String>> {
+    engine.scene.lock().unwrap().iter().map(|g| g.1.clone()).collect()
+}
+
+#[tokio::test]
+async fn b3_safe_mode_never_applies_the_saved_scene() {
+    let (app, engine, _home) = build();
+    saved_solid(&app).await;
+    app.latch_start(SafeStartMode::Safe, LastExit::Unclean);
+    canvas_daemon::scenes::apply_for_devices(&app).await;
+    assert_eq!(playing(&engine), vec![Some("breathing".to_string())], "after a device list");
+    canvas_daemon::scenes::apply_active(&app, true).await;
+    assert_eq!(playing(&engine), vec![Some("breathing".to_string())], "after an activation");
+}
+
+#[tokio::test]
+async fn b4_breathing_starts_when_the_first_lights_arrive() {
+    let (app, engine, _home) = build();
+    app.latch_start(SafeStartMode::Safe, LastExit::Unclean);
+    canvas_daemon::scenes::apply_for_devices(&app).await;
+    assert!(engine.solid_writes.lock().unwrap().is_empty(), "no lights yet is not a failure");
+    saved_solid(&app).await;
+    canvas_daemon::scenes::apply_for_devices(&app).await;
+    assert_eq!(playing(&engine), vec![Some("breathing".to_string())]);
+    assert!(engine.solid_writes.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn m3_the_services_record_and_the_live_fan_status_feed_the_status() {
+    let (mut app, _engine, _home) = build();
+    Arc::get_mut(&mut app).unwrap().pipe = Arc::new(RecordPipe);
+    pipe_client::read_start_decision(&app).await;
+    let safe = app.status().await.unwrap().safe_start.unwrap();
+    assert_eq!(safe.reason, Some(canvas_proto::api::SafeStartReason::CrashLoop));
+    assert_eq!(safe.unclean_streak, 3);
+    assert_eq!(safe.since.as_deref(), Some("2026-11-27T10:00:00Z"));
+    assert_eq!(safe.fans_on_bios, None, "no fan status yet is unknown");
+
+    let mut fans = canvas_daemon::fakes::fake_fans_status();
+    fans.headers.iter_mut().for_each(|h| h.on_bios = false);
+    *app.fans.write().await = Some(fans.clone());
+    assert_eq!(app.status().await.unwrap().safe_start.unwrap().fans_on_bios, Some(false));
+    fans.headers.iter_mut().for_each(|h| h.on_bios = true);
+    *app.fans.write().await = Some(fans);
+    assert_eq!(app.status().await.unwrap().safe_start.unwrap().fans_on_bios, Some(true));
+}
+
+struct RecordPipe;
+
+#[async_trait::async_trait]
+impl PipeLink for RecordPipe {
+    async fn exchange(&self, _: &PipeRequest) -> Result<PipeResponse, PipeError> {
+        Ok(PipeResponse::Hello {
+            protocol: PROTOCOL_VERSION,
+            service_version: "test".into(),
+            start_mode: SafeStartMode::Safe,
+            last_exit: LastExit::Unclean,
+            safe_start: Some(canvas_proto::api::SafeStart {
+                active: true,
+                reason: Some(canvas_proto::api::SafeStartReason::CrashLoop),
+                unclean_streak: 3,
+                since: Some("2026-11-27T10:00:00Z".into()),
+                fans_on_bios: None,
+            }),
+        })
+    }
+}
+
+#[tokio::test]
+async fn l4_the_pipe_call_starts_only_after_the_reply_is_written() {
+    let (mut app, _engine, _home) = build();
+    app.latch_start(SafeStartMode::Safe, LastExit::Unclean);
+    let seen = Arc::new(Mutex::new(None));
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    Arc::get_mut(&mut app).unwrap().pipe = Arc::new(HeldPipe {
+        seen: seen.clone(),
+        entered: entered_tx,
+        release: Arc::new(tokio::sync::Mutex::new(None)),
+    });
+    let body = serde_json::to_string(&SafeStartPut { mode: SafeStartMode::Normal }).unwrap();
+    let request = Request::builder()
+        .method("PUT")
+        .uri(canvas_proto::api::routes::SAFE_START)
+        .header("host", "127.0.0.1:9430")
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let response = api::router(app.clone()).oneshot(request).await.unwrap();
+    // The reply exists but nothing has written it yet.
+    // A task that did not wait for the body would run within these turns.
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+    assert!(seen.lock().unwrap().is_none(), "the service was told before the reply was written");
+    axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+    tokio::time::timeout(WAIT, entered_rx.recv()).await.expect("the pipe message was never sent").unwrap();
+    assert!(matches!(*seen.lock().unwrap(), Some(PipeRequest::LeaveSafeStart)));
+}
+
+#[tokio::test]
+async fn m4_a_breathing_failure_shows_a_steady_colour_that_status_names() {
+    let (app, engine, _home) = build();
+    saved_solid(&app).await;
+    app.latch_start(SafeStartMode::Safe, LastExit::Unclean);
+    *app.safe_builtin.lock().unwrap() = "no-such-effect".into();
+    canvas_daemon::scenes::apply_for_devices(&app).await;
+    assert_eq!(playing(&engine), vec![Some("solid".to_string())]);
+    assert_eq!(
+        engine.scene.lock().unwrap()[0].2.get("color"),
+        Some(&canvas_proto::props::PropValue::Color(canvas_proto::Rgb8::new(40, 90, 160)))
+    );
+    let status = app.status().await.unwrap();
+    assert_eq!(status.active_scene.unwrap().name, "One steady colour, blue");
+    assert_eq!(status.active_effects, vec!["solid".to_string()]);
 }

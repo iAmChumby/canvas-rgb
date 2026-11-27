@@ -106,36 +106,21 @@ pub async fn read_start_decision(app: &std::sync::Arc<crate::state::App>) -> can
         protocol: canvas_proto::pipe::PROTOCOL_VERSION,
         daemon_pid: std::process::id(),
     };
-    let (mode, last_exit) = match tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&hello)).await {
-        Ok(Ok(PipeResponse::Hello { start_mode, last_exit, .. })) => (start_mode, last_exit),
+    let (mode, last_exit, record) = match tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&hello)).await {
+        Ok(Ok(PipeResponse::Hello { start_mode, last_exit, safe_start, .. })) => (start_mode, last_exit, safe_start),
         Ok(other) => {
             tracing::debug!(response = ?other, "the service answered the start hello differently; starting normally");
-            (SafeStartMode::Normal, LastExit::Unknown)
+            (SafeStartMode::Normal, LastExit::Unknown, None)
         }
         Err(_) => {
             tracing::info!("the service did not answer before the start hello timed out; starting normally");
-            (SafeStartMode::Normal, LastExit::Unknown)
+            (SafeStartMode::Normal, LastExit::Unknown, None)
         }
     };
-    app.latch_start(mode, last_exit);
+    app.latch_start_from(mode, last_exit, record);
     // The latch, not this reply, is the mode for the rest of the run: an earlier reply in the
     // same run cannot be overridden by a later one.
     app.start_mode()
-}
-
-/// In safe start, the fan line comes from the headers the service actually reports, not from a
-/// claim: no reply is unknown, a header still manual is "not confirmed", all on BIOS is confirmed.
-pub async fn read_fan_hold(app: &std::sync::Arc<crate::state::App>) {
-    use canvas_proto::pipe::{PipeRequest, PipeResponse};
-    let reply = tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&PipeRequest::FanStatus)).await;
-    if let Ok(Ok(PipeResponse::FanStatus { status })) = reply {
-        let on_bios = if status.headers.is_empty() {
-            None
-        } else {
-            Some(status.headers.iter().all(|h| h.on_bios))
-        };
-        app.set_fans_on_bios(on_bios);
-    }
 }
 
 /// Sends one request to the service through the app's pipe.
