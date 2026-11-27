@@ -184,7 +184,7 @@ jobs:
 
       # The notices are build outputs: generated here, copied from app/web/public
       # into app/web/out by next build, and never hand-edited (#578).
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
         with:
           tool: cargo-about@0.9.3
 
@@ -413,7 +413,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       # cargo-deny, pinned to the version deny.toml is written for.
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -427,7 +427,7 @@ jobs:
       # cargo-about, pinned to the version approved for #578. It generates the
       # Rust notices; --fail exits non-zero on a licence outside about.toml's
       # accepted list (a copy of deny.toml's), so this job is the notice gate.
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
         with:
           tool: cargo-about@0.9.3
 
