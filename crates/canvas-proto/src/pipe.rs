@@ -82,6 +82,11 @@ pub enum PipeResponse {
         /// How the previous daemon run ended (#577). An older service sends none: Unknown.
         #[serde(default)]
         last_exit: crate::api::LastExit,
+        /// The service's safe-start record for this run (#577): why safe start is on, the crash
+        /// streak and since when. `fans_on_bios` is not set here; the daemon measures it from the
+        /// fan status. `None` when the mode is Normal, and from an older service.
+        #[serde(default)]
+        safe_start: Option<crate::api::SafeStart>,
     },
     Ok,
     FanStatus { status: FansStatus },

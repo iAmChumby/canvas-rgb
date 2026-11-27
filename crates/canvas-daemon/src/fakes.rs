@@ -758,6 +758,7 @@ impl crate::pipe_client::PipeLink for FakePipeLink {
                 } else {
                     canvas_proto::api::LastExit::Unknown
                 },
+                safe_start: None,
             }),
             PipeRequest::FanStatus => Ok(PipeResponse::FanStatus { status: fake_fans_status() }),
             PipeRequest::OpenRgbState => Ok(PipeResponse::OpenRgb {

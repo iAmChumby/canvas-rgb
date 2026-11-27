@@ -73,6 +73,7 @@ impl PipeLink for StubPipe {
                 service_version: "test".into(),
                 start_mode: self.mode,
                 last_exit: self.last,
+                safe_start: None,
             });
         }
         Ok(PipeResponse::Ok)
@@ -219,6 +220,7 @@ impl PipeLink for HeldPipe {
                 service_version: "test".into(),
                 start_mode: SafeStartMode::Normal,
                 last_exit: LastExit::Unknown,
+                safe_start: None,
             });
         }
         *self.seen.lock().unwrap() = Some(request.clone());

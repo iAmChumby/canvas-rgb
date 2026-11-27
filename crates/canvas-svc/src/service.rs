@@ -118,6 +118,8 @@ impl Core {
                     service_version: env!("CARGO_PKG_VERSION").into(),
                     start_mode,
                     last_exit,
+                    // #577: the service's record (reason, streak, since) is wired in the fix pass.
+                    safe_start: None,
                 }
             }
             PipeRequest::Heartbeat => {
