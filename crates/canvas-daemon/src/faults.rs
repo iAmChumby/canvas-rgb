@@ -82,9 +82,9 @@ fn fan_note(fans: &FansStatus, dismissed: &[String]) -> Option<Fault> {
             "pawn_io_unavailable",
             NoteWords {
                 affected: "Fan headers can't be driven.",
-                cause: Some("PawnIO, the driver canvas-rgb uses to reach the fan chip, isn't installed or didn't load."),
+                cause: Some("The PawnIO driver, which canvas-rgb needs to reach the fan chip, is missing or did not load."),
                 fix: "Install PawnIO, then restart canvas-rgb.",
-                ignore_if: Some("You leave your fans to the BIOS."),
+                ignore_if: Some("Your motherboard sets the fans and you do not need canvas-rgb to."),
             },
             dismissed,
         ),
@@ -93,9 +93,9 @@ fn fan_note(fans: &FansStatus, dismissed: &[String]) -> Option<Fault> {
             None,
             "chip_not_found",
             NoteWords {
-                affected: "Fan headers can't be driven: canvas-rgb found no supported fan chip on this board.",
-                cause: Some("The board has no NCT6687D fan chip."),
-                fix: "Nothing needs installing; GPU fans are still controlled.",
+                affected: "Fan headers can't be driven.",
+                cause: Some("canvas-rgb found no supported fan chip on this board."),
+                fix: "GPU fans can still be set from canvas-rgb.",
                 ignore_if: Some("Your motherboard has no NCT6687D chip; GPU fans are still controlled."),
             },
             dismissed,
@@ -118,7 +118,7 @@ pub fn build(openrgb: LinkState, fans: Option<&FansStatus>, dismissed: &[String]
             "down",
             NoteWords {
                 affected: "Lights reached through OpenRGB are not available.",
-                cause: None,
+                cause: Some("OpenRGB is not running, or its port is busy or refused."),
                 fix: "Start OpenRGB.",
                 ignore_if: Some("You have no lights that need OpenRGB."),
             },
@@ -128,10 +128,25 @@ pub fn build(openrgb: LinkState, fans: Option<&FansStatus>, dismissed: &[String]
     out
 }
 
+/// The number of store saves started, for the poll-path test that must see none (#580 C6).
+pub fn store_save_count() -> usize {
+    crate::store_io::save_count()
+}
+
+/// Resets the diagnostic counter at the start of a test.
+pub fn reset_store_save_count() {
+    crate::store_io::reset_save_count();
+}
+
 /// Clears one dismissal key after an observed healthy state, and writes `config.toml` only when
 /// the key was actually stored (R4, R16). A connecting service, an empty fans cache and an
 /// unchecked chip never call this, so a restart cannot revive a note the owner hid.
 pub async fn clear_if_healthy(app: &Arc<App>, dismissed_key: &str) {
+    // C6: a healthy poll that has no key to clear must not take the writer lock or clone the
+    // store at all. This read is the whole cost of the common case.
+    if !app.store.read().await.config.dismissed_faults.iter().any(|k| k == dismissed_key) {
+        return;
+    }
     let wrote = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&wrote);
     let key = dismissed_key.to_string();
@@ -218,11 +233,12 @@ mod tests {
         bad.chip_problem = Some(ChipProblem::PawnIoUnavailable);
         let faults = build(LinkState::Connected, Some(&bad), &[]);
         assert_eq!(faults[0].kind, FaultKind::FanChip);
-        assert!(faults[0].cause.as_deref().unwrap_or("").contains("isn't installed or didn't load"));
+        assert!(faults[0].cause.as_deref().unwrap_or("").contains("is missing or did not load"));
         assert_eq!(faults[0].fix, "Install PawnIO, then restart canvas-rgb.");
         bad.chip_problem = Some(ChipProblem::ChipNotFound);
         let faults = build(LinkState::Connected, Some(&bad), &[]);
-        assert!(faults[0].affected.contains("no supported fan chip on this board"));
+        assert_eq!(faults[0].affected, "Fan headers can't be driven.");
+        assert!(faults[0].cause.as_deref().unwrap_or("").contains("no supported fan chip on this board"));
         assert!(faults[0].ignore_if.as_deref().unwrap_or("").contains("GPU fans are still controlled"));
     }
 

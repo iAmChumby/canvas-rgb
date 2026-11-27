@@ -105,17 +105,19 @@ export function StatusStrip({
   // On a phone the row has room for the link's name, not for the whole sentence. The full
   // words are the button's own label, so nothing is lost.
   const phone = useMediaQuery(PHONE_QUERY);
-  // #580 R2, R14: the mark's text carries the count of hardware notes. A dismissed note still
-  // counts, because its condition is still there; the page notes are the only ones that hide.
-  const warnings = list.filter((p) => p.fault).length;
-  const fullText = list[0]?.text ?? ALL_GOOD;
+  // #580 R2, R14, C1, C2: the mark counts every note, dismissed or not, and says so when the
+  // counted notes are all hidden. The count does not swallow the first problem: the popover shows
+  // the whole list whenever the mark shows a count.
+  const faultEntries = list.filter((p) => p.fault);
+  const warnings = faultEntries.length;
+  const allDismissed = warnings > 0 && faultEntries.every((p) => p.dismissed);
+  const countText = `${warnings} warning${warnings === 1 ? "" : "s"}${allDismissed ? ", dismissed" : ""}`;
   const markText = warnings > 0
-    ? phone
-      ? String(warnings)
-      : `${warnings} warning${warnings === 1 ? "" : "s"}`
+    ? (phone ? String(warnings) : countText)
     : list[0]
       ? (phone ? (list[0].short ?? list[0].text) : list[0].text)
       : ALL_GOOD;
+  const fullText = warnings > 0 ? markText : (list[0]?.text ?? ALL_GOOD);
   // The swatch's own name, for the widths where the effect's name is dropped from the row.
   // Before the daemon has answered there is nothing to name: the row says why, never a bare dash.
   // The daemon that is up with its engine not answering (#241) is not offline: its engine is.
@@ -129,6 +131,18 @@ export function StatusStrip({
   const swatchLabel = nowName === "—" ? "Nothing is running" : nowName;
   // Each link and what it is doing: the panel shows them all, one after another.
   const linkList = links(status, statusFault);
+  // With a count the mark is a summary, so the panel has to carry every problem including the
+  // first; without one the mark already says the first problem and the panel adds the rest.
+  const shownProblems = warnings > 0 ? list : list.slice(1);
+
+  const showAgain = async (key: string) => {
+    try {
+      await api.showFaultAgain(key);
+      await refreshStatus();
+    } catch (e) {
+      notify(messageOf(e), "warn");
+    }
+  };
 
   const togglePower = async () => {
     if (!status) return;
@@ -195,7 +209,7 @@ export function StatusStrip({
             <span className="strip-mark-icon" data-count={warnings > 0 ? String(warnings) : undefined} aria-hidden="true">
               {markIcon(tone)}
             </span>
-            <span className="strip-mark-text">{markText}</span>
+            <span className="strip-mark-text" data-muted={allDismissed ? "true" : undefined}>{markText}</span>
           </Crossfade>
         </button>
 
@@ -261,11 +275,16 @@ export function StatusStrip({
             </li>
           ))}
         </ul>
-        {list.length > 1 && (
+        {shownProblems.length > 0 && (
           <ul className="strip-details-problems">
-            {list.slice(1).map((p) => (
-              <li key={p.text} data-tone={p.tone}>
-                {p.text}
+            {shownProblems.map((p) => (
+              <li key={`${p.text}:${p.key ?? ""}`} data-tone={p.tone} data-dismissed={p.dismissed ? "true" : undefined}>
+                <span>{p.text}</span>
+                {p.dismissed && p.key && (
+                  <Button size="sm" variant="ghost" onClick={() => void showAgain(p.key as string)}>
+                    Show again
+                  </Button>
+                )}
               </li>
             ))}
           </ul>

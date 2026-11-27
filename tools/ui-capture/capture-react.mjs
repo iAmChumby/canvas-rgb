@@ -23,9 +23,10 @@
 //   UI_CAPTURE_TOKEN_FILE / FAKE_TOKEN_FILE  test token path
 //       (default .build/fake-home/api-token)
 //   UI_CAPTURE_FAULTS  JSON {"openrgb":"down","fan":"pawn_io_unavailable","dismissed":false}
-//       #580: patches only the two daemon answers the notes read, so the real fake daemon still
+//       #580: patches only the daemon answers the notes read, so the real fake daemon still
 //       serves everything else and no real hardware or fan chip is touched. `fan` may be
-//       pawn_io_unavailable or chip_not_found; `dismissed` hides the page notes, not the strip.
+//       pawn_io_unavailable or chip_not_found; `openrgb` may be down or connecting; `empty`
+//       empties the device list; `dismissed` hides the page notes, not the strip.
 
 import { createRequire } from "node:module";
 import http from "node:http";
@@ -94,18 +95,16 @@ function injectedFaults() {
       kind: "fan_chip",
       key: chipNotFound ? "1111222233334444" : "aaaabbbbccccdddd",
       device: null,
-      affected: chipNotFound
-        ? "Fan headers can't be driven: canvas-rgb found no supported fan chip on this board."
-        : "Fan headers can't be driven.",
+      affected: "Fan headers can't be driven.",
       cause: chipNotFound
-        ? "The board has no NCT6687D fan chip."
-        : "PawnIO, the driver canvas-rgb uses to reach the fan chip, isn't installed or didn't load.",
+        ? "canvas-rgb found no supported fan chip on this board."
+        : "The PawnIO driver, which canvas-rgb needs to reach the fan chip, is missing or did not load.",
       fix: chipNotFound
-        ? "Nothing needs installing; GPU fans are still controlled."
+        ? "GPU fans can still be set from canvas-rgb."
         : "Install PawnIO, then restart canvas-rgb.",
       ignore_if: chipNotFound
         ? "Your motherboard has no NCT6687D chip; GPU fans are still controlled."
-        : "You leave your fans to the BIOS.",
+        : "Your motherboard sets the fans and you do not need canvas-rgb to.",
       dismissed: FAULTS.dismissed === true,
     });
   }
@@ -115,7 +114,7 @@ function injectedFaults() {
       key: "0123456789abcdef",
       device: null,
       affected: "Lights reached through OpenRGB are not available.",
-      cause: null,
+      cause: "OpenRGB is not running, or its port is busy or refused.",
       fix: "Start OpenRGB.",
       ignore_if: "You have no lights that need OpenRGB.",
       dismissed: FAULTS.dismissed === true,
@@ -128,12 +127,18 @@ function injectedFaults() {
 async function injectFaults(page) {
   if (!FAULTS) return;
   const faults = injectedFaults();
-  await page.route(/127\.0\.0\.1:\d+\/api\/v1\/(status|fans)(?:\?|$)/, async (route) => {
+  await page.route(/127\.0\.0\.1:\d+\/api\/v1\/(status|fans|devices)(?:\?|$)/, async (route) => {
     const answer = await route.fetch();
     const body = await answer.json();
     if (route.request().url().includes("/api/v1/status")) {
       body.openrgb = FAULTS.openrgb ?? body.openrgb;
       body.faults = faults;
+      if (FAULTS.empty) {
+        body.devices_connected = 0;
+        body.devices_total = 0;
+      }
+    } else if (route.request().url().includes("/api/v1/devices") && FAULTS.empty) {
+      body.devices = [];
     } else if (FAULTS.fan) {
       body.chip_problem = FAULTS.fan;
       body.chip_checked = true;

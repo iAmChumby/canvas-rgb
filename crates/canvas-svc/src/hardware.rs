@@ -1,7 +1,7 @@
 //! Opens the real fan chip and temperature sources. Every failure becomes "unavailable" and
 //! is logged; the service still runs, with the fan headers absent from status.
 
-use crate::chip::{FanChip, Nct6687, ChipError, MSI_ALT1_MAP};
+use crate::chip::{ChipError, FanChip, Nct6687, PortIo, MSI_ALT1_MAP};
 use crate::gpu_fans::{CompositeChip, GpuFanApi, NvmlFans};
 use crate::pawnio::{pawnio_home, PawnIoError, PawnIoPortIo, TctlSource};
 use crate::temps::{NvmlSource, TempReader};
@@ -25,7 +25,7 @@ pub struct Hardware {
 
 /// Why the NCT half could not be opened (#580 R1, R17). The human text stays for the log; the
 /// `ChipProblem` is the typed answer that crosses the pipe.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ChipOpenError {
     #[error("PawnIO unavailable: {0}")]
     PawnIoUnavailable(String),
@@ -64,15 +64,27 @@ fn merge_problems(a: Option<ChipProblem>, b: Option<ChipProblem>) -> Option<Chip
 
 /// The problem from the ports that failed, in port order. `None` for a port means it was not
 /// tried because an earlier port found a chip; the open then has no problem at all.
-fn chip_problem_from_ports(outcomes: [Option<ChipOpenError>; 2]) -> Option<ChipProblem> {
-    // A found chip ends the open with `Ok`; nothing about the other ports matters then.
-    if outcomes.iter().any(Option::is_none) {
-        return None;
-    }
+fn chip_problem_from_ports(outcomes: &[ChipOpenError]) -> Option<ChipProblem> {
+    // A fold over what was actually tried: no fixed port count and nothing to panic on (C7).
     outcomes
-        .into_iter()
-        .flatten()
-        .fold(None, |problem, e| merge_problems(problem, Some(chip_problem_from(&e))))
+        .iter()
+        .fold(None, |problem, e| merge_problems(problem, Some(chip_problem_from(e))))
+}
+
+/// Opens one Super I/O port. The real opener uses PawnIO; tests inject a fake (C8).
+pub trait SioOpener: Send {
+    fn open(&self, slot: u64, sio: u16) -> Result<Box<dyn PortIo>, ChipOpenError>;
+}
+
+/// The PawnIO implementation of [`SioOpener`], with the install directory from the environment.
+struct PawnIoOpener {
+    home: std::path::PathBuf,
+}
+
+impl SioOpener for PawnIoOpener {
+    fn open(&self, slot: u64, _sio: u16) -> Result<Box<dyn PortIo>, ChipOpenError> {
+        PawnIoPortIo::open(&self.home, slot).map(|io| Box::new(io) as Box<dyn PortIo>).map_err(ChipOpenError::from)
+    }
 }
 
 /// The chip open and the GPU threshold as one answer (#580 R17): the NCT problem is carried in
@@ -130,15 +142,20 @@ fn open_chip_and_threshold() -> ChipOpen {
 /// Opens the NCT6687D-R through PawnIO's LpcIO module and checks it with the detect path. Both
 /// Super I/O ports are tried, 0x2E first; the errors of both are reported.
 fn open_nct() -> Result<Box<dyn FanChip>, ChipOpenError> {
-    let home = pawnio_home();
+    open_nct_with(&PawnIoOpener { home: pawnio_home() })
+}
+
+/// The port loop, driven through an opener. A found chip returns early; otherwise the typed
+/// answer is folded from every failure actually seen, with no fixed port count (C7, C8).
+fn open_nct_with(opener: &dyn SioOpener) -> Result<Box<dyn FanChip>, ChipOpenError> {
     let mut errors = Vec::new();
     let mut outcomes = Vec::new();
     for (slot, sio) in crate::chip::SIO_PORTS.iter().enumerate() {
-        let io = match PawnIoPortIo::open(&home, slot as u64) {
+        let io = match opener.open(slot as u64, *sio) {
             Ok(io) => io,
             Err(e) => {
                 errors.push(format!("{sio:#x}: PawnIO LpcIO: {e}"));
-                outcomes.push(Some(ChipOpenError::from(e)));
+                outcomes.push(e);
                 continue;
             }
         };
@@ -146,17 +163,16 @@ fn open_nct() -> Result<Box<dyn FanChip>, ChipOpenError> {
             Ok(chip) => return Ok(Box::new(chip)),
             Err(e) => {
                 errors.push(format!("{sio:#x}: {e}"));
-                outcomes.push(Some(match chip_error_problem(&e) {
+                outcomes.push(match chip_error_problem(&e) {
                     ChipProblem::PawnIoUnavailable => ChipOpenError::PawnIoUnavailable(e.to_string()),
                     ChipProblem::ChipNotFound => ChipOpenError::ChipNotFound(e.to_string()),
-                }));
+                });
             }
         }
     }
-    // Both ports were tried and neither found a chip; the typed answer follows R17's rule. The
-    // human text keeps each port's detail for the log.
-    let problem = chip_problem_from_ports(outcomes.try_into().expect("two Super I/O ports"))
-        .unwrap_or(ChipProblem::ChipNotFound);
+    // No chip on any port; the typed answer follows R17's rule. The human text keeps each port's
+    // detail for the log.
+    let problem = chip_problem_from_ports(&outcomes).unwrap_or(ChipProblem::ChipNotFound);
     Err(match problem {
         ChipProblem::PawnIoUnavailable => ChipOpenError::PawnIoUnavailable(errors.join("; ")),
         ChipProblem::ChipNotFound => ChipOpenError::ChipNotFound(errors.join("; ")),
@@ -231,19 +247,63 @@ mod tests {
 
     #[test]
     fn every_nct_outcome_gives_the_documented_problem_r17() {
-        let available = || Some(ChipOpenError::PawnIoUnavailable("no driver".into()));
-        let missing = || Some(ChipOpenError::ChipNotFound("no chip".into()));
-        let found = || None; // the open returns the chip before the next port is tried
+        let available = ChipOpenError::PawnIoUnavailable("no driver".into());
+        let missing = ChipOpenError::ChipNotFound("no chip".into());
         // Both ports with no PawnIO: unavailable.
-        assert_eq!(chip_problem_from_ports([available(), available()]), Some(ChipProblem::PawnIoUnavailable));
+        assert_eq!(chip_problem_from_ports(&[available.clone(), available.clone()]), Some(ChipProblem::PawnIoUnavailable));
         // Either port with no PawnIO wins, even when the other found no chip.
-        assert_eq!(chip_problem_from_ports([missing(), available()]), Some(ChipProblem::PawnIoUnavailable));
-        assert_eq!(chip_problem_from_ports([available(), missing()]), Some(ChipProblem::PawnIoUnavailable));
+        assert_eq!(chip_problem_from_ports(&[missing.clone(), available.clone()]), Some(ChipProblem::PawnIoUnavailable));
+        assert_eq!(chip_problem_from_ports(&[available, missing.clone()]), Some(ChipProblem::PawnIoUnavailable));
         // No chip on both ports: chip not found.
-        assert_eq!(chip_problem_from_ports([missing(), missing()]), Some(ChipProblem::ChipNotFound));
-        // A chip on either port: no problem, whatever the earlier port reported.
-        assert_eq!(chip_problem_from_ports([found(), missing()]), None);
-        assert_eq!(chip_problem_from_ports([missing(), found()]), None);
-        assert_eq!(chip_problem_from_ports([found(), found()]), None);
+        assert_eq!(chip_problem_from_ports(&[missing.clone(), missing.clone()]), Some(ChipProblem::ChipNotFound));
+        // The loop folds whatever outcomes it saw, so no fixed array length is assumed (C7).
+        assert_eq!(chip_problem_from_ports(&[]), None);
+        assert_eq!(
+            chip_problem_from_ports(std::slice::from_ref(&missing)),
+            Some(ChipProblem::ChipNotFound)
+        );
+        assert_eq!(
+            chip_problem_from_ports(&[missing.clone(), missing.clone(), missing]),
+            Some(ChipProblem::ChipNotFound)
+        );
+    }
+
+    use std::io;
+
+    /// A Super I/O port that answers zero to every probe, so the detect path reports NotFound.
+    #[derive(Default)]
+    struct ZeroPort;
+
+    impl crate::chip::PortIo for ZeroPort {
+        fn read_port(&mut self, _port: u16) -> io::Result<u8> {
+            Ok(0)
+        }
+        fn write_port(&mut self, _port: u16, _value: u8) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The fake opener drives the same loop as PawnIO without opening a real port (C8).
+    struct FakeOpener {
+        first_port_unavailable: bool,
+    }
+
+    impl SioOpener for FakeOpener {
+        fn open(&self, slot: u64, _sio: u16) -> Result<Box<dyn crate::chip::PortIo>, ChipOpenError> {
+            if slot == 0 && self.first_port_unavailable {
+                return Err(ChipOpenError::PawnIoUnavailable("fake PawnIO failure".into()));
+            }
+            Ok(Box::new(ZeroPort))
+        }
+    }
+
+    #[test]
+    fn the_port_loop_itself_reports_the_problem_c8() {
+        let unavailable = FakeOpener { first_port_unavailable: true };
+        let error = open_nct_with(&unavailable).err().expect("no chip on a fake port");
+        assert_eq!(chip_problem_from(&error), ChipProblem::PawnIoUnavailable);
+        let not_found = FakeOpener { first_port_unavailable: false };
+        let error = open_nct_with(&not_found).err().expect("every fake port reports no chip");
+        assert_eq!(chip_problem_from(&error), ChipProblem::ChipNotFound);
     }
 }

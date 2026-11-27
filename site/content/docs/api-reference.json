@@ -3155,7 +3155,8 @@
       "title": "Dismiss fault",
       "area": "Settings and update",
       "methods": [
-        "POST"
+        "POST",
+        "DELETE"
       ],
       "pathParams": [
         {
@@ -3165,16 +3166,20 @@
         }
       ],
       "descriptions": {
-        "POST": "Hides one hardware note on every viewer. The note comes back when its cause clears and then returns."
+        "POST": "Hides one hardware note on every viewer. The note comes back when its cause clears and then returns.",
+        "DELETE": "Shows a hidden hardware note again while its condition is still active."
       },
       "examples": {
-        "POST": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X POST -H \"Authorization: Bearer $TOKEN\" \"http://127.0.0.1:9430/api/v1/faults/<key>/dismiss\""
+        "POST": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X POST -H \"Authorization: Bearer $TOKEN\" \"http://127.0.0.1:9430/api/v1/faults/<key>/dismiss\"",
+        "DELETE": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X DELETE -H \"Authorization: Bearer $TOKEN\" \"http://127.0.0.1:9430/api/v1/faults/<key>/dismiss\""
       },
       "requestType": {
-        "POST": "none"
+        "POST": "none",
+        "DELETE": "none"
       },
       "responseType": {
-        "POST": "JSON object"
+        "POST": "JSON object",
+        "DELETE": "JSON object"
       },
       "requestShape": {},
       "responseShape": {
@@ -3188,10 +3193,22 @@
               "meaning": "True when the note was hidden."
             }
           ]
+        },
+        "DELETE": {
+          "label": "JSON object",
+          "note": "The fields the daemon sends: the hardware note was shown again.",
+          "fields": [
+            {
+              "name": "ok",
+              "type": "boolean",
+              "meaning": "True when the note was shown again."
+            }
+          ]
         }
       },
       "queryParams": {
-        "POST": []
+        "POST": [],
+        "DELETE": []
       },
       "queryType": {}
     },

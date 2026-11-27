@@ -20,6 +20,8 @@ interface Row {
   verdict: Verdict;
   words: ReactNode;
   next: string;
+  /** The note's own "Ignore if" line, when there is one. */
+  ignoreIf?: string;
   detail?: ReactNode;
 }
 
@@ -55,6 +57,7 @@ export function DeviceChecklist() {
 
   const rows: Row[] = [];
   const openrgb = status?.openrgb ?? null;
+  const openRgbFault = status?.faults?.find((f) => f.kind === "open_rgb_down") ?? null;
   rows.push(
     openrgb === "connected"
       ? { label: "OpenRGB link", verdict: "OK", words: "OpenRGB is connected.", next: "Nothing needed here." }
@@ -62,8 +65,9 @@ export function DeviceChecklist() {
         ? {
             label: "OpenRGB link",
             verdict: "Problem",
-            words: "OpenRGB is not reachable, so its lights are missing.",
-            next: "Start OpenRGB, then try again.",
+            words: openRgbFault?.cause ?? "OpenRGB is not reachable, so its lights are missing.",
+            next: openRgbFault?.fix ?? "Start OpenRGB, then try again.",
+            ignoreIf: openRgbFault?.ignore_if ?? undefined,
           }
         : {
             label: "OpenRGB link",
@@ -112,6 +116,7 @@ export function DeviceChecklist() {
           verdict: "Problem",
           words: chipProblem.cause ?? chipProblem.affected,
           next: chipProblem.fix,
+          ignoreIf: chipProblem.ignore_if ?? undefined,
         }
       : !fans?.chip_checked
         ? {
@@ -145,7 +150,7 @@ export function DeviceChecklist() {
               <span className="fig">
                 {device.vid}:{device.pid}
               </span>
-              <span className="help-check-connected">{connected ? "connected" : "not seen"}</span>
+              <span className="help-check-connected">{connected ? "connected" : "not connected"}</span>
             </li>
           );
         })}
@@ -179,7 +184,14 @@ export function DeviceChecklist() {
                 <span className="help-check-verdict">{row.verdict}</span>
               </div>
               <p>{row.words}</p>
-              <p className="mute">Next: {row.next}</p>
+              <p className="mute">
+                <span className="help-check-label">Fix:</span> {row.next}
+              </p>
+              {row.ignoreIf && (
+                <p className="mute">
+                  <span className="help-check-label">Ignore if:</span> {row.ignoreIf}
+                </p>
+              )}
               {row.detail}
             </div>
           </li>

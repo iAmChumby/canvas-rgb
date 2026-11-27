@@ -193,3 +193,90 @@ async fn an_old_config_without_dismissed_faults_loads() {
     let text = std::fs::read_to_string(home.path.join("config.toml")).unwrap();
     assert!(!text.contains("dismissed_faults"));
 }
+
+/// A config with a marker field that a save would drop, so a write is observable without a clock.
+fn seeded_app(keys: &[String]) -> (axum::Router, Arc<App>, TempHome) {
+    let home = TempHome::new();
+    let list = keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
+    let config = format!(
+        "schema_version = 1\napi_port = 9430\nopenrgb_port = 16742\nfirst_run_done = true\nzone_panel_dismissed = true\nonboarding_complete = true\ndismissed_faults = [{list}]\n\n[settings]\nfps = 30\nblack_on_lock = false\non_quit = \"black\"\nbrightness = 100\npower = \"running\"\n"
+    );
+    std::fs::write(home.path.join("config.toml"), &config).expect("the test config is written");
+    let mut store = canvas_daemon::storage::Store::at(&home.path);
+    store.config = toml::from_str(&config).expect("the seeded config parses");
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(App::new(store, engine, Box::new(FakeAdapter::default()), TOKEN.to_string(), "test".into(), tx));
+    (api::router(app.clone()), app, home)
+}
+
+#[tokio::test]
+async fn an_unknown_hex_key_is_refused_and_writes_nothing() {
+    let (router, app, _home) = seeded_app(&[]);
+    *app.openrgb.write().await = LinkState::Connected;
+    *app.fans.write().await = Some(bad_fans(ChipProblem::PawnIoUnavailable));
+    let unknown = "deadbeefdeadbeef";
+    let response = router
+        .oneshot(request("POST", &routes::FAULT_DISMISS.replace("{key}", unknown)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let answer: serde_json::Value = body(response).await;
+    assert_eq!(answer["error"], "not_found", "the spine's 404 code names no unknown_fault code");
+    assert!(answer["message"].as_str().unwrap_or("").contains("not active"));
+    assert!(app.store.read().await.config.dismissed_faults.is_empty(), "a refused key was not stored");
+}
+
+#[tokio::test]
+async fn the_dismissal_store_is_capped_at_32_keys() {
+    let old: Vec<String> = (0..32).map(|n| format!("{n:016x}")).collect();
+    let current = key(FaultKind::FanChip, None, "pawn_io_unavailable");
+    let (router, app, _home) = seeded_app(&old);
+    assert_eq!(app.store.read().await.config.dismissed_faults.len(), 32, "the seeded keys loaded");
+    *app.openrgb.write().await = LinkState::Connected;
+    *app.fans.write().await = Some(bad_fans(ChipProblem::PawnIoUnavailable));
+    let response = router
+        .oneshot(request("POST", &routes::FAULT_DISMISS.replace("{key}", &current)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored = app.store.read().await.config.dismissed_faults.clone();
+    assert_eq!(stored.len(), 32, "the oldest key was dropped");
+    assert!(stored.contains(&current));
+    assert!(!stored.contains(&old[0]));
+}
+
+#[tokio::test]
+async fn healthy_polls_with_no_key_do_not_touch_the_store() {
+    let (_router, app, home) = seeded_app(&[]);
+    let path = home.path.join("config.toml");
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::UNIX_EPOCH).unwrap();
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let healthy = canvas_daemon::fakes::fake_fans_status();
+    canvas_daemon::faults::reset_store_save_count();
+    for _ in 0..100 {
+        clear_fan_if_healthy(&app, &healthy).await;
+        clear_openrgb_if_healthy(&app, LinkState::Connected).await;
+    }
+    assert_eq!(canvas_daemon::faults::store_save_count(), 0, "100 healthy polls saved nothing");
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before, "the config file was not rewritten");
+}
+
+#[tokio::test]
+async fn show_again_removes_a_dismissal_key() {
+    let current = key(FaultKind::FanChip, None, "pawn_io_unavailable");
+    let (router, app, _home) = seeded_app(std::slice::from_ref(&current));
+    *app.openrgb.write().await = LinkState::Connected;
+    *app.fans.write().await = Some(bad_fans(ChipProblem::PawnIoUnavailable));
+    let response = router
+        .clone()
+        .oneshot(request("DELETE", &routes::FAULT_DISMISS.replace("{key}", &current)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(app.store.read().await.config.dismissed_faults.is_empty());
+    let faults = status_of(&router.clone()).await.faults;
+    assert_eq!(faults.len(), 1);
+    assert!(!faults[0].dismissed);
+}

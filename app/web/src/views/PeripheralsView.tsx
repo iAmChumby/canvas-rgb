@@ -1014,10 +1014,17 @@ function PeripheralDetail({
             parts={{
               affected: `The ${noun}'s settings cannot be read or changed over this connection.`,
               cause: detail.problem,
-              fix: (detail.problem ?? "").startsWith("Over Bluetooth")
-                ? "Connect through the 2.4G receiver or a USB cable to change its profiles."
-                : "Switch to XInput mode and connect through the 2.4G receiver or a USB cable.",
-              ignore_if: "You only need this pad's buttons, sticks and triggers.",
+              // C3: pad-specific advice only for a game controller. The spine has no typed
+              // personality field for Bluetooth, so that one branch still follows the adapter's
+              // plain sentence; every other kind gets a neutral next step.
+              fix: info.kind === "game_controller"
+                ? (detail.problem ?? "").startsWith("Over Bluetooth")
+                  ? "Connect through the 2.4G receiver or a USB cable to change its profiles."
+                  : "Switch to XInput mode and connect through the 2.4G receiver or a USB cable."
+                : `Check the ${noun}'s own software, then press Read again.`,
+              ignore_if: info.kind === "game_controller"
+                ? "You only need this pad's buttons, sticks and triggers."
+                : `You do not need to change this ${noun}'s settings.`,
             }}
           >
             <ButtonLink href="/help/" size="sm" variant="ghost">

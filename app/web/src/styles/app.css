@@ -516,6 +516,11 @@ html[data-motion="reduced"] *::after {
   text-overflow: ellipsis;
 }
 
+/* A dismissed note is still active, but its count is muted rather than shouted (#580 C2). */
+.strip-mark-text[data-muted="true"] {
+  color: var(--mute);
+}
+
 /* The controls sit at the end of the row. The mark's text grows into the space beside them and
    they do not move. */
 .strip-controls {
@@ -671,6 +676,19 @@ html[data-motion="reduced"] *::after {
 
 .strip-details-problems li[data-tone="work"] {
   color: var(--work);
+}
+
+/* #580 C2: a hidden fault reads as hidden, and its row offers a way back without changing the
+   fault's tone. */
+.strip-details-problems li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.strip-details-problems li[data-dismissed="true"] > span {
+  color: var(--mute);
 }
 
 /* Each link and what it is doing: the three links the app has, named. */
@@ -3786,6 +3804,21 @@ button.chip:hover {
   font-weight: 600;
 }
 
+/* U7: a long product name wraps instead of being cut off in the wide layout. */
+@media (min-width: 1280px) {
+  .rd-devices .rd-dev-row,
+  .rd-devices .rd-zone {
+    height: auto;
+    min-height: 44px;
+    padding-top: var(--s1);
+    padding-bottom: var(--s1);
+  }
+  .rd-devices .rd-dev-name {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
 /* The sub-line is the kind, the vendor, the adapter and the address: it gives way to the drawing
    on a narrow row, and the whole line is its tooltip. */
 .rd-devices .rd-dev-sub {
@@ -4812,9 +4845,12 @@ button.chip:hover {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
   gap: var(--s2) var(--s4);
   padding: var(--s3) var(--s4);
-  border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent);
+  /* U5: a neutral panel fill in both themes, with the note's colour only on a clear left edge.
+     Tinting the whole fill made the light note read as a disabled input. */
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--tone);
   border-radius: var(--r-md);
-  background: color-mix(in srgb, var(--tone) 8%, var(--sunk));
+  background: var(--panel);
   animation: canvas-enter var(--dur) var(--ease) both;
 }
 
@@ -4845,6 +4881,7 @@ button.chip:hover {
 .fault-note-action {
   flex: none;
   margin-left: auto;
+  justify-self: end;
 }
 
 .fault-note-fields {
@@ -4860,11 +4897,20 @@ button.chip:hover {
 .fault-note-fields dt { color: var(--mute); font-size: var(--t14); }
 .fault-note-fields dd { min-width: 0; margin: 0; color: var(--dim); overflow-wrap: anywhere; }
 .fault-note-fields dd .fig { font-family: var(--fm); font-size: var(--t14); }
+/* U4: the Help link starts where the other values start; a button's inset would shift it. */
+.fault-note-fields dd .btn-ghost {
+  height: auto;
+  padding: 0 var(--s2) 0 0;
+  border-color: transparent;
+  background: none;
+  text-decoration: underline;
+}
 
 @media (max-width: 720px) {
   .fault-note { grid-template-columns: minmax(0, 1fr); }
-  .fault-note-head { flex-wrap: wrap; }
-  .fault-note-action { margin-left: 0; }
+  /* U6: the icon keeps the title's row; the dismiss control drops below both. */
+  .fault-note-head { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+  .fault-note-action { grid-column: 1 / -1; justify-self: start; margin-left: 0; }
   .fault-note-fields { grid-template-columns: max-content minmax(0, 1fr); }
 }
 
@@ -10587,17 +10633,21 @@ button.chip:hover {
   list-style: none;
 }
 
+/* U7, U8: the name owns the first column and wraps; the id and the state keep their own columns
+   so the state stays on its device's row at 390 px. */
 .help-check-devices li {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
   align-items: baseline;
   gap: var(--s1) var(--s2);
   min-width: 0;
   font-size: var(--t14);
 }
 
+.help-check-devices li > span:first-child { overflow-wrap: anywhere; }
 .help-check-devices li[data-connected="true"] { color: var(--ok); }
-.help-check-connected { margin-left: auto; color: var(--mute); font-size: var(--t14); }
+.help-check-connected { color: var(--mute); font-size: var(--t14); }
+.help-check-label { color: var(--dim); font-weight: 600; }
 .help-check-actions { margin-top: var(--s3); }
 
 .help-count {

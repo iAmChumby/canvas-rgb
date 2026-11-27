@@ -32,6 +32,19 @@ pub trait PortIo: Send {
     }
 }
 
+/// A boxed port is a port, so the NCT detect path can be driven by an injected opener (#580 C8).
+impl<P: PortIo + ?Sized> PortIo for Box<P> {
+    fn read_port(&mut self, port: u16) -> io::Result<u8> {
+        (**self).read_port(port)
+    }
+    fn write_port(&mut self, port: u16, value: u8) -> io::Result<()> {
+        (**self).write_port(port, value)
+    }
+    fn config_mode_entered(&mut self) -> io::Result<()> {
+        (**self).config_mode_entered()
+    }
+}
+
 /// One fan header on the chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Channel {

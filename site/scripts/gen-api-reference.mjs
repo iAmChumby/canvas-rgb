@@ -127,6 +127,7 @@ const DESCRIPTIONS = {
   "ONBOARDING_COMPLETE:POST": "Records that first-run onboarding has finished.",
   "DISMISS_ZONE_PANEL:POST": "Dismisses the first-run prompt to size the ARGB headers.",
   "FAULT_DISMISS:POST": "Hides one hardware note on every viewer. The note comes back when its cause clears and then returns.",
+  "FAULT_DISMISS:DELETE": "Shows a hidden hardware note again while its condition is still active.",
   "DIAG_READBACK:GET": "Reads the colours the hardware reports back from the devices.",
   "DIAG_FAIL_SENSOR:POST": "Makes a temperature source report a failure, for a safety test. The source is `cpu`, `gpu` or `board:<name>`; any other value answers 422.",
 };
@@ -276,6 +277,11 @@ const HAND_SHAPES = {
     label: "JSON object",
     note: "The fields the daemon sends: the hardware note was hidden.",
     fields: [{ name: "ok", type: "boolean", meaning: "True when the note was hidden." }],
+  },
+  "FAULT_DISMISS:DELETE:response": {
+    label: "JSON object",
+    note: "The fields the daemon sends: the hardware note was shown again.",
+    fields: [{ name: "ok", type: "boolean", meaning: "True when the note was shown again." }],
   },
   "DISPLAY:DELETE:response": {
     label: "JSON object",

@@ -66,6 +66,12 @@ impl canvas_daemon::pipe_client::PipeLink for ExamplePipe {
                 version: "0.18.1".to_string(),
             });
         }
+        // Keep the active fault alive when a fan example refreshes the daemon's cache (#580 C5).
+        if matches!(request, canvas_proto::pipe::PipeRequest::FanStatus) {
+            let mut fans = canvas_daemon::fakes::fake_fans_status();
+            fans.chip_problem = Some(canvas_proto::fans::ChipProblem::PawnIoUnavailable);
+            return Ok(canvas_proto::pipe::PipeResponse::FanStatus { status: fans });
+        }
         self.0.exchange(request).await
     }
 }
@@ -199,7 +205,10 @@ async fn build() -> (axum::Router, Arc<App>, TempHome, tokio::sync::mpsc::Unboun
     );
     // The fan read routes answer from the cache the service would have filled. Give them the
     // fake's status so the published fan examples reach their handlers.
-    *app.fans.write().await = Some(canvas_daemon::fakes::fake_fans_status());
+    // A real fan fault is active so the published dismiss examples have a key to act on (#580 C5).
+    let mut fans = canvas_daemon::fakes::fake_fans_status();
+    fans.chip_problem = Some(canvas_proto::fans::ChipProblem::PawnIoUnavailable);
+    *app.fans.write().await = Some(fans);
     // Every pipe request stays in this process: the fan, fail-sensor, quit and install examples
     // must never reach the real service pipe.
     app.pipe = Arc::new(ExamplePipe::default());
@@ -258,12 +267,13 @@ fn fixture(url: &str, method: &str, name: &str, lease: Option<&str>) -> String {
             _ => {}
         }
     }
+    let fault_key = canvas_daemon::faults::key(canvas_proto::api::FaultKind::FanChip, None, "pawn_io_unavailable");
     let value = match name {
         "zone" => "0",
         "device" => DEVICE_A,
         "h" => "cpu_fan",
-        // A hardware note's dismissal key is a hex FNV-1a value (#580).
-        "key" => "0123456789abcdef",
+        // A hardware note's dismissal key is the one the active fake fault carries (#580 C5).
+        "key" => fault_key.as_str(),
         "group" => "everything",
         "name" if path.contains("/fans/profiles/") => "Default",
         "name" => "Warm",

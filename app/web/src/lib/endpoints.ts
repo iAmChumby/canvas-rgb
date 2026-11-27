@@ -376,6 +376,8 @@ export const api = {
   dismissZonePanel: () => request<unknown>("POST", routes.dismissZonePanel),
   /** Hides one hardware note on every viewer (#580). It comes back when its cause clears and returns. */
   dismissFault: (key: string) => request<unknown>("POST", routes.faultDismiss(key)),
+  /** Puts a hidden hardware note back on its page while its condition is still active (#580 C2). */
+  showFaultAgain: (key: string) => request<unknown>("DELETE", routes.faultDismiss(key)),
   /** The owner reached the end of the onboarding: the window stops opening by itself. */
   completeOnboarding: () => request<unknown>("POST", routes.onboardingComplete),
 

@@ -59,3 +59,17 @@ describe("hardware notes in the strip (#580 R2, R14, R15)", () => {
     expect(list.filter((p) => p.fault).length).toBe(2);
   });
 });
+
+describe("an older daemon without faults (C4)", () => {
+  it("keeps the old OpenRGB down entry when faults is absent", () => {
+    const old = status({ openrgb: "down" });
+    delete (old as { faults?: unknown }).faults;
+    const list = problems(old, null);
+    expect(list.some((p) => p.text === "OpenRGB down")).toBe(true);
+  });
+
+  it("drops the old entry when a fault array is present, even when empty", () => {
+    const list = problems(status({ openrgb: "down", faults: [] }), null);
+    expect(list.some((p) => p.text === "OpenRGB down")).toBe(false);
+  });
+});
