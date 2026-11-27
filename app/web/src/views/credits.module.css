@@ -67,6 +67,8 @@
   font-weight: 600;
   text-align: left;
   text-decoration-color: transparent;
+  white-space: normal;
+  overflow-wrap: anywhere;
   transition: color var(--dur-fast) var(--ease), text-decoration-color var(--dur-fast) var(--ease);
 }
 
@@ -221,7 +223,7 @@
   font-size: var(--t15);
 }
 
-@media (max-width: 720px) {
+@media (max-width: 900px) {
   .credit {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--s1);

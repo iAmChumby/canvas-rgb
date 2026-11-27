@@ -26,11 +26,14 @@ function readThanks() {
     const matches = [...para.matchAll(link)];
     if (matches.length === 0) continue;
     for (const m of matches) {
-      const body = para
+      let body = para
         .replace(link, "")
-        .replace(/^\s*(and|,|[.\u2014-])\s*/i, "")
+        .replace(/\*\*/g, "") // the remaining names in the paragraph are Markdown, not words
         .replace(/\s+/g, " ")
         .trim();
+      // thanks.md joins two names with `and` and ends the link line with a
+      // full stop. Strip both before the sentence that describes them.
+      while (/^(and|,|\.|—|-|:)\s*/i.test(body)) body = body.replace(/^(and|,|\.|—|-|:)\s*/i, "");
       entries.push({ name: m[1], url: m[3] ?? m[4], body });
     }
   }

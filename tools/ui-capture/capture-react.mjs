@@ -319,7 +319,22 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
   }
   // Let the view settle (fonts, thumbnails, one preview frame).
   await page.waitForTimeout(400);
-  const fileName = `${view.name}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+  // UI_CAPTURE_SCROLL_TO scrolls to a selector before the shot, for a section
+  // that sits below the fold (#578).
+  const scrollTo = process.env.UI_CAPTURE_SCROLL_TO;
+  if (scrollTo) {
+    await page.evaluate((selector) => {
+      document.querySelector(selector)?.scrollIntoView({ block: "start" });
+    }, scrollTo);
+    await page.waitForTimeout(200);
+  }
+  // UI_CAPTURE_CLICK clicks one selector before the shot (an opened disclosure).
+  const clickSelector = process.env.UI_CAPTURE_CLICK;
+  if (clickSelector) {
+    await page.click(clickSelector);
+    await page.waitForTimeout(200);
+  }
+  const fileName = `${view.name}${scrollTo ? "-scrolled" : ""}${clickSelector ? "-open" : ""}-react-${viewport.w}x${viewport.h}-${theme}.png`;
   const filePath = path.join(OUT_DIR, fileName);
   await page.screenshot({ path: filePath });
   page.off("pageerror", onPageError);
