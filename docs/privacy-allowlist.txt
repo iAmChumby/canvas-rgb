@@ -10,6 +10,11 @@
 # [constructors] entries are "<token> = <repo-relative path>". A token allowed
 # in one file is not allowed in another: add one line per file. Repeat the token
 # rather than listing several paths on one line.
+#
+# Known limits: a listed token is allowed anywhere in its file, so a second call of the same
+# kind in that file passes; the scan counts in the test are a tripwire, so a new shipped file
+# fails CI until the count is updated; download commands with no token here (BITS, WinHTTP,
+# DownloadFile, curl, winget) are not scanned.
 
 [hosts]
 # Update feed and signed installer (docs/privacy.md, outbound rows 1-3)
@@ -37,7 +42,8 @@ fetch( = app/web/src/lib/api.ts
 fetch( = app/web/src/lib/endpoints.ts
 fetch( = app/web/src/lib/preview.ts
 fetch( = app/web/src/lib/thumb-demo.ts
-# The updater's own fetch() methods, not an HTTP fetch.
+# The updater's install path: start_install and fetch(), the signed installer download
+# (docs/privacy.md, outbound row 3).
 fetch( = app/src-tauri/src/update/mod.rs
 new WebSocket = app/web/src/lib/preview.ts
 new WebSocket = app/web/src/lib/stackPreview.ts

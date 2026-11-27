@@ -165,6 +165,37 @@ fn code_only(line: &str, state: &mut CodeState) -> String {
             out.push_str("  ");
             continue;
         }
+        // Char literals ('{', '"', '\'', '\u{7b}', and b'x' after the b): blanked, so a brace or
+        // quote inside one never moves the brace count or opens a string. A lifetime ('a) has no
+        // closing quote right after its name and is left alone.
+        if ch == '\'' {
+            let mut look = chars.clone();
+            let len = match look.next() {
+                // The escaped char is taken whatever it is ('\'' must not close at the quote it
+                // escapes), then the closing quote is looked for.
+                Some('\\') if look.next().is_some() => {
+                    let mut n = 2;
+                    let mut closed = false;
+                    for c in look.by_ref().take(10) {
+                        n += 1;
+                        if c == '\'' {
+                            closed = true;
+                            break;
+                        }
+                    }
+                    closed.then_some(n)
+                }
+                Some(_) if look.next() == Some('\'') => Some(2),
+                _ => None,
+            };
+            if let Some(len) = len {
+                for _ in 0..len {
+                    chars.next();
+                }
+                out.extend(std::iter::repeat_n(' ', len + 1));
+                continue;
+            }
+        }
         if ch == '"' {
             state.string = true;
             out.push(' ');
@@ -453,6 +484,20 @@ pub fn shipped() {
         assert!(
             !lines.iter().any(|(_, line)| line.contains("test_only")),
             "the connect inside the cfg(test) item must be skipped: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_brace_char_literal_in_a_test_item_does_not_hide_code_after_it() {
+        let src = "#[cfg(test)]\nmod tests {\n    fn t() { let c = '{'; let q = '\"'; let e = '\\''; }\n}\npub fn prod<'a>(s: &'a str) { reqwest::get(\"https://evil.example/x\"); }\n";
+        let lines = shipped_lines(src, "rs");
+        assert!(
+            lines.iter().any(|(_, line)| line.contains("reqwest::get")),
+            "the shipped call after a test item holding brace and quote char literals must be seen: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|(_, line)| line.contains("let c")),
+            "the test item must still be skipped: {lines:?}"
         );
     }
 
