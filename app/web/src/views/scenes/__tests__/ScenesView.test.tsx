@@ -618,15 +618,15 @@ describe("the Scenes page", () => {
   });
 
   // Plan Step 2 (Task 12): the first run's hello leads to Scenes, and nothing else. The hello is
-  // the whole window until "Continue" finishes the onboarding (Onboarding.finish ->
-  // api.completeOnboarding -> refreshStatus -> onDone), and the page behind it is this one.
+  // the whole window until "Continue", and the page behind it is this one, with the setup
+  // checklist beside it (#579): the checklist's "Done" finishes the onboarding, not the hello.
   it("the first run opens Scenes after the hello step", async () => {
     const firstRun = {
       onboarding_complete: false,
       openrgb: "connected",
       conflicts: [],
     } as unknown as Status;
-    api.status.mockResolvedValue({ ...firstRun, onboarding_complete: true });
+    window.sessionStorage.clear();
     api.completeOnboarding.mockResolvedValue(undefined);
     api.activateEffect.mockResolvedValue(undefined);
     patchSnap({
@@ -660,8 +660,8 @@ describe("the Scenes page", () => {
       fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     });
 
-    expect(api.completeOnboarding).toHaveBeenCalledTimes(1);
-    expect(api.status).toHaveBeenCalled();
+    expect(api.completeOnboarding).not.toHaveBeenCalled();
+    expect(screen.getByRole("complementary", { name: "Setup checklist" })).toBeTruthy();
     // The greeting is gone and the page behind it is Scenes: its rows are what it leads to.
     expect(screen.queryByRole("region", { name: "Hello" })).toBeNull();
     expect(screen.getByTestId("unassigned-row")).toBeTruthy();

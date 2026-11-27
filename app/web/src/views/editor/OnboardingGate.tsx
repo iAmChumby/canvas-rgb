@@ -4,7 +4,8 @@ import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useSnap } from "@/lib/store";
 import { markAppNavigation, requestNavigation } from "@/lib/navigationGuard";
-import { markRedirected, redirectedThisLaunch, shouldOpen } from "@/views/editor/flow";
+import { setupRows } from "@/lib/setup";
+import { markRedirected, noteLaunch, redirectedThisLaunch, shouldOpen } from "@/views/editor/flow";
 
 /**
  * The first-launch redirect: opening the app on any page while the daemon says the onboarding
@@ -17,6 +18,8 @@ export function OnboardingGate() {
   const status = useSnap((s) => s.status);
 
   useEffect(() => {
+    // The checklist's greeting is about the app's first read, whichever page that is on.
+    if (status) noteLaunch(status, setupRows({ status, fans: null, fansError: null, effects: null }));
     if (!status || redirectedThisLaunch()) return;
     markRedirected();
     const onScenesPage = pathname === "/" || pathname === "";

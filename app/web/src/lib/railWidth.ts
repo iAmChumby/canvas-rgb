@@ -11,6 +11,8 @@
 // screen is the stored width clamped to the window's own maximum, and the stored width is kept,
 // so a wider window gets it back.
 
+import { storeLocal } from "@/lib/storage";
+
 /** The rail's width when nobody has changed it, and the narrowest it may be. */
 export const RAIL_DEFAULT_PX = 200;
 export const RAIL_MIN_PX = 200;
@@ -65,7 +67,7 @@ export function readStoredRailWidth(): number | null {
 export function storeRailWidth(px: number): void {
   if (typeof window === "undefined" || !Number.isFinite(px)) return;
   try {
-    window.localStorage.setItem(RAIL_KEY, String(Math.round(px)));
+    storeLocal(RAIL_KEY, String(Math.round(px)));
   } catch {
     // Storage can be blocked; the width still applies for this session.
   }

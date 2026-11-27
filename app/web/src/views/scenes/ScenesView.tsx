@@ -32,6 +32,7 @@ import { ChainTakeover } from "@/views/chain/ChainTakeover";
 import { chainKey } from "@/views/chain/offered";
 import { requestChainSetup } from "@/views/chain/request";
 import { shouldOpen } from "@/views/editor/flow";
+import { SetupLayout } from "@/views/setup/SetupLayout";
 import type { LightView } from "@/proto/LightView";
 import s from "@/views/scenes/scenes.module.css";
 import r from "@/views/scenes/groupReorder.module.css";
@@ -361,6 +362,7 @@ export function ScenesView() {
   return (
     <>
       <ChainTakeover />
+      <SetupLayout onTroubleshoot={() => setHello(true)}>
       <div className={`rd-page ${s.page}`}>
       <PageTitle
         title="Scenes"
@@ -662,6 +664,7 @@ export function ScenesView() {
         )}
       </LightFeedContext.Provider>
       </div>
+      </SetupLayout>
     </>
   );
 }

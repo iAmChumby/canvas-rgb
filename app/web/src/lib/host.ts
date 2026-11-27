@@ -21,6 +21,7 @@ import {
   EVT_UPDATE_STATE,
 } from "@/proto/tauri";
 import type { ApiConfig } from "@/proto/ApiConfig";
+import { previewActive } from "@/lib/previewMode";
 import type { EditorChoice } from "@/proto/EditorChoice";
 import type { TrayPrefs } from "@/proto/TrayPrefs";
 import type { UpdateChannel } from "@/proto/UpdateChannel";
@@ -51,17 +52,25 @@ export function tauriHost(): TauriGlobal | null {
 }
 
 export function isDemo(): boolean {
-  return tauriHost() === null;
+  return previewActive() || tauriHost() === null;
+}
+
+/**
+ * The tray, for a command that reads or changes the real PC. A preview (#579) has none: each of
+ * them answers as it does in a plain browser.
+ */
+function trayHost(): TauriGlobal | null {
+  return previewActive() ? null : tauriHost();
 }
 
 export async function fetchApiConfig(): Promise<ApiConfig> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) throw new Error("no Tauri host");
   return (await host.core.invoke(CMD_GET_API_CONFIG)) as ApiConfig;
 }
 
 export async function openLogsFolder(): Promise<void> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return;
   await host.core.invoke(CMD_OPEN_LOGS_FOLDER);
 }
@@ -98,7 +107,7 @@ export async function onNavigate(handler: (page: string) => void): Promise<Unlis
 
 /** Listens for the daemon's state-changed event (the editor refetches). */
 export async function onStateChanged(handler: () => void): Promise<Unlisten> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return () => undefined;
   return host.event.listen(EVT_STATE_CHANGED, () => handler());
 }
@@ -113,12 +122,12 @@ function isUpdateState(v: unknown): v is UpdateState {
 
 /** True when update controls can act: inside the tray, or in a browser with a fixture. */
 export function canUpdate(): boolean {
-  return tauriHost() !== null || demoUpdateActive();
+  return trayHost() !== null || demoUpdateActive();
 }
 
 /** Runs one update command. Returns the state when the command answers with one. */
 async function updateCall(cmd: string, args?: Record<string, unknown>): Promise<UpdateState | null> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return demoUpdateActive() ? demoUpdateCommand(cmd, args) : null;
   const out = await host.core.invoke(cmd, args);
   return isUpdateState(out) ? out : null;
@@ -135,7 +144,7 @@ export const updateDismissUpdated = () => updateCall(CMD_UPDATE_DISMISS_UPDATED)
 
 /** Listens for the tray's update-state event. Returns an unlisten function. */
 export async function onUpdateState(handler: (state: UpdateState) => void): Promise<Unlisten> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return () => undefined;
   return host.event.listen(EVT_UPDATE_STATE, (e) => {
     if (isUpdateState(e.payload)) handler(e.payload);
@@ -148,14 +157,14 @@ export async function onUpdateState(handler: (state: UpdateState) => void): Prom
 
 /** The tray's preferences: which editor it opens and which update feed it reads. */
 export async function getTrayPrefs(): Promise<TrayPrefs> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return demoTrayPrefs();
   return (await host.core.invoke(CMD_TRAY_PREFS)) as TrayPrefs;
 }
 
 /** Sets the update channel. The tray keeps it and checks the feeds again. */
 export async function setUpdateChannel(channel: UpdateChannel): Promise<TrayPrefs> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return demoSetChannel(channel);
   return (await host.core.invoke(CMD_SET_CHANNEL, { channel })) as TrayPrefs;
 }
@@ -165,7 +174,7 @@ export async function setUpdateChannel(channel: UpdateChannel): Promise<TrayPref
  * other one, on the same page. Only an experimental build has the choice: a stable tray refuses.
  */
 export async function setEditor(editor: EditorChoice): Promise<TrayPrefs> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return demoSetEditor(editor);
   return (await host.core.invoke(CMD_SET_EDITOR, { editor })) as TrayPrefs;
 }

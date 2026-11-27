@@ -24,6 +24,7 @@
 //   // in the fans route:
 //   return applyFanScenarios(fansStatus());
 
+import { storeLocal } from "@/lib/storage";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { ChainView } from "@/proto/ChainView";
@@ -431,7 +432,7 @@ export function applySceneScenarios(
     const lamp = demoStrip("demo:desk-lamp", "Desk lamp", 12);
     // The page has seen every other light, so only this one is announced.
     try {
-      window.localStorage.setItem(SEEN_LIGHTS_KEY, JSON.stringify(all.map((l) => l.light.id)));
+      storeLocal(SEEN_LIGHTS_KEY, JSON.stringify(all.map((l) => l.light.id)));
     } catch {
       // The notice may not show: storage is not available here.
     }

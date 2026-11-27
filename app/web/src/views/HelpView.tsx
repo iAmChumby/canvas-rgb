@@ -26,6 +26,7 @@ import { useSnap } from "@/lib/store";
 import { settingsStatus } from "@/lib/updateWords";
 import { PageTitle } from "@/shell/PageHeader";
 import { SafeStartBanner } from "@/shell/GlobalBanners";
+import { SetupHelpRow } from "@/views/setup/SetupHelpRow";
 import type { About } from "@/proto/About";
 import type { AboutReport } from "@/proto/AboutReport";
 import type { LastExit } from "@/proto/LastExit";
@@ -240,6 +241,7 @@ export function HelpView() {
           <div className="help-side">
             {/* Here and not above the page: the notice arriving must not push the hero (#577). */}
             <SafeStartBanner onHelp />
+            <SetupHelpRow />
             <Panel title="Go to">
               <div className="help-keys">
                 <KeyRow

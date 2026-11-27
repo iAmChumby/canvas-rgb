@@ -441,7 +441,9 @@ fn every_outbound_host_and_client_is_in_the_privacy_table() {
     // files, with no new outbound host or connection constructor.
     // #580 added faults.rs in the daemon, FaultNote.tsx and DeviceChecklist.tsx in components,
     // and lib/supportedDevices.ts in the editor: four more files, still no new network access.
-    assert_eq!(files.len(), 490, "the set of scanned source files moved");
+    // #579 added lib/previewMode.ts, lib/storage.ts, lib/setup.ts, shell/PreviewMarker.tsx and
+    // three files in views/setup: seven files, with no new network access.
+    assert_eq!(files.len(), 497, "the set of scanned source files moved");
     assert_eq!(found_hosts.len(), 4, "the set of outbound hosts moved");
     assert_eq!(found_tokens.len(), 8, "the set of connection constructors moved");
     assert!(

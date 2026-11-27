@@ -23,6 +23,8 @@ import { sceneCommands } from "@/shell/commands";
 import { useTakeover } from "@/views/editor/takeover";
 import { StripSlotsProvider } from "@/shell/PageHeader";
 import { PAGE_PATHS } from "@/shell/pagePaths";
+import { PreviewMarker } from "@/shell/PreviewMarker";
+import { keepPreviewInAddress } from "@/lib/previewMode";
 
 /**
  * The persistent frame: left rail (a bottom bar on narrow screens), the status strip, the
@@ -61,6 +63,9 @@ function Frame({ children }: { children: ReactNode }) {
   const answered = status !== null || statusError !== null;
 
   useEffect(() => startSync(), []);
+
+  // An in-app link drops the query; a reload has to find the preview flag still there (#579).
+  useEffect(() => keepPreviewInAddress());
 
   useEffect(() => {
     const stopTint = startHueTint();
@@ -263,6 +268,7 @@ function Frame({ children }: { children: ReactNode }) {
         </div>
       )}
       <div className="main">
+        <PreviewMarker />
         {!takeover && (
           <>
             <StatusStrip

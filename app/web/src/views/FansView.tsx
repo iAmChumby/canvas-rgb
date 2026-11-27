@@ -1,5 +1,6 @@
 "use client";
 
+import { storeLocal } from "@/lib/storage";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, WarningCircle, X } from "@phosphor-icons/react";
 import { Button, ButtonLink, IconButton, WaitMark } from "@/components/Button";
@@ -130,7 +131,7 @@ function readKnownHeaders(): KnownHeader[] {
 
 function writeKnownHeaders(list: KnownHeader[]): void {
   try {
-    window.localStorage.setItem(KNOWN_HEADERS_KEY, JSON.stringify(list));
+    storeLocal(KNOWN_HEADERS_KEY, JSON.stringify(list));
   } catch {
     // Storage can be blocked; the page still works without the memory.
   }

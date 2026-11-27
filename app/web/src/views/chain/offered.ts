@@ -16,6 +16,8 @@
 // does not offer the header again. Only a window that cannot write loses the marks, and that is
 // the one case the record cannot cover.
 
+import { storeLocal } from "@/lib/storage";
+
 /** The browser storage key that holds the headers the app has already offered by itself. */
 export const CHAIN_OFFERED_KEY = "canvas-rgb.chains-offered";
 
@@ -68,7 +70,7 @@ export function markChainOffered(key: string): void {
   set.add(key);
   const text = JSON.stringify([...set]);
   try {
-    window.localStorage.setItem(CHAIN_OFFERED_KEY, text);
+    storeLocal(CHAIN_OFFERED_KEY, text);
     cachedRaw = text;
     // Written: the storage holds it now, for this window and the next.
     memory.clear();
