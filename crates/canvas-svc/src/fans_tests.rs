@@ -2969,3 +2969,28 @@ fn b2_a_bios_edit_during_the_hold_releases_the_stuck_header() {
     r.fans.set_header_mode("sys_fan1", FanMode::Bios, t0).unwrap();
     assert!(!r.chip.manual(SYS_FAN1), "the header is not left at its last duty");
 }
+
+/// R6: the BIOS restore is retried for as long as the hold lasts, every 30 s after the three
+/// quick tries, and the status turns true once the header is released.
+#[test]
+fn r6_a_stuck_header_keeps_retrying_until_it_is_released() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    r.chip.set_drop_mode_writes(true);
+    r.fans.enter_hold(t0);
+    // Seconds 1..=40: the first try, three more a second apart, and a fifth at 33 s all fail.
+    for s in 1..=40 {
+        r.fans.tick(t0 + Duration::from_secs(s));
+    }
+    assert_eq!(r.fans.fans_on_bios(), Some(false));
+    assert!(!header(&r.fans.status(), "sys_fan1").on_bios);
+    r.chip.set_drop_mode_writes(false);
+    // The next try is 30 s after the last one, not sooner.
+    r.fans.tick(t0 + Duration::from_secs(50));
+    assert_eq!(r.fans.fans_on_bios(), Some(false));
+    r.fans.tick(t0 + Duration::from_secs(63));
+    assert_eq!(r.fans.fans_on_bios(), Some(true));
+    assert!(!r.chip.manual(SYS_FAN1));
+    assert!(header(&r.fans.status(), "sys_fan1").on_bios);
+}

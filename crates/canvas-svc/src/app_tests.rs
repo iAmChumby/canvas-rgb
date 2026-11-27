@@ -2,6 +2,10 @@
 //! unsecured home means no config read, no chip, and no OpenRGB spawn.
 
 use crate::app::{build_core, check_confirmation, secure_boot, Deps};
+use crate::chip::{FanChip, Nct6687, MSI_ALT1_MAP};
+use crate::fakes::FakeChip;
+use crate::hardware::Hardware;
+use crate::safe_start::{self, Persisted};
 use crate::fakes::{FakeLauncher, FakeProcesses, FakeSpawner};
 use crate::paths;
 use crate::secure::SecureDir;
@@ -33,12 +37,20 @@ impl SecureDir for RecordingSecure {
     }
 }
 
+/// A fake NCT6687D-R and no sensor: nothing on this PC is opened.
+fn fake_hardware() -> Hardware {
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let chip: Box<dyn FanChip> = Box::new(Nct6687::detect(chip, MSI_ALT1_MAP).unwrap());
+    Hardware { chip: Some(chip), chip_error: None, temps: Default::default(), gpu_rated_max_c: None }
+}
+
 fn deps(openrgb: &FakeProcesses, daemon: &FakeProcesses, install: &Path) -> Deps {
     Deps {
         spawner: Box::new(FakeSpawner(openrgb.clone())),
         launcher: Box::new(FakeLauncher(daemon.clone())),
         adapter: Box::new(|| Box::new(canvas_adapters::openrgb::OpenRgbAdapter::new("127.0.0.1", 1))),
         install_dir: install.to_path_buf(),
+        hardware: Box::new(fake_hardware),
         updates: None,
     }
 }
@@ -121,4 +133,42 @@ async fn the_production_run_loop_resumes_a_pending_update_on_start() {
 #[test]
 fn a_service_without_an_installer_starts_no_resume_thread() {
     assert!(crate::app::start_update_resume(None).is_none());
+}
+
+/// R3: a service stop or restart, a reboot included, leaves the safe-start state exactly as it
+/// is, and the next service start launches the daemon in it with the fans held.
+#[tokio::test]
+async fn r3_a_service_restart_keeps_the_safe_start_state_and_holds_the_fans() {
+    use canvas_proto::api::{SafeStartMode, SafeStartReason};
+    for (mode, reason, streak) in [
+        (SafeStartMode::Safe, Some(SafeStartReason::CrashLoop), 2),
+        (SafeStartMode::Safe, Some(SafeStartReason::UncleanOnce), 1),
+        (SafeStartMode::Normal, None, 1),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let state = Persisted {
+            unclean_streak: streak,
+            mode,
+            reason,
+            since: reason.map(|_| "2026-11-26T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        safe_start::save(home.path(), &state).unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let daemon = FakeProcesses::new();
+        for restart in 0..3 {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let boot = secure_boot(home.path(), Box::new(RecordingSecure { calls, fail: false }));
+            let mut core = build_core(&boot, deps(&FakeProcesses::new(), &daemon, install.path()));
+            assert_eq!(daemon.spawns().len(), restart + 1, "the daemon is launched");
+            assert_eq!(core.daemon.start_decision().0, mode, "{reason:?}, start {restart}");
+            assert_eq!(core.fans.hold_active(), mode == SafeStartMode::Safe, "{reason:?}, start {restart}");
+            // The service stops: the daemon is ended with it, as at a reboot.
+            core.daemon.stop();
+            core.daemon.mark_service_stopped();
+            let kept = safe_start::load(home.path(), |_| true).persisted;
+            assert_eq!((kept.mode, kept.reason, kept.unclean_streak), (mode, reason, streak), "after stop {restart}");
+            assert_eq!(kept.since, state.since);
+        }
+    }
 }

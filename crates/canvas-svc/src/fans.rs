@@ -114,10 +114,12 @@ pub const TICK_GAP_RESUME: Duration = Duration::from_secs(30);
 /// has no hardware watchdog (`HARDWARE_WATCHDOG`).
 pub const SUSPEND_HOLD_CAP_TICKS: u32 = 60;
 
-/// How many times the safe-start BIOS restore is retried when a header cannot be released
-/// (one a second, #577 section 4). After these, the header keeps its `manual_since` and `tick`
-/// keeps driving it, so it is never left at a fixed duty.
+/// How many times the safe-start BIOS restore is retried a second apart when a header cannot be
+/// released (#577 section 4). Meanwhile the header keeps its `manual_since` and `tick` keeps
+/// driving it, so it is never left at a fixed duty.
 pub const HOLD_RESTORE_RETRIES: u32 = 3;
+/// The wait between retries after those, for as long as the hold lasts.
+pub const HOLD_RESTORE_SLOW: Duration = Duration::from_secs(30);
 
 /// hardware_watchdog as settled from public sources (see the report): neither the nct6687d
 /// driver nor LibreHardwareMonitor's NCT677X handling reaches a chip watchdog register.
@@ -507,7 +509,7 @@ pub struct FanController {
     fans_on_bios: Option<bool>,
     /// Headers whose last hand-back to BIOS failed: the status never calls them BIOS.
     stuck: BTreeSet<usize>,
-    /// Retries of a failed restore, one a second, at most `HOLD_RESTORE_RETRIES`.
+    /// Failed restore attempts in this hold: the first `HOLD_RESTORE_RETRIES` retry quickly.
     hold_retries: u32,
     hold_retry_at: Option<Instant>,
 }
@@ -839,7 +841,8 @@ impl FanController {
 
     /// Turns the hold on and asks every header for BIOS control. A failed header keeps its
     /// `manual_since`, so `tick` still drives it and it is never left at a fixed duty; the
-    /// restore is retried here once a second, at most [`HOLD_RESTORE_RETRIES`] times.
+    /// restore is retried once a second [`HOLD_RESTORE_RETRIES`] times, then every
+    /// [`HOLD_RESTORE_SLOW`] until it works or the hold ends.
     pub fn enter_hold(&mut self, now: Instant) {
         self.hold = true;
         self.hold_retries = 0;
@@ -876,10 +879,14 @@ impl FanController {
             self.fans_on_bios = Some(true);
         } else {
             self.fans_on_bios = Some(false);
-            self.hold_retries += 1;
-            if self.hold_retries <= HOLD_RESTORE_RETRIES {
-                self.hold_retry_at = Some(now + Duration::from_secs(1));
-            }
+            self.hold_retries = self.hold_retries.saturating_add(1);
+            // Quickly at first, then slowly for as long as the hold lasts.
+            let wait = if self.hold_retries <= HOLD_RESTORE_RETRIES {
+                Duration::from_secs(1)
+            } else {
+                HOLD_RESTORE_SLOW
+            };
+            self.hold_retry_at = Some(now + wait);
         }
     }
 

@@ -521,7 +521,9 @@ impl DaemonSupervisor {
             wait_for_exit(child.as_mut(), pid);
             self.clear_heartbeat_clock();
         }
-        self.launch(now);
+        // The owner asked for this start: it does not wait on the restarts before it.
+        self.reset_start_limit();
+        self.relaunch(now);
     }
 
     /// Relaunches after an end. Only an unclean end or a startup failure spends a restart; a
@@ -535,8 +537,9 @@ impl DaemonSupervisor {
         DaemonAction::None
     }
 
-    /// Launches again after an end, at a bounded rate: [`START_BURST`] launches in
-    /// [`START_WINDOW`], then 1 s, 2 s, 4 s and so on up to [`START_BACKOFF_CAP`] (#577).
+    /// The one way a daemon is launched, at a bounded rate: [`START_BURST`] attempts in
+    /// [`START_WINDOW`], then 1 s, 2 s, 4 s and so on up to [`START_BACKOFF_CAP`] (#577). Only
+    /// a delay that has been served calls [`DaemonSupervisor::launch`] directly.
     fn relaunch(&mut self, now: Instant) {
         let age = |at: &Instant| now.saturating_duration_since(*at);
         if self.recent_starts.back().is_some_and(|at| age(at) >= START_BACKOFF_CAP) {
@@ -569,7 +572,7 @@ impl DaemonSupervisor {
     pub fn start(&mut self, now: Instant) {
         self.started = true;
         self.end_stale_daemons();
-        self.launch(now);
+        self.relaunch(now);
     }
 
     /// Ends a `canvas-rgbd` left over from a previous service instance. It holds the API port, so
@@ -658,10 +661,7 @@ impl DaemonSupervisor {
         match self.launcher.launch(&self.exe) {
             Ok(child) => {
                 let pid = child.id();
-                self.recent_starts.push_back(now);
-                if self.recent_starts.len() > START_BURST {
-                    self.recent_starts.pop_front();
-                }
+                self.count_start(now);
                 self.child = Some(child);
                 self.child_session = session;
                 self.waiting_for_session = false;
@@ -690,11 +690,21 @@ impl DaemonSupervisor {
                 self.waiting_for_session = true;
             }
             Err(e) => {
+                self.count_start(now);
                 self.child = None;
                 self.waiting_for_session = false;
                 self.clear_heartbeat_clock();
                 tracing::error!(error = %e, "could not start the daemon");
             }
+        }
+    }
+
+    /// Counts a launch attempt against the start-rate limit, a failed one too. Waiting for a
+    /// logon is no attempt: there is nobody to launch for, and a logon starts at once.
+    fn count_start(&mut self, now: Instant) {
+        self.recent_starts.push_back(now);
+        if self.recent_starts.len() > START_BURST {
+            self.recent_starts.pop_front();
         }
     }
 
@@ -991,7 +1001,7 @@ impl DaemonSupervisor {
         // must strand the next user until the service restarts.
         if self.watch_for_new_session(now) && self.child.is_none() {
             // The daemon is started again in the new session.
-            self.launch(now);
+            self.relaunch(now);
             return DaemonAction::None;
         }
         if self.quitting {
@@ -1039,7 +1049,7 @@ impl DaemonSupervisor {
                     wait_for_exit(child.as_mut(), pid);
                     self.clear_heartbeat_clock();
                 }
-                self.launch(now);
+                self.relaunch(now);
                 return DaemonAction::None;
             }
             // A daemon that has not said it is up yet has the grace (#163); after its first beat
@@ -1089,7 +1099,7 @@ impl DaemonSupervisor {
         }
         // No process because no user was logged on: launch again, no crash counted (#6).
         if self.waiting_for_session {
-            self.launch(now);
+            self.relaunch(now);
             return DaemonAction::None;
         }
         // No process: the last launch failed. That is a startup failure: it is reported and
@@ -1426,6 +1436,91 @@ mod tests {
         assert!(sup.stopped());
         assert_eq!(sup.tick(t0 + Duration::from_secs(10)), DaemonAction::None);
         assert_eq!(processes.spawns().len(), 1);
+    }
+
+    /// Ticks once a second for `secs`, ending the running daemon with `exit` (if any) before
+    /// each tick, and answers how many daemons were started in all.
+    fn spawns_over(
+        sup: &mut DaemonSupervisor,
+        processes: &FakeProcesses,
+        t0: Instant,
+        secs: u64,
+        exit: Option<i32>,
+    ) -> usize {
+        for s in 1..=secs {
+            let now = t0 + Duration::from_secs(s);
+            match exit {
+                Some(code) if sup.daemon_pid().is_some() => processes.exit_last_with(code),
+                _ => sup.on_heartbeat(now),
+            }
+            sup.tick(now);
+        }
+        processes.spawns().len()
+    }
+
+    #[test]
+    fn r1_crashes_startup_failures_and_failed_launches_stay_bounded() {
+        // A crash code, and an exit 1 before the first beat (a startup failure).
+        for code in [0xC000_0005u32 as i32, 1] {
+            let (mut sup, processes) = supervisor();
+            let t0 = Instant::now();
+            sup.start(t0);
+            assert_eq!(spawns_over(&mut sup, &processes, t0, 600, Some(code)), 4, "code {code:#x}");
+            assert!(sup.stopped());
+        }
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.fail_spawns(1000);
+        sup.start(t0);
+        assert_eq!(spawns_over(&mut sup, &processes, t0, 600, None), 0);
+        assert!(sup.stopped(), "a launch that keeps failing reaches the crash stop");
+    }
+
+    /// The liveness query for the daemon's session keeps failing while launches work: every tick
+    /// finds that session gone, with no settle time in between.
+    #[test]
+    fn r1_a_session_that_keeps_ending_does_not_launch_every_second() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        processes.report_dead(1);
+        let started = spawns_over(&mut sup, &processes, t0, 120, None);
+        assert!(started <= 15, "{started} daemons started in 120 s");
+        assert!(started >= 5, "the burst is still allowed: {started}");
+    }
+
+    #[test]
+    fn r1_a_failed_launch_counts_toward_the_start_limit() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.fail_spawns(3);
+        sup.start(t0);
+        // Three failed launches, then the fourth attempt makes a daemon.
+        assert_eq!(spawns_over(&mut sup, &processes, t0, 3, None), 1);
+        // Two clean exits, a second apart: attempt five is allowed, the sixth waits.
+        for s in 4..=5 {
+            processes.exit_last_with(0);
+            sup.tick(t0 + Duration::from_secs(s));
+        }
+        assert_eq!(processes.spawns().len(), 2, "five attempts in 10 s, failed ones included");
+    }
+
+    #[test]
+    fn r2_repeated_unknown_exits_after_the_first_beat_crash_stop() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let mut action = DaemonAction::None;
+        for s in 1..=4 {
+            let now = t0 + Duration::from_secs(s * 20);
+            sup.on_heartbeat(now);
+            processes.exit_last_with(2);
+            action = sup.tick(now);
+        }
+        assert_eq!(action, DaemonAction::WriteBlack);
+        assert!(sup.stopped());
+        assert_eq!(processes.spawns().len(), 4);
     }
 
     #[test]

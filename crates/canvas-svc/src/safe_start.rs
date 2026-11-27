@@ -102,10 +102,11 @@ pub fn verdict(cause: EndCause, code: Option<i32>, beat: Beat) -> LastExit {
     LastExit::Unknown
 }
 
-/// Only these two verdicts count against `DAEMON_RESTART_LIMIT`. A clean exit 0 with no notice
-/// is relaunched like today, but it does not spend a restart (#577 section 1).
+/// Every end that is not clean or planned counts against `DAEMON_RESTART_LIMIT`, an unknown
+/// one included, the way systemd's `Restart=on-failure` treats it. A clean exit 0 with no notice
+/// is relaunched without spending a restart (#577 section 1).
 pub fn counts_toward_restart(v: LastExit) -> bool {
-    matches!(v, LastExit::Unclean | LastExit::StartupFailure)
+    !matches!(v, LastExit::Clean | LastExit::Planned)
 }
 
 /// The persisted part of the state: `safe-start.json`, written atomically like the store's
@@ -279,16 +280,29 @@ impl Book {
         })
     }
 
-    /// Records how a daemon run ended and decides the mode for the next one. A clean or planned
-    /// end clears the streak whatever the mode; an unclean end adds one. Logons never call this.
+    /// Records how a daemon run ended and moves the mode for the next one. Logons never call
+    /// this.
+    ///
+    /// - An unclean end adds to the streak and enters safe start.
+    /// - A clean end of a normal run clears the streak.
+    /// - A clean end leaves safe start only when one unclean run caused it.
+    /// - Every other end, a service stop or a reboot included, changes neither.
     pub fn record_end(&mut self, v: LastExit, now: &str) {
-        if v == LastExit::Unclean {
-            self.persisted.unclean_streak = self.persisted.unclean_streak.saturating_add(1);
-        } else if matches!(v, LastExit::Clean | LastExit::Planned) {
-            self.persisted.unclean_streak = 0;
+        let safe = self.persisted.mode == SafeStartMode::Safe;
+        match v {
+            LastExit::Unclean => {
+                self.persisted.unclean_streak = self.persisted.unclean_streak.saturating_add(1);
+                self.enter_after_unclean(now);
+            }
+            LastExit::Clean if !safe => self.persisted.unclean_streak = 0,
+            LastExit::Clean if self.persisted.reason == Some(SafeStartReason::UncleanOnce) => {
+                self.persisted.mode = SafeStartMode::Normal;
+                self.persisted.reason = None;
+                self.persisted.since = None;
+            }
+            _ => {}
         }
         self.set_last_exit(v);
-        self.decide(now);
         self.flush();
     }
 
@@ -325,29 +339,21 @@ impl Book {
         self.flush();
     }
 
-    /// The mode from the persisted choice, the streak and the last verdict (#577 section 3). The
-    /// owner's choice stays until "Start normally", whatever the runs under it do.
-    fn decide(&mut self, now: &str) {
-        let streak = self.persisted.unclean_streak;
-        let chosen = self.persisted.mode == SafeStartMode::Safe
-            && self.persisted.reason == Some(SafeStartReason::UserChose);
-        let (mode, reason) = if chosen {
-            (SafeStartMode::Safe, Some(SafeStartReason::UserChose))
-        } else if streak >= 2 {
-            (SafeStartMode::Safe, Some(SafeStartReason::CrashLoop))
-        } else if self.last_exit == LastExit::Unclean {
-            (SafeStartMode::Safe, Some(SafeStartReason::UncleanOnce))
-        } else {
-            (SafeStartMode::Normal, None)
-        };
-        if mode == SafeStartMode::Safe && self.persisted.mode != SafeStartMode::Safe {
+    /// Safe start after an unclean end (#577 section 3): a crash loop from the second one in
+    /// the streak. The owner's choice stays until "Start normally", whatever the runs under it do.
+    fn enter_after_unclean(&mut self, now: &str) {
+        let safe = self.persisted.mode == SafeStartMode::Safe;
+        if !safe {
             self.persisted.since = Some(now.to_string());
         }
-        if mode == SafeStartMode::Normal {
-            self.persisted.since = None;
+        if !(safe && self.persisted.reason == Some(SafeStartReason::UserChose)) {
+            self.persisted.reason = Some(if self.persisted.unclean_streak >= 2 {
+                SafeStartReason::CrashLoop
+            } else {
+                SafeStartReason::UncleanOnce
+            });
         }
-        self.persisted.mode = mode;
-        self.persisted.reason = reason;
+        self.persisted.mode = SafeStartMode::Safe;
     }
 
     /// Whether `path` may be created, replaced or removed: it is absent, or it passes the owner

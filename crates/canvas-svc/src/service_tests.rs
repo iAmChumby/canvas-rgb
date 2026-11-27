@@ -507,7 +507,7 @@ fn h2_a_session_end_code_records_planned_only() {
 }
 
 #[test]
-fn h2_a_clean_end_of_a_safe_run_resets_the_streak() {
+fn r3_a_clean_end_does_not_leave_a_crash_loop() {
     use canvas_proto::api::SafeStartMode;
     let home = tempfile::tempdir().unwrap();
     let (mut core, processes) = core_with_book(&home, SafeStartMode::Safe, 3);
@@ -515,7 +515,8 @@ fn h2_a_clean_end_of_a_safe_run_resets_the_streak() {
     core.daemon.start(t0);
     processes.exit_last_with(0);
     core.daemon.tick(t0 + Duration::from_secs(1));
-    assert_eq!(crate::safe_start::load(home.path(), |_| true).persisted.unclean_streak, 0);
+    let kept = crate::safe_start::load(home.path(), |_| true).persisted;
+    assert_eq!((kept.mode, kept.unclean_streak), (SafeStartMode::Safe, 3));
 }
 
 #[test]

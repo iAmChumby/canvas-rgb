@@ -93,6 +93,8 @@ pub struct Deps {
     pub launcher: Box<dyn SessionLauncher>,
     pub adapter: AdapterFactory,
     pub install_dir: PathBuf,
+    /// Opens the fan chip and the temperature sensors. Tests give fakes.
+    pub hardware: Box<dyn FnOnce() -> hardware::Hardware + Send>,
     /// The update installer. `None` builds the production one (when the home is secured).
     pub updates: Option<Arc<UpdateInstaller>>,
 }
@@ -105,6 +107,7 @@ pub fn production_deps() -> Deps {
         launcher: Box::new(crate::daemon::WtsLauncher),
         adapter: Box::new(|| Box::new(OpenRgbAdapter::new(OPENRGB_HOST, OPENRGB_PORT))),
         install_dir: install_dir(),
+        hardware: Box::new(hardware::open),
         updates: None,
     }
 }
@@ -122,7 +125,7 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
     let home = boot.home();
     let now = Instant::now();
     let (chip, chip_error, temps, file, confirmed, gpu_rated_max_c) = if boot.secured() {
-        let hardware = hardware::open();
+        let hardware = (deps.hardware)();
         let chip_path = paths::chip_path(home);
         let chip_state = if trusted_file(boot, &chip_path) {
             match store::load_chip_state(&chip_path) {

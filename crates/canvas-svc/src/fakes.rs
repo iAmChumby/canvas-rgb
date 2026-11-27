@@ -639,6 +639,8 @@ pub struct FakeProcesses {
     no_session: Arc<AtomicBool>,
     /// Sessions whose user has logged off (the console id does not change).
     dead_sessions: Arc<Mutex<Vec<u32>>>,
+    /// Sessions whose liveness query fails while a launch into them still works.
+    unqueryable: Arc<Mutex<Vec<u32>>>,
     /// A killed process needs this many `try_wait` polls before it is gone.
     slow_kill_polls: Arc<AtomicU32>,
     /// Launches that happened while an earlier daemon had not exited yet.
@@ -718,6 +720,11 @@ impl FakeProcesses {
     /// Marks the user of `session` as logged off while the console id stays what it was.
     pub fn log_off(&self, session: u32) {
         self.dead_sessions.lock().unwrap_or_else(|p| p.into_inner()).push(session);
+    }
+
+    /// Makes `session` read as having no user while launches into it still work.
+    pub fn report_dead(&self, session: u32) {
+        self.unqueryable.lock().unwrap_or_else(|p| p.into_inner()).push(session);
     }
 
     /// The user of `session` is logged on again.
@@ -880,6 +887,7 @@ impl crate::daemon::SessionLauncher for FakeLauncher {
 
     fn session_alive(&mut self, session: u32) -> bool {
         !self.0.dead_sessions.lock().unwrap_or_else(|p| p.into_inner()).contains(&session)
+            && !self.0.unqueryable.lock().unwrap_or_else(|p| p.into_inner()).contains(&session)
     }
 }
 

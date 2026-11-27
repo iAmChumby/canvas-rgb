@@ -77,10 +77,11 @@ fn any_other_code_is_unknown() {
 }
 
 #[test]
-fn only_unclean_and_startup_failure_spend_a_restart() {
-    assert!(counts_toward_restart(LastExit::Unclean));
-    assert!(counts_toward_restart(LastExit::StartupFailure));
-    for v in [LastExit::Clean, LastExit::Planned, LastExit::Unknown] {
+fn every_end_that_is_not_clean_or_planned_spends_a_restart() {
+    for v in [LastExit::Unclean, LastExit::StartupFailure, LastExit::Unknown] {
+        assert!(counts_toward_restart(v), "{v:?}");
+    }
+    for v in [LastExit::Clean, LastExit::Planned] {
         assert!(!counts_toward_restart(v), "{v:?}");
     }
 }
@@ -169,9 +170,12 @@ fn one_unclean_start_is_safe_once() {
     assert_eq!(b.persisted.unclean_streak, 1);
     assert_eq!(b.mode(), SafeStartMode::Safe);
     assert_eq!(b.reason(), Some(SafeStartReason::UncleanOnce));
-    // A clean end of that safe run resets the streak, and the mode goes back to normal.
+    // A clean end of that safe run goes back to normal. The streak stays, so a crash in the next
+    // run is a crash loop; a clean end of that normal run clears it.
     b.record_end(LastExit::Clean, "t1");
     assert_eq!(b.mode(), SafeStartMode::Normal);
+    assert_eq!(b.persisted.unclean_streak, 1);
+    b.record_end(LastExit::Clean, "t2");
     assert_eq!(b.persisted.unclean_streak, 0);
 }
 
@@ -187,10 +191,14 @@ fn two_unclean_ends_in_a_row_give_crash_loop() {
 }
 
 #[test]
-fn a_planned_end_of_a_normal_run_resets_the_streak() {
+fn only_a_clean_end_of_a_normal_run_resets_the_streak() {
     let dir = tempfile::tempdir().unwrap();
     let mut b = book(dir.path(), 1, SafeStartMode::Normal, None);
-    b.record_end(LastExit::Planned, "t0");
+    for kept in [LastExit::Planned, LastExit::Unknown, LastExit::StartupFailure] {
+        b.record_end(kept, "t0");
+        assert_eq!(b.persisted.unclean_streak, 1, "{kept:?}");
+    }
+    b.record_end(LastExit::Clean, "t0");
     assert_eq!(b.persisted.unclean_streak, 0);
     assert_eq!(b.mode(), SafeStartMode::Normal);
     assert_eq!(load(dir.path(), |_| true).persisted.unclean_streak, 0, "the reset was persisted");
