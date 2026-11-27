@@ -63,7 +63,7 @@ export const STATES = [
   { name: "peripherals", url: "/peripherals/?peripherals=unread", state: "pending" },
   // B6: a draft that differs from what is saved, and a name being typed.
   { name: "builder", url: builder("loaded"), state: "dirty" },
-  { name: "builder", url: "/effects/?stack=new&state=stack", state: "renaming" },
+  { name: "builder", url: "/effects/?stack=new&state=complete,stack", state: "renaming" },
   { name: "fans", url: "/fans/", state: "dirty" },
   { name: "scenes", url: "/", state: "renaming" },
   // B7: a name cut on a narrow window is whole again on a wide one.
@@ -265,6 +265,7 @@ export const MEASURE = () => {
     isBuilder: document.querySelector("[data-testid='stack-builder']") !== null,
     fixtureError: /The stack could not be read/.test(document.body.textContent ?? ""),
     barActions, menuActions, cutControls, overlaps,
+    statusLost: !!document.querySelector(".strip-mark-text") && !shown(".strip-mark-text") && !shown(".status-body-line"),
     dirty: primaryEl?.getAttribute("data-dirty") === "true",
     naming: shown('[role="dialog"][aria-label="Name the stack"]'),
     renameFields: renameFields.length, renameFocused: renameFields.includes(document.activeElement),
@@ -322,6 +323,8 @@ export function judge(m, state) {
   }
   for (const c of m.cutControls ?? []) bad.push(`${where}: the "${c}" key is cut off`);
   for (const o of m.overlaps ?? []) bad.push(`${where}: ${o}`);
+  // B8: status words that left the strip are under it.
+  if (m.statusLost && state.state !== "loading") bad.push(`${where}: the status words left the strip and have no home in the page`);
   // B6: each driven state is really on screen.
   if (state.name === "builder" && state.state === "dirty" && !m.dirty) bad.push(`${where}: the builder's Save does not say the draft is unsaved`);
   if (state.name === "builder" && state.state === "renaming" && !m.naming) bad.push(`${where}: the name dialog is not open`);
@@ -376,9 +379,9 @@ function plant(m) {
 async function addLayer(page) {
   const tile = page.locator(".rd-library-tile:not([disabled]):visible").first();
   // On a phone the library is behind its own tab under the stage.
-  if ((await tile.count()) === 0) {
-    await page.getByRole("radio", { name: "Library" }).or(page.getByRole("tab", { name: "Library" })).first().click({ timeout: 5000 });
-  }
+  const tab = page.getByRole("radio", { name: "Library" }).or(page.getByRole("tab", { name: "Library" })).first();
+  await tile.or(tab).first().waitFor({ timeout: 5000 });
+  if ((await tile.count()) === 0) await tab.click({ timeout: 5000 });
   await tile.click({ timeout: 5000 });
 }
 
@@ -399,7 +402,12 @@ async function driveState(page, state) {
     await page.locator('input[aria-label="The name of this scene"]:visible').waitFor({ timeout: 5000 });
   } else if (state.name === "fans" && state.state === "dirty") {
     // A header's mode that the saved profile does not hold. Fans draws no dirty mark (#586 R7).
-    await page.locator("main").getByRole("radio", { name: "Fixed %" }).first().click({ timeout: 5000 });
+    const fixed = page.locator("main").getByRole("radio", { name: "Fixed %" }).first();
+    const card = page.locator("main .fan-card").first();
+    await card.waitFor({ timeout: 5000 });
+    // A narrow page opens no header until one is tapped.
+    if (!(await fixed.isVisible())) await card.click({ timeout: 5000 });
+    await fixed.click({ timeout: 5000 });
     await page.evaluate(() => {
       for (const el of [document.scrollingElement, document.querySelector(".content")]) el?.scrollTo(0, 0);
     });

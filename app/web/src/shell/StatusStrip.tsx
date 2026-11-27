@@ -91,6 +91,14 @@ export function StatusStrip({
       root.dataset.barContext = fit.context;
       root.dataset.barSecondary = fit.secondary;
       strip.dataset.barRows = fit.rows;
+      // B8: the status words and the now-playing detail step down by the strip's own container
+      // rules. Whenever one of them is not drawn, the page body gets its home.
+      const gone = (selector: string) => {
+        const el = row.querySelector(selector);
+        return el !== null && getComputedStyle(el).display === "none";
+      };
+      const detailGone = root.dataset.nowWhere === "strip" && gone(".strip-now-detail");
+      root.dataset.barStatus = gone(".strip-mark-text") || detailGone ? "body" : "bar";
       publishHeight();
       row.dispatchEvent(new Event("barfit"));
     };
@@ -109,6 +117,8 @@ export function StatusStrip({
       gone = true;
       ro.disconnect();
       mo.disconnect();
+      // A window with no strip (the onboarding) has nothing that moved out of it.
+      for (const key of ["barContext", "barSecondary", "barStatus", "nowWhere"]) delete document.documentElement.dataset[key];
       document.documentElement.style.removeProperty("--strip-h");
     };
   }, []);

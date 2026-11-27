@@ -889,6 +889,22 @@ html[data-motion="reduced"] *::after {
   display: block;
 }
 
+/* The status words and the now-playing detail, under the strip whenever it gave them up (#586
+   B8). It wraps; it is never ellipsized. */
+.status-body-line {
+  flex: none;
+  margin: 0;
+  padding: var(--s2) var(--s6) 0;
+  color: var(--mute);
+  font: var(--t14) / 1.4 var(--fm);
+}
+
+@media (max-width: 720px) {
+  .status-body-line {
+    padding: var(--s2) var(--s3) 0;
+  }
+}
+
 /* The page's own actions, on the strip's right, before Pause and Search. */
 .rd-actions {
   display: flex;

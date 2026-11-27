@@ -144,3 +144,9 @@ test("B7: a name that stays cut on a wide window is a failure", () => {
   m.userTitle = { present: true, visible: true, full: LONG_NAME, fullWidth: 630, shown: "A very…hand", room: 100 };
   assert.ok(judge(m, state("builder", "regrow")).some((b) => b.includes("grow back")));
 });
+
+test("B8: status words with no home are a failure", () => {
+  const m = measurement();
+  m.statusLost = true;
+  assert.ok(judge(m, state("devices")).some((b) => b.includes("no home")));
+});

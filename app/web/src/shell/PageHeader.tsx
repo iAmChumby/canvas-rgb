@@ -140,7 +140,9 @@ export function UserTitle({ title }: { title: string }) {
       // B7: cut on code points, never inside a surrogate pair (an emoji stays whole).
       let keep = Array.from(title).length;
       let next = title;
-      while (room > 0 && keep > USER_TITLE_FLOOR && width(next) > room) {
+      // A row with no width has no layout to measure. A row with one, and no room left beside
+      // everything else, cuts the name to its floor.
+      while (row.clientWidth > 0 && keep > USER_TITLE_FLOOR && width(next) > room) {
         keep -= 1;
         next = middleCut(title, keep);
       }
@@ -207,13 +209,16 @@ export function BarContextMirror({ children, className }: { children: ReactNode;
 }
 
 /** True while the strip's measurement, published on the root element, is `value`. */
-function useBarFlag(key: "barContext" | "barSecondary", value: string): boolean {
+export function useBarFlag(key: "barContext" | "barSecondary" | "barStatus" | "nowWhere", value: string): boolean {
   const [on, setOn] = useState(false);
   useEffect(() => {
     const read = () => setOn(document.documentElement.dataset[key] === value);
     read();
     const mo = new MutationObserver(read);
-    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-bar-context", "data-bar-secondary"] });
+    mo.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-bar-context", "data-bar-secondary", "data-bar-status", "data-now-where"],
+    });
     return () => mo.disconnect();
   }, [key, value]);
   return on;
