@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { DownloadSimple, FolderOpen, Lifebuoy, UploadSimple } from "@phosphor-icons/react";
+import { DownloadSimple, FolderOpen, Info, Lifebuoy, UploadSimple } from "@phosphor-icons/react";
 import { Button, ButtonLink, FileButton } from "@/components/Button";
 import { ColorField } from "@/components/ColorField";
 import { Field, Panel, StateDot } from "@/components/Panel";
@@ -304,6 +304,9 @@ export function SettingsView() {
           <Panel title="Version" actions={<span className="fig rd-version" aria-busy={!status || undefined}>{status ? status.version : <InlineSkeleton width="8ch" />}</span>}>
             <UpdatesPanel />
             <div className="row-wrap" style={{ marginTop: 12 }}>
+              <ButtonLink href="/credits/" icon={<Info size={16} />}>
+                Credits
+              </ButtonLink>
               <ButtonLink href="/help/" icon={<Lifebuoy size={16} />}>
                 {"Help & About"}
               </ButtonLink>

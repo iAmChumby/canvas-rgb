@@ -182,6 +182,23 @@ jobs:
           cache: npm
           cache-dependency-path: app/web/package-lock.json
 
+      # The notices are build outputs: generated here, copied from app/web/public
+      # into app/web/out by next build, and never hand-edited (#578).
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-about@0.9.3
+
+      - name: Generate third-party notices
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .build/notices | Out-Null
+          cargo about generate --locked --fail --workspace -c about.toml --format json -o .build/notices/rust-notices.json
+          cargo about generate --locked --fail --workspace -c about.toml about.hbs -o .build/notices/rust-notices.txt
+          npm ci --prefix app/web
+          node app/web/scripts/generate-npm-notices.mjs
+          node tools/fix-rust-notice-holders.mjs
+          node tools/generate-credits.mjs
+
       # next.config.ts sets output: "export", so `next build` writes app/web/out.
       - name: Build the editor
         working-directory: app/web
@@ -407,11 +424,34 @@ jobs:
       - name: cargo deny check
         run: cargo deny --locked check
 
+      # cargo-about, pinned to the version approved for #578. It generates the
+      # Rust notices; --fail exits non-zero on a licence outside about.toml's
+      # accepted list (a copy of deny.toml's), so this job is the notice gate.
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-about@0.9.3
+
+      - name: Generate Rust notices
+        run: |
+          mkdir -p .build/notices
+          cargo about generate --locked --fail --workspace -c about.toml --format json -o .build/notices/rust-notices.json
+          cargo about generate --locked --fail --workspace -c about.toml about.hbs -o .build/notices/rust-notices.txt
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
+      - name: Install editor dependencies for notices
+        working-directory: app/web
+        run: npm ci
+
       # The npm half: the audit floor, the packages with an install script and the licences.
+      - name: npm notices
+        run: |
+          node app/web/scripts/generate-npm-notices.mjs
+          node tools/fix-rust-notice-holders.mjs
+          node tools/generate-credits.mjs
+
       - name: npm dependencies
         shell: pwsh
         run: pwsh -NoProfile -File tools/check-npm-deps.ps1

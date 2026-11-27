@@ -436,9 +436,10 @@ fn every_outbound_host_and_client_is_in_the_privacy_table() {
     );
     // #574 added scrub.rs, api/about.rs, HelpView.tsx and Receipt.tsx, so the set grew by five;
     // the docs site is a sixth host named in source and opened only by the browser (row 5).
-    // #577 added safe_start.rs in the service and api/safe_start.rs in the daemon: two more
-    // source files, with no new outbound host or connection constructor.
-    assert_eq!(files.len(), 482, "the set of scanned source files moved");
+    // #577 added safe_start.rs in the service and api/safe_start.rs in the daemon; #578 added
+    // CreditsView.tsx, LicenceDisclosure.tsx, credits/page.tsx and lib/licenceText.ts. Six more
+    // files, with no new outbound host or connection constructor.
+    assert_eq!(files.len(), 486, "the set of scanned source files moved");
     assert_eq!(found_hosts.len(), 4, "the set of outbound hosts moved");
     assert_eq!(found_tokens.len(), 8, "the set of connection constructors moved");
     assert!(

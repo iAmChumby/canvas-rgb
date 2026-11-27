@@ -44,6 +44,8 @@ fetch( = app/web/src/lib/api.ts
 fetch( = app/web/src/lib/endpoints.ts
 fetch( = app/web/src/lib/preview.ts
 fetch( = app/web/src/lib/thumb-demo.ts
+# The Credits page reads a bundled same-origin asset; it never names a host.
+fetch( = app/web/src/views/CreditsView.tsx
 # The updater's install path: start_install and fetch(), the signed installer download
 # (docs/privacy.md, outbound row 3).
 fetch( = app/src-tauri/src/update/mod.rs

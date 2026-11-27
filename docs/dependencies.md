@@ -93,6 +93,18 @@ started, `approved (YYYY-MM-DD)` for a dependency Luke approved later, and
 `pending approval` for one that has not been approved yet. Only a status that starts with
 `approved` is an approval: `pending approval` is a request, and the checks fail on it.
 
+## Build-only tools
+
+These tools are installed in CI and by developers, never linked into the app. They have no row in
+the generated tables below: `tools/generate-dependency-ledger.ps1` rebuilds those tables from the
+manifests, so a tool installed with `cargo install` is recorded here instead.
+
+| Tool | Kind | Version | Licence | Status |
+| --- | --- | --- | --- | --- |
+| cargo-about | cargo install, CI/build only | 0.9.3 | MIT OR Apache-2.0 | approved (2026-11-26) |
+
+cargo-deny 0.20.2 stays in the same role (CI/build only; MIT OR Apache-2.0, approved 2026-11-05).
+
 <!-- ledger:begin -->
 
 ### Rust: direct dependencies
@@ -176,7 +188,7 @@ started, `approved (YYYY-MM-DD)` for a dependency Luke approved later, and
 | react | npm, prod | 19.3.1 | MIT | approved (baseline 2026-11-05) |
 | react-dom | npm, prod | 19.3.1 | MIT | approved (baseline 2026-11-05) |
 | sonner | npm, prod | 2.0.8 | MIT | approved (2026-11-05) |
-| typescript | npm, dev | 7.0.2 | Apache-2.0 | approved (baseline 2026-11-05) |
+| typescript | npm, dev | 5.9.3 | Apache-2.0 | approved (baseline 2026-11-05) |
 | vitest | npm, dev | 5.1.0 | MIT | approved (baseline 2026-11-05) |
 
 ### npm: packages with an install script

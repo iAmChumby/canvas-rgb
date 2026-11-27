@@ -9,7 +9,7 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.{ts,tsx}"],
+    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.mjs"],
     // Raises Testing Library's async limit; the test timeout is raised with it (vitest.setup.ts, #59).
     setupFiles: ["./vitest.setup.ts"],
     testTimeout: TEST_TIMEOUT_MS,

@@ -55,13 +55,8 @@ const ALL_VIEWS = [
   { name: "peripherals", path: "/peripherals/" },
   // #577: Help & About shows the safe-start state and its mode action.
   { name: "help", path: "/help/" },
+  { name: "credits", path: "/credits/" },
 ];
-
-// Optional selection for a focused capture (e.g. #577's safe-start surfaces):
-// UI_CAPTURE_VIEWS=scenes,help UI_CAPTURE_VIEWPORTS=1440x900,390x844.
-const WANTED_VIEWS = process.env.UI_CAPTURE_VIEWS?.split(",").filter(Boolean);
-const WANTED_SIZES = process.env.UI_CAPTURE_VIEWPORTS?.split(",").filter(Boolean);
-const VIEWS = WANTED_VIEWS ? ALL_VIEWS.filter((v) => WANTED_VIEWS.includes(v.name)) : ALL_VIEWS;
 
 const ALL_VIEWPORTS = [
   { w: 1920, h: 1040 },
@@ -71,9 +66,19 @@ const ALL_VIEWPORTS = [
   { w: 960, h: 1032 },
   { w: 390, h: 844 },
 ];
-const VIEWPORTS = WANTED_SIZES
-  ? ALL_VIEWPORTS.filter((v) => WANTED_SIZES.includes(`${v.w}x${v.h}`))
-  : ALL_VIEWPORTS;
+
+// UI_CAPTURE_VIEWS narrows or replaces the view list when only a page or two needs a run:
+// a JSON array of { name, path } (#578), or comma-separated names from ALL_VIEWS (#577),
+// e.g. UI_CAPTURE_VIEWS=scenes,help.
+// UI_CAPTURE_VIEWPORTS does the same for sizes: a JSON array of { w, h }, or "1440x900,390x844".
+function pick(raw, all, key) {
+  if (!raw) return all;
+  if (raw.trim().startsWith("[")) return JSON.parse(raw);
+  const wanted = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  return all.filter((item) => wanted.includes(key(item)));
+}
+const VIEWS = pick(process.env.UI_CAPTURE_VIEWS, ALL_VIEWS, (v) => v.name);
+const VIEWPORTS = pick(process.env.UI_CAPTURE_VIEWPORTS, ALL_VIEWPORTS, (v) => `${v.w}x${v.h}`);
 
 const THEMES = ["dark", "light"];
 
@@ -334,7 +339,25 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
   }
   // Let the view settle (fonts, thumbnails, one preview frame).
   await page.waitForTimeout(400);
-  const fileName = `${view.name}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+  // UI_CAPTURE_SCROLL_TO scrolls to a selector before the shot, for a section
+  // that sits below the fold (#578).
+  const scrollTo = process.env.UI_CAPTURE_SCROLL_TO;
+  if (scrollTo) {
+    await page.evaluate((selector) => {
+      document.querySelector(selector)?.scrollIntoView({ block: "start" });
+    }, scrollTo);
+    await page.waitForTimeout(200);
+  }
+  // UI_CAPTURE_CLICK activates one selector before the shot (an opened
+  // disclosure). It dispatches the click in the page rather than using
+  // page.click: Playwright auto-scrolls to the element, which would push a
+  // section captured with UI_CAPTURE_SCROLL_TO back out of view.
+  const clickSelector = process.env.UI_CAPTURE_CLICK;
+  if (clickSelector) {
+    await page.$eval(clickSelector, (el) => el.click());
+    await page.waitForTimeout(200);
+  }
+  const fileName = `${view.name}${scrollTo ? "-scrolled" : ""}${clickSelector ? "-open" : ""}-react-${viewport.w}x${viewport.h}-${theme}.png`;
   const filePath = path.join(OUT_DIR, fileName);
   await page.screenshot({ path: filePath });
   page.off("pageerror", onPageError);
