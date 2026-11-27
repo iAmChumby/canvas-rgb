@@ -624,4 +624,3 @@ fn m1_an_untrusted_run_marker_is_never_written_over_or_deleted() {
     assert_eq!(std::fs::read(&temp).unwrap(), b"planted");
     assert!(!home.path().join(crate::safe_start::SVC_RUN_FILE).exists());
 }
-
