@@ -11,6 +11,7 @@ import {
   GameController,
   Keyboard,
   Mouse,
+  Warning,
 } from "@phosphor-icons/react";
 import { Button, ButtonLink, Swap } from "@/components/Button";
 import { FaultNote } from "@/components/FaultNote";
@@ -684,10 +685,18 @@ export function PeripheralsView() {
       <PageActions>
         {changedCount > 0 && (
           <>
-            <span className="warn-text fig rd-peri-pending">
-              {changedCount} change{changedCount === 1 ? "" : "s"} not sent
+            <span
+              className="warn-text fig rd-peri-pending"
+              aria-label={`${changedCount} change${changedCount === 1 ? "" : "s"} not sent`}
+              title={`${changedCount} change${changedCount === 1 ? "" : "s"} not sent`}
+            >
+              <Warning size={14} weight="fill" aria-hidden="true" />
+              <span className="rd-peri-pending-text">
+                {changedCount} change{changedCount === 1 ? "" : "s"} not sent
+              </span>
             </span>
             <Button
+              className="rd-secondary"
               variant="ghost"
               size="sm"
               icon={<ArrowCounterClockwise size={16} />}
@@ -697,7 +706,7 @@ export function PeripheralsView() {
             >
               <span className="rd-peri-revert-label">Revert</span>
             </Button>
-            <Button variant="primary" size="sm" busy={saving} onClick={() => void apply()}>
+            <Button data-bar-primary="" data-short="Apply" variant="primary" size="sm" busy={saving} onClick={() => void apply()}>
               Apply
             </Button>
           </>

@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 /**
@@ -90,16 +90,63 @@ function useSlot(pick: (slots: StripSlots) => HTMLElement | null): HTMLElement |
   return el;
 }
 
+/** The shortest a user-named title may be drawn before it gives way (#586 R1). */
+export const USER_TITLE_FLOOR = 12;
+
+/**
+ * A name a person typed. It gives way in the middle, never at the end: the first and last words
+ * are what tell two similarly named stacks apart. The full name stays in `title` and in the
+ * accessible name, and the drawn name never drops below twelve characters.
+ */
+export function UserTitle({ title }: { title: string }) {
+  const ref = useRef<HTMLHeadingElement>(null);
+  const [shown, setShown] = useState(title);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => {
+      const ctx = document.createElement("canvas").getContext("2d");
+      if (!ctx) return;
+      const cs = getComputedStyle(el);
+      ctx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      const available = el.clientWidth;
+      const full = ctx.measureText(title).width;
+      if (full <= available || available <= 0) {
+        setShown(title);
+        return;
+      }
+      const keep = Math.min(title.length, Math.max(USER_TITLE_FLOOR, Math.floor((available / full) * title.length) - 1));
+      if (keep >= title.length) {
+        setShown(title);
+        return;
+      }
+      const left = Math.ceil(keep / 2);
+      setShown(`${title.slice(0, left)}…${title.slice(title.length - (keep - left))}`);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [title]);
+  return (
+    <h1 ref={ref} data-bar-user-title="" title={title} aria-label={title}>
+      {shown}
+    </h1>
+  );
+}
+
 /**
  * The page's title, with the page's one-line context beside it, in the status strip.
  *
- * The title is the page's own heading, so it is an `h1` wherever it is drawn.
+ * The title is the page's own heading, so it is an `h1` wherever it is drawn. A page's own name
+ * never shrinks; a name a person typed is a `UserTitle` and gives way after the secondary keys.
  */
 export function PageTitle({
   title,
   context,
   contextBusy = false,
   leading,
+  userTitle = false,
 }: {
   title: string;
   context?: ReactNode;
@@ -107,13 +154,15 @@ export function PageTitle({
   contextBusy?: boolean;
   /** A quiet control before the title (a build mode's back key). */
   leading?: ReactNode;
+  /** The title is a name a person typed, not the page's own identity. */
+  userTitle?: boolean;
 }) {
   const slot = useSlot(pickTitle);
   if (!slot) return null;
   return createPortal(
     <span className="rd-title">
       {leading}
-      <h1>{title}</h1>
+      {userTitle ? <UserTitle title={title} /> : <h1>{title}</h1>}
       {context ? <span className="rd-context" aria-busy={contextBusy || undefined}>{context}</span> : null}
     </span>,
     slot,

@@ -274,7 +274,7 @@ describe("dragging a rectangle area on the preview", () => {
     saves().length = 0;
     drag(frame(), [px(71), px(173)], [px(71) + 40, px(173) - 20]);
     await waitFor(() => expect(readout()).toContain("x 36, y 140"));
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save the stack/ }));
     await waitFor(() => expect(saves()).toHaveLength(1));
     const picker = { kind: "rect", ...rectFromDrag({ x: 36, y: 140 }, { x: 146, y: 186 }) };
     expect(saves()[0]?.areas).toContainEqual(picker);

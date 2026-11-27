@@ -47,10 +47,12 @@ const decl = (body: string, prop: string) =>
 const appRules = rules(strip(read("src/styles/app.css")));
 const sceneRules = rules(strip(read("src/views/scenes/scenes.module.css")));
 const phone = (r: Rule) => /@media \(max-width: 720px\)/.test(r.at);
+// #586 R4: the mark's words now follow the strip's own content box, not the window's width.
+const narrowStrip = (r: Rule) => /@container strip \(max-width: 1150px\)/.test(r.at);
 
 describe("the phone strip keeps room for the scene's name (#422)", () => {
-  it("the strip's own phone rule hides the state mark's words on every page", () => {
-    const rule = appRules.find((r) => phone(r) && r.selectors.includes(".strip-mark-text"));
+  it("the strip's own narrow rule hides the state mark's words on every page", () => {
+    const rule = appRules.find((r) => narrowStrip(r) && r.selectors.includes(".strip-mark-text"));
     expect(decl(rule?.body ?? "", "display")).toBe("none");
   });
 

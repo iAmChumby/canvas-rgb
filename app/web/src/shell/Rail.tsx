@@ -251,39 +251,71 @@ function RailLink({ item, current, children, className }: { item: NavItem; curre
 }
 
 /**
+ * A value is shown whole or not at all (#586 R5). Names are user-chosen and of any length, so no
+ * CSS width can decide. The observer measures the value against its own box; while it is hidden
+ * the full words stay in `title` and in the accessible name. `visibility: hidden` keeps the box
+ * and its measurement stable, so the observer never oscillates.
+ */
+function RailValue({ value, className, children }: { value: string; className?: string; children?: ReactNode }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [fits, setFits] = useState(true);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setFits(el.scrollWidth <= el.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [value]);
+  return (
+    <span
+      ref={ref}
+      className={className ? `rail-value ${className}` : "rail-value"}
+      data-fits={fits ? "true" : "false"}
+      title={value}
+      aria-label={value}
+    >
+      {children ?? value}
+    </span>
+  );
+}
+
+/**
  * The value at the end of a row: what that page is doing now. A value the daemon has not
  * given is left out, so the row says nothing rather than something made up.
  */
 function PageValue({ href, values }: { href: string; values: RailValues }) {
   if (href === "/") {
-    return values.scene ? <span className="rail-value">{values.scene}</span> : null;
+    return values.scene ? <RailValue value={values.scene} /> : null;
   }
   if (href === "/effects/") {
     if (!values.effect) return null;
     return (
-      <span className="rail-value rail-value-name">
+      <RailValue value={values.effect} className="rail-value-name">
         {/* The light's own dot: it is lit while the lights run, and dim while they are paused. */}
         <span className="rail-led" data-on={values.paused ? "off" : "live"} aria-hidden="true" />
         {values.effect}
-      </span>
+      </RailValue>
     );
   }
   if (href === "/devices/") {
     if (!values.devices) return null;
+    const value = `${values.devices.connected}/${values.devices.total}`;
     return (
-      <span className="rail-value">
+      <RailValue value={value}>
         <span className="rail-value-ok">{values.devices.connected}</span>/{values.devices.total}
-      </span>
+      </RailValue>
     );
   }
   if (href === "/displays/") {
-    return values.displays === null ? null : <span className="rail-value">{values.displays}</span>;
+    return values.displays === null ? null : <RailValue value={String(values.displays)} />;
   }
   if (href === "/peripherals/") {
-    return values.peripherals === null ? null : <span className="rail-value">{values.peripherals}</span>;
+    return values.peripherals === null ? null : <RailValue value={String(values.peripherals)} />;
   }
   if (href === "/fans/") {
-    return values.fans ? <span className="rail-value">{values.fans}</span> : null;
+    return values.fans ? <RailValue value={values.fans} /> : null;
   }
   return null;
 }

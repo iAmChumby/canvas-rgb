@@ -299,7 +299,7 @@ describe.each(SHAPES)("the stack builder, $name", ({ behind }) => {
 
   it("the Save key keeps the builder and takes the guard's entry back", async () => {
     await ready();
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save the stack/ }));
     await waitFor(() => expect(screen.queryByText("Unsaved")).toBeNull());
     await settled([...behind, STACK, STACK + GUARD], came);
     expect(builderOpen()).toBe(true);

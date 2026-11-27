@@ -321,6 +321,7 @@ export function AudioSourcePanel() {
     <span className="audio-picker" ref={triggerRef}>
       <Select
         label="Audio source"
+        nameIncludesValue
         value={value}
         options={flatOptions}
         groups={groups}

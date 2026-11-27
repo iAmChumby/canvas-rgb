@@ -40,6 +40,7 @@ export function BuilderHeader({
     <>
       <PageTitle
         title={name}
+        userTitle
         context={
           <span className="rd-stacks-context">
             Stack · {count} {count === 1 ? "layer" : "layers"}
@@ -65,6 +66,7 @@ export function BuilderHeader({
       <PageActions>
         {!narrow && groupHref && (
           <ButtonLink
+            className="rd-secondary"
             href={groupHref}
             variant="ghost"
             size="sm"
@@ -74,11 +76,11 @@ export function BuilderHeader({
             <span className="rd-btn-text">{groupName ? `Back to ${groupName}` : "Back to the scene"}</span>
           </ButtonLink>
         )}
-        {/* On a phone the strip carries one key: Save, as an icon with its name (D95.5.7). The
-            word Unsaved and Revert are desktop keys: the phone's way out asks Save or Discard. */}
-        {!narrow && dirty && <span className="mute rd-unsaved">Unsaved</span>}
+        {/* R7: Save is always in the bar and is disabled when there is nothing to save. R2: the
+            Unsaved words become a dot on Save, with those words kept in its accessible name. */}
         {!narrow && (
           <Button
+            className="rd-secondary"
             size="sm"
             variant="ghost"
             icon={<ArrowCounterClockwise size={14} />}
@@ -90,16 +92,19 @@ export function BuilderHeader({
         )}
         <Button
           className="rd-stack-strip-save"
+          data-bar-primary=""
+          data-dirty={dirty ? "true" : undefined}
           size="sm"
           variant="primary"
           icon={<FloppyDisk size={14} />}
-          aria-label={narrow ? "Save" : undefined}
-          title={narrow ? "Save the stack" : undefined}
+          aria-label={dirty ? "Save the stack, unsaved changes" : "Save the stack"}
+          title="Save the stack"
           busy={saveState === "saving"}
           disabled={!canSave}
           onClick={onSave}
         >
-          <span className="rd-btn-text">Save</span>
+          <span className="rd-btn-text" data-short="Save">Save</span>
+          {dirty && <span className="sr-only">Unsaved</span>}
         </Button>
       </PageActions>
     </>

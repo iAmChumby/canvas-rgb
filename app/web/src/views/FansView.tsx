@@ -272,6 +272,13 @@ export function FansView() {
           ) : undefined
         }
       />
+      {/* R3: when the strip cannot hold the context, the same chip line is the first line of the
+          body. CSS shows one copy: the strip decides from its own content box. */}
+      {fans && !fansError && (
+        <p className="bar-context-mirror fig">
+          {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
+        </p>
+      )}
       {chipFault && !chipFault.dismissed && (
         <FaultNote
           parts={chipFault}
@@ -687,13 +694,26 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
 
   return (
     <PageActions>
-      <Segmented
-        label="The fan profile"
-        value={fans.active_profile}
-        options={fans.profiles.map((p) => ({ value: p, label: p }))}
-        onChange={(p) => void run(() => api.switchFanProfile(p))}
-      />
+      <span className="rd-profile-segments">
+        <Segmented
+          label="The fan profile"
+          value={fans.active_profile}
+          options={fans.profiles.map((p) => ({ value: p, label: p }))}
+          onChange={(p) => void run(() => api.switchFanProfile(p))}
+        />
+      </span>
+      {/* The switch becomes a dropdown when the strip is short; the active value stays visible. */}
+      <span className="rd-profile-dropdown">
+        <Select
+          label="Fan profile"
+          nameIncludesValue
+          value={fans.active_profile}
+          options={fans.profiles.map((p) => ({ value: p, label: p }))}
+          onChange={(p) => void run(() => api.switchFanProfile(p))}
+        />
+      </span>
       <Button
+        data-bar-primary=""
         variant="primary"
         size="sm"
         icon={<FloppyDisk size={14} />}
@@ -705,7 +725,8 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
           )
         }
       >
-        <span className="rd-btn-text">Save {fans.active_profile}</span>
+        {/* "Save" says what the key does; the profile selected beside it says which one. */}
+        <span className="rd-btn-text" data-short="Save">Save</span>
       </Button>
       <span ref={moreRef} className="row-wrap">
         <IconButton

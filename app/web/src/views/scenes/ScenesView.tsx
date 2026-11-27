@@ -401,6 +401,36 @@ export function ScenesView() {
           )
         }
       />
+      {/* #586 R3: when the strip gives up the scene line, the name and its rename field move
+          together to the head of the body. Both places use the same state, so rename works here
+          too. CSS shows one copy, decided by the strip's own width. */}
+      {scene && (
+        <div className="bar-context-mirror scene-context-mirror">
+          {renaming ? (
+            <NameField
+              value={sceneName}
+              label="The name of this scene"
+              placeholder="Scene name"
+              onChange={setSceneName}
+              onEnter={() => commitSceneName(sceneName)}
+              onEscape={() => setRenaming(false)}
+            />
+          ) : (
+            <span className="rd-scenes-context">
+              <b>{scene.name}</b>
+              {groups.length === 0 ? (
+                <span className="rd-scenes-counts"> · no groups yet</span>
+              ) : (
+                <span className="rd-scenes-counts">
+                  {" "}
+                  · {groups.length} {groups.length === 1 ? "group" : "groups"}
+                  {lightsState === "ready" ? ` · ${totalLeds} LEDs` : ""}
+                </span>
+              )}
+            </span>
+          )}
+        </div>
+      )}
       <PageActions>
         <IconButton
           label="Undo"

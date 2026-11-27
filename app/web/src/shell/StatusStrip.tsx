@@ -5,8 +5,6 @@ import { CheckCircle, CircleDashed, MagnifyingGlass, Pause, Play, Warning, Warni
 import { Button, IconButton, Swap } from "@/components/Button";
 import { IconSwap } from "@/components/IconSwap";
 import { Crossfade } from "@/components/Crossfade";
-import { useMediaQuery } from "@/components/MediaQuery";
-import { PHONE_QUERY } from "@/lib/MediaQuery";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { Popover } from "@/components/Popover";
 import { notify } from "@/components/Notify";
@@ -20,6 +18,15 @@ import { StripSlot } from "@/shell/PageHeader";
 
 /** What the strip says when nothing is wrong. */
 const ALL_GOOD = "All connected";
+
+/**
+ * The strip's own content box, not the window's width, decides where the page's context lives
+ * (#586). The rail takes width the viewport media queries never knew about. Below this width the
+ * context moves to the head of the page body; the pages render the same words there and CSS shows
+ * only one copy. Measured from the widest context in the audit (Fans, 311 px) plus the title, the
+ * primary action and the gaps: 1150 px of content keeps every one of them whole.
+ */
+export const STRIP_CONTEXT_ROOM = 1150;
 
 /** The icon of the mark: a tick when all is well, a warning when it is not. */
 function markIcon(tone: Tone) {
@@ -64,20 +71,45 @@ export function StatusStrip({
   const scenesError = useSnap((s) => s.scenesError);
   const [busy, setBusy] = useState(false);
   const stripRef = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
   const markRef = useRef<HTMLButtonElement>(null);
 
-  // The height of the strip, published for the overlays that sit under it.
+  // The strip's own room, its row count and its height are published together for the page body
+  // and for the overlays that sit under the strip. The height must be republished when the row
+  // count changes: the page's actions arrive through a portal after the strip has mounted.
   useEffect(() => {
-    const el = stripRef.current;
-    if (!el) return;
-    const publish = () => {
-      document.documentElement.style.setProperty("--strip-h", `${el.offsetHeight}px`);
+    const strip = stripRef.current;
+    const row = rowRef.current;
+    if (!strip || !row) return;
+    const publishHeight = () => {
+      // Let the stylesheet choose the seeded height first (one row or two); the inline value is
+      // only a copy of that measurement for the overlays, never a lock on the old row count.
+      document.documentElement.style.removeProperty("--strip-h");
+      document.documentElement.style.setProperty("--strip-h", `${strip.offsetHeight}px`);
     };
-    publish();
-    const ro = new ResizeObserver(publish);
-    ro.observe(el);
+    const rows = () => {
+      const two = strip.querySelector(".rd-actions") !== null && window.innerWidth <= 720;
+      strip.dataset.barRows = two ? "2" : "1";
+      publishHeight();
+    };
+    const room = () => {
+      const cs = getComputedStyle(row);
+      const content = row.clientWidth - parseFloat(cs.paddingLeft || "0") - parseFloat(cs.paddingRight || "0");
+      document.documentElement.dataset.barContext = content >= STRIP_CONTEXT_ROOM ? "bar" : "body";
+    };
+    rows();
+    room();
+    const ro = new ResizeObserver(() => {
+      room();
+      publishHeight();
+    });
+    ro.observe(row);
+    ro.observe(strip);
+    const mo = new MutationObserver(rows);
+    mo.observe(strip, { childList: true, subtree: true });
     return () => {
       ro.disconnect();
+      mo.disconnect();
       document.documentElement.style.removeProperty("--strip-h");
     };
   }, []);
@@ -102,9 +134,6 @@ export function StatusStrip({
   );
   const list = problems(status, statusFault, faults);
   const tone: Tone = list[0]?.tone ?? "ok";
-  // On a phone the row has room for the link's name, not for the whole sentence. The full
-  // words are the button's own label, so nothing is lost.
-  const phone = useMediaQuery(PHONE_QUERY);
   // #580 R2, R14, C1, C2: the mark counts every note, dismissed or not, and says so when the
   // counted notes are all hidden. The count does not swallow the first problem: the popover shows
   // the whole list whenever the mark shows a count.
@@ -112,11 +141,9 @@ export function StatusStrip({
   const warnings = faultEntries.length;
   const allDismissed = warnings > 0 && faultEntries.every((p) => p.dismissed);
   const countText = `${warnings} warning${warnings === 1 ? "" : "s"}${allDismissed ? ", dismissed" : ""}`;
-  const markText = warnings > 0
-    ? (phone ? String(warnings) : countText)
-    : list[0]
-      ? (phone ? (list[0].short ?? list[0].text) : list[0].text)
-      : ALL_GOOD;
+  // The words are always the full sentence; the container rules drop them when the strip is too
+  // narrow, and the button's own label still carries them (#586 R4).
+  const markText = warnings > 0 ? countText : (list[0]?.text ?? ALL_GOOD);
   // The accessible name is always the full sentence, including ", dismissed" (fix pass 2): the
   // phone's visible number is short, but the button must still say what the count means.
   const fullText = warnings > 0 ? countText : (list[0]?.text ?? ALL_GOOD);
@@ -163,6 +190,7 @@ export function StatusStrip({
   return (
     <div className="strip" role="status" aria-label="Status" ref={stripRef}>
       <div className="strip-inner">
+        <div className="strip-row" ref={rowRef}>
         <span className="strip-brand">
           <BrandMark size={16} />
           <Wordmark />
@@ -253,6 +281,7 @@ export function StatusStrip({
             />
           )}
         </span>
+        </div>
       </div>
 
       <Popover
@@ -264,6 +293,9 @@ export function StatusStrip({
       >
         <div className="strip-details-head">Details</div>
         <dl className="strip-details-list">
+          {/* R10: the now-playing detail leaves the row before its name does, so the popover
+              keeps the whole sentence one click from the mark. */}
+          <Detail label="Now playing" value={now.detail ? `${nowName} ${now.detail}` : nowName} />
           <Detail label="Frame rate" value={status ? <><AnimatedNumber value={status.fps_measured} decimals={1} /> / <AnimatedNumber value={status.fps_target} /> fps</> : "—"} />
           <Detail label="Frame time" value={status ? <><AnimatedNumber value={status.frame_time_ms} decimals={1} /> ms</> : "—"} />
           <Detail label="Lights" value={status ? (paused ? "paused" : status.parked ? "idle" : "running") : "—"} />
