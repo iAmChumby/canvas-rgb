@@ -13,7 +13,9 @@
  */
 
 const SEPARATOR = /^\[\d+\]$/;
-const COPYRIGHT = /^copyright\b/i;
+// A copyright *notice* carries a year, (c) or (C); "copyright license to
+// reproduce ..." is ordinary prose and must stay inside its paragraph.
+const COPYRIGHT = /^copyright\b.*(?:\(\s*c\s*\)|©|\b(?:19|20)\d{2}\b)/i;
 const TITLE = /^(?:[A-Z][\w.+-]*\s+){1,3}License\b/;
 const VERSION = /^version\s+\d/i;
 const URL = /^https?:\/\/\S+$/i;
