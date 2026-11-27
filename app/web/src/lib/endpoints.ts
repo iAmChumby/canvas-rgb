@@ -5,6 +5,8 @@ import { apiConfig, request, requestBinary, type RequestOptions } from "@/lib/ap
 import { isDemo } from "@/lib/host";
 import { routes } from "@/proto/routes";
 import type { Status } from "@/proto/Status";
+import type { About } from "@/proto/About";
+import type { AboutReport } from "@/proto/AboutReport";
 import type { OutputState } from "@/proto/OutputState";
 import type { PatchOutput } from "@/proto/PatchOutput";
 import type { DevicesResponse } from "@/proto/DevicesResponse";
@@ -82,6 +84,12 @@ import type { AudioTestState } from "@/proto/AudioTestState";
  * The chain routes (`routes::CHAINS`, `routes::CHAIN_SETUP*`). `proto/routes.ts` mirrors the
  * spine by hand and does not carry them yet, so they are spelled here.
  */
+/**
+ * The Help & About routes (`routes::ABOUT` and `ABOUT_REPORT`). `proto/routes.ts` mirrors the
+ * spine by hand and does not carry them yet, so they are spelled here, as the chains below are.
+ */
+const ABOUT = "/api/v1/about";
+const ABOUT_REPORT = "/api/v1/about/report";
 const CHAINS = "/api/v1/chains";
 /**
  * The pattern routes (`routes::PATTERNS`, `routes::PATTERN`, 0.16.0). `proto/routes.ts` mirrors the
@@ -121,6 +129,11 @@ async function cancelAndLeave(path: string, body: SetupEmpty): Promise<void> {
 
 export const api = {
   status: () => request<Status>("GET", routes.status),
+
+  /** The identity facts, once per visit to Help & About (#574). */
+  about: () => request<About>("GET", ABOUT),
+  /** The finished markdown and template fields; never rebuilt by the editor (#574 R1). */
+  aboutReport: () => request<AboutReport>("GET", ABOUT_REPORT),
 
   output: () => request<OutputState>("GET", routes.output),
   patchOutput: (body: PatchOutput) => request<OutputState>("PATCH", routes.output, body),

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Icon } from "@phosphor-icons/react";
-import { Fan, FilmSlate, GameController, Gear, Monitor, Circuitry, Sparkle } from "@phosphor-icons/react";
+import { Fan, FilmSlate, GameController, Gear, Lifebuoy, Monitor, Circuitry, Sparkle } from "@phosphor-icons/react";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { useSnap } from "@/lib/store";
 import { useRailData, type RailValues } from "@/shell/RailData";
@@ -37,8 +37,11 @@ const PAGES: NavItem[] = [
 /** The settings row, which sits under the deck. */
 const SETTINGS: NavItem = { href: "/settings/", label: "Settings", icon: Gear };
 
+/** The help row, beside Settings: one click from any page, and in the palette for every width. */
+export const HELP: NavItem = { href: "/help/", label: "Help & About", icon: Lifebuoy };
+
 /** Every page, in the order the command palette offers them. */
-export const NAV: NavItem[] = [...PAGES, SETTINGS];
+export const NAV: NavItem[] = [...PAGES, SETTINGS, HELP];
 
 interface MarkerBox {
   /** Wide layout: the bar sits on the rail's left edge, level with the active link. */
@@ -207,6 +210,9 @@ export function Rail({ pathname }: { pathname: string }) {
       <RailDeck />
 
       <RailLink item={SETTINGS} current={SETTINGS.href === pathname} />
+      {/* The eighth dock item. The dock gate (R5) may hide it at phone widths; NAV keeps the
+          palette door at every size, and Settings carries a row there as well. */}
+      <RailLink item={HELP} current={HELP.href === pathname} className="rail-help" />
 
       <div className="rail-status">
         <span className="rail-status-dot" data-tone={engineTone} aria-hidden="true" />
@@ -217,14 +223,14 @@ export function Rail({ pathname }: { pathname: string }) {
   );
 }
 
-function RailLink({ item, current, children }: { item: NavItem; current: boolean; children?: ReactNode }) {
+function RailLink({ item, current, children, className }: { item: NavItem; current: boolean; children?: ReactNode; className?: string }) {
   const Glyph = item.icon;
   const router = useRouter();
   return (
     <Link
       href={item.href}
       prefetch={false}
-      className="rail-link"
+      className={className ? `rail-link ${className}` : "rail-link"}
       data-label={item.label}
       aria-current={current ? "page" : undefined}
       onClick={(e) => {

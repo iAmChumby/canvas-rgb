@@ -1093,7 +1093,7 @@ html[data-motion="reduced"] *::after {
 }
 
 /* The success pulse (issue #187, rule 6): one short ring on the control that
-   succeeded — applying to the lights, saving a layout, saving an effect.
+   succeeded â€” applying to the lights, saving a layout, saving an effect.
    One run, no loop; with motion off the ring is already gone. */
 @keyframes success-pulse {
   0% {
@@ -1667,7 +1667,7 @@ button.chip:hover {
 }
 
 /* S3/N6: the effect disclosure gets its own line under the compact row and
-   may wrap — it is never part of the ellipsised state line. */
+   may wrap â€” it is never part of the ellipsised state line. */
 .audio-readings {
   margin-top: var(--s3);
   height: var(--audio-readings-h);
@@ -3350,7 +3350,7 @@ button.chip:hover {
   line-height: 1.4;
 }
 
-/* Play on …: the groups of the active scene, and every group as one choice. */.play-on-anchor {
+/* Play on â€¦: the groups of the active scene, and every group as one choice. */.play-on-anchor {
   display: inline-flex;
   min-width: 0;
   max-width: 100%;
@@ -4697,7 +4697,7 @@ button.chip:hover {
 }
 
 /* The words, the figure and its unit are one group and never wrap inside it (#268: the figure's
-   own row-wrap let "°C" drop under it when the note was narrow). The state after it (the word
+   own row-wrap let "Â°C" drop under it when the note was narrow). The state after it (the word
    "automatic" or the Reset key) is the only part that moves to its own line, and it is as wide
    in both states (the hidden sizer is the key), so setting a limit never changes the note's
    height. */
@@ -6585,7 +6585,7 @@ button.chip:hover {
 
 /* The mouse's DPI stages: a chip per stage, the active one marked. Equal columns, not a wrapping
    flex row (#387): a chip is as wide as its figure, so with `flex-wrap` a stage could land on a row
-   of its own — at 1440 the wider figures put "26000" alone on the third row, and the panel grew
+   of its own â€” at 1440 the wider figures put "26000" alone on the third row, and the panel grew
    40 px and reshuffled the columns beside it. Six stages are 3 + 3, five are 3 + 2, and two or
    four are 2 + 2, so no row is left with one chip on it. Every cell is wider than the chip's own
    content at every panel width (the narrowest cell is 78.7 px at 1440, and a chip is its 2 px
@@ -7915,7 +7915,7 @@ button.chip:hover {
   }
 }
 
-/* Build mode keeps `Stack · N layers` beside the title at every desktop size: it is the one
+/* Build mode keeps `Stack Â· N layers` beside the title at every desktop size: it is the one
    line that says what is open. The strip's own rule gives the context up below 1100 for the
    pages whose actions need the room; this page's actions are two keys. */
 @media (max-width: 1099px) {
@@ -8089,7 +8089,7 @@ button.chip:hover {
   pointer-events: none;
 }
 
-/* The three starter stacks under an empty stage (#257 phase 4, spec §5). */
+/* The three starter stacks under an empty stage (#257 phase 4, spec Â§5). */
 .rd-starters {
   display: flex;
   flex-direction: column;
@@ -8365,7 +8365,7 @@ button.chip:hover {
 .rd-area-frame .edge.w { left: -13px; }
 
 /* The side bars: the corners' knob in a long, thin shape, centred on each side, so a side
-   resize can be found without hunting (spec §4). Off when the side is too short to hold one. */
+   resize can be found without hunting (spec Â§4). Off when the side is too short to hold one. */
 .rd-area-frame .edge::before {
   content: "";
   position: absolute;
@@ -8714,7 +8714,7 @@ button.chip:hover {
 }
 
 /* On a phone the chip is its thumb and the x and nothing more, so the row's subtitle keeps its
-   room: "Add 70% · Rectangle" read "Rectangl…" at 390 (#257 review). */
+   room: "Add 70% Â· Rectangle" read "Rectanglâ€¦" at 390 (#257 review). */
 @media (max-width: 480px) {
   .layer-row .layer-thumbs {
     gap: 2px;
@@ -9524,7 +9524,7 @@ button.chip:hover {
   }
 
   /* The builder's title yields to its one key: a long stack name ellipsises instead of pushing
-     Save off the strip. The `Stack · N layers` context is a desktop line: the mockup's phone
+     Save off the strip. The `Stack Â· N layers` context is a desktop line: the mockup's phone
      strip is the back key, the name and Save (D95.5.7). */
   .strip-inner:has(.rd-stack-strip-save) .rd-title {
     flex: 0 1 auto;
@@ -10343,5 +10343,227 @@ button.chip:hover {
   .rd-insert-line {
     transition: none;
     animation: none;
+  }
+}
+
+/* ---------- Help & About (#574) ----------
+   Identity and receipt on the left, keys on the right at 1440; full-width rows and a wrapping
+   receipt at 390. Every colour is a token, so both themes apply without a second style set. */
+
+.rd-help .help-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.help-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+  gap: var(--s4);
+  align-items: start;
+}
+
+.help-main,
+.help-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  min-width: 0;
+}
+
+.help-grid > .panel,
+.help-main > .panel,
+.help-side > .panel {
+  border-radius: var(--r-md);
+}
+
+.help-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  color: var(--ink);
+}
+
+.help-brand .brand-mark {
+  color: var(--live);
+}
+
+.help-version {
+  margin-left: auto;
+  color: var(--a1);
+  font-size: var(--t16);
+}
+
+.help-hero-note {
+  margin-top: var(--s3);
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.5;
+}
+
+.help-facts {
+  margin-top: var(--s4);
+  border-top: 1px solid var(--line);
+}
+
+.help-fact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2) var(--s4);
+  min-height: 34px;
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.help-fact-label {
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
+.help-fact-value {
+  color: var(--ink);
+  font-size: var(--t14);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.help-hero-link {
+  margin-top: var(--s3);
+}
+
+.help-count {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.receipt {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+}
+
+.receipt-text {
+  max-height: 320px;
+  min-height: 92px;
+  overflow: auto;
+  margin: 0;
+  padding: var(--s3);
+  color: var(--dim);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.receipt-text:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.help-report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+  margin-top: var(--s3);
+}
+
+.help-report-note,
+.help-slot-note {
+  font-size: var(--t14);
+  line-height: 1.5;
+}
+
+.help-keys {
+  display: flex;
+  flex-direction: column;
+}
+
+.help-key {
+  display: flex;
+  width: 100%;
+  justify-content: flex-start;
+  gap: var(--s3);
+  padding: var(--s3) var(--s2);
+  border-radius: 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.help-key:last-child {
+  border-bottom: 0;
+}
+
+.help-key:hover {
+  background: var(--hover);
+}
+
+.help-key:active {
+  background: var(--press);
+}
+
+.help-key-icon {
+  flex: 0 0 auto;
+  color: var(--a3);
+}
+
+.help-key-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.help-key-label {
+  color: var(--ink);
+  font-size: var(--t14);
+  font-weight: 600;
+}
+
+.help-key-hint {
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+.help-key-arrow {
+  flex: 0 0 auto;
+  color: var(--mute);
+}
+
+@media (max-width: 900px) {
+  .help-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 560px) {
+  .rd-help {
+    gap: var(--s3);
+  }
+
+  .help-grid,
+  .help-main,
+  .help-side {
+    gap: var(--s3);
+  }
+
+  .help-grid > .panel,
+  .help-main > .panel,
+  .help-side > .panel {
+    padding: var(--s3);
+  }
+
+  .help-key {
+    align-items: center;
+    padding: var(--s3) var(--s1);
+  }
+
+  .receipt-text {
+    max-height: none;
   }
 }
