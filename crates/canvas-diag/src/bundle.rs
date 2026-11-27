@@ -30,7 +30,11 @@ pub const CONFIG_FILES: &[&str] = &[
 /// The next free bundle path in the one fixed folder. A clash adds `-2`, `-3`, ...; an existing
 /// file is never opened for writing (P2).
 pub fn output_path(dir: &Path) -> Result<PathBuf, BundleError> {
-    let stamp = crate::paths::timestamp();
+    output_path_with_stamp(dir, &crate::paths::timestamp())
+}
+
+/// The same rule with an injected stamp so two writers can be made to want one name (H4).
+fn output_path_with_stamp(dir: &Path, stamp: &str) -> Result<PathBuf, BundleError> {
     let first = dir.join(format!("canvas-rgb-diag-{stamp}.zip"));
     if !first.exists() {
         return Ok(first);
@@ -68,6 +72,10 @@ pub struct Bundle {
     logs: PathBuf,
     machine_logs: PathBuf,
     fs: Box<dyn LogFs>,
+    /// Test seams: a fixed stamp makes two writers want one name, and the barrier is released
+    /// immediately before the create, so the race is real rather than a reimplementation (H4).
+    stamp: Option<String>,
+    race_gate: Option<std::sync::Arc<std::sync::Barrier>>,
 }
 
 impl Default for Bundle {
@@ -83,12 +91,21 @@ impl Bundle {
             logs: crate::paths::log_dir(),
             machine_logs: crate::paths::machine_log_dir(),
             fs: Box::new(RealLogFs::default()),
+            stamp: None,
+            race_gate: None,
         }
     }
 
     /// Test seam: user files on disk, machine logs behind `fs`.
     pub fn with_dirs(home: PathBuf, logs: PathBuf, machine_logs: PathBuf, fs: Box<dyn LogFs>) -> Self {
-        Self { home, logs, machine_logs, fs }
+        Self {
+            home,
+            logs,
+            machine_logs,
+            fs,
+            stamp: None,
+            race_gate: None,
+        }
     }
 
     /// Reads every source once. The service logs are opened and checked exactly once; the reason
@@ -134,10 +151,11 @@ impl Bundle {
                     files.push(Source { name, bytes });
                 }
                 // Each bad service log names itself in the file list; the other logs stay in.
+                // When none went in, the status says why instead of "empty" (H1).
                 for reason in collected.notices {
-                    notices.push(DiagFile { name: format!("service-logs/{reason}"), bytes: 0 });
+                    notices.push(DiagFile { name: reason, bytes: 0 });
                 }
-                None
+                collected.status
             }
             Err(reason) => Some(reason),
         };
@@ -161,12 +179,22 @@ impl Bundle {
     /// `POST`: writes the zip into the one fixed folder, never over an existing file (P2). Every
     /// text file is scrubbed and every device id gets one alias per bundle.
     pub fn write(&self, scrubber: &Scrubber) -> Result<DiagBundle, BundleError> {
-        let dir = crate::paths::diagnostics_dir();
-        std::fs::create_dir_all(&dir)?;
+        self.write_to(&crate::paths::diagnostics_dir(), scrubber)
+    }
+
+    /// The real write path, with the destination and stamp injected for the race test (H4).
+    fn write_to(&self, dir: &Path, scrubber: &Scrubber) -> Result<DiagBundle, BundleError> {
+        std::fs::create_dir_all(dir)?;
         // Two writers in the same second can pick the same name; create-new is the arbiter and
         // the loser picks the next free suffix (F5).
         let (out, file) = loop {
-            let candidate = output_path(&dir)?;
+            let candidate = match &self.stamp {
+                Some(stamp) => output_path_with_stamp(dir, stamp)?,
+                None => output_path(dir)?,
+            };
+            if let Some(gate) = &self.race_gate {
+                gate.wait();
+            }
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
                 Ok(file) => break (candidate, file),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -464,28 +492,37 @@ mod tests {
 
     #[test]
     fn two_writers_on_one_stamp_get_distinct_files() {
-        let dir = home().join("race");
-        std::fs::create_dir_all(&dir).unwrap();
+        let (home, logs, _) = tree();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let (tx, rx) = std::sync::mpsc::channel();
         let handles: Vec<_> = (0..2)
             .map(|_| {
-                let dir = dir.clone();
+                let home = home.clone();
+                let logs = logs.clone();
                 let barrier = barrier.clone();
                 let tx = tx.clone();
+                let scrubber = scrubber();
                 std::thread::spawn(move || {
-                    barrier.wait();
-                    loop {
-                        let candidate = output_path(&dir).unwrap();
-                        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
-                            Ok(_) => {
-                                tx.send(candidate).unwrap();
-                                break;
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                            Err(e) => panic!("could not reserve a zip: {e}"),
-                        }
-                    }
+                    // Built inside the thread: the filesystem box is not Send, but every input
+                    // is, and the write below is the real Bundle::write path (H4).
+                    let mut bundle = Bundle::with_dirs(
+                        home,
+                        logs,
+                        PathBuf::from("machine/logs"),
+                        Box::new(FakeMachine {
+                            owner: "S-1-5-18".into(),
+                            reparse: HashSet::new(),
+                            reads: Cell::new(0),
+                        }),
+                    );
+                    // Both writers want the same name; the barrier is released inside the real
+                    // write path, immediately before create_new.
+                    bundle.stamp = Some("race-two-writers".to_string());
+                    bundle.race_gate = Some(barrier);
+                    let answer = bundle
+                        .write_to(&crate::paths::diagnostics_dir(), &scrubber)
+                        .unwrap();
+                    tx.send(answer.path.unwrap()).unwrap();
                 })
             })
             .collect();
@@ -495,6 +532,16 @@ mod tests {
         let paths: Vec<_> = rx.iter().take(2).collect();
         assert_eq!(paths.len(), 2);
         assert_ne!(paths[0], paths[1], "two racing writers must not share a path");
+        for path in paths {
+            let bytes = std::fs::read(&path).unwrap();
+            let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+            assert!(archive.len() >= 2, "a complete zip: {path:?}");
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i).unwrap();
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut entry, &mut text).unwrap();
+            }
+        }
     }
 
     #[test]
@@ -532,6 +579,46 @@ mod tests {
             .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
             .collect();
         assert!(!names.iter().any(|n| n == "config/effects.json"), "{names:?}");
+    }
+
+    /// A folder with one file that could not be read gets a reason in the file list and an
+    /// honest status, never "empty" (H1).
+    struct BadLogMachine;
+
+    impl LogFs for BadLogMachine {
+        fn exists(&self, _p: &Path) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn is_reparse(&self, _p: &Path) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn owner(&self, _p: &Path) -> Result<String, String> {
+            Ok("S-1-5-18".to_string())
+        }
+        fn files(&self, _p: &Path) -> Result<Vec<PathBuf>, String> {
+            Ok(vec![PathBuf::from("machine/logs/big.log")])
+        }
+        fn open_checked(&self, _p: &Path) -> Result<Vec<u8>, String> {
+            Err("larger than 4 MiB".to_string())
+        }
+    }
+
+    #[test]
+    fn a_folder_of_only_bad_logs_says_why_instead_of_empty() {
+        let (home, logs, _) = tree();
+        let bundle = Bundle::with_dirs(
+            home,
+            logs,
+            PathBuf::from("machine/logs"),
+            Box::new(BadLogMachine),
+        );
+        let list = bundle.list();
+        assert!(list.files.iter().any(|f| {
+            f.name == "service-logs/big.log (not included: larger than 4 MiB)"
+        }), "{list:?}");
+        let status = list.service_logs.unwrap();
+        assert!(status.contains("None of the 1 file could be read"), "{status}");
+        assert!(status.contains("larger than 4 MiB"), "{status}");
     }
 
     #[test]

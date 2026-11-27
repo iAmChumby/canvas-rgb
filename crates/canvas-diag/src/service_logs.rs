@@ -57,7 +57,17 @@ pub type Log = (String, Vec<u8>);
 #[derive(Debug, Default)]
 pub struct Collected {
     pub logs: Vec<Log>,
+    /// One line per file that was left out, in the same shape as config and local logs.
     pub notices: Vec<String>,
+    /// Set when files were found but none could be included. The bundle reports this instead of
+    /// claiming the folder is empty (H1).
+    pub status: Option<String>,
+}
+
+fn push_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|r| r == reason) {
+        reasons.push(reason.to_string());
+    }
 }
 
 /// `None` when the folder may be read; `Some(reason)` when it must be refused. The reason is
@@ -68,30 +78,48 @@ pub fn refusal(fs: &dyn LogFs, dir: &Path) -> Option<String> {
 }
 
 /// Reads the logs after the whole path passes. Folder-wide refusals still fail here; a bad file
-/// only names itself in `notices`. An empty folder is a refusal too: the UI must never say
-/// "included" unless at least one log really went into the zip (G1/G2).
+/// only names itself in `notices`. A truly empty folder is a refusal; a folder of files that all
+/// failed gets an honest status, never "empty" (G1/G2/H1).
 pub fn collect(fs: &dyn LogFs, dir: &Path) -> Result<Collected, String> {
     check(fs, dir)?;
     let mut out = Collected::default();
+    let mut reasons = Vec::new();
+    let mut candidates = 0usize;
     for path in fs.files(dir)? {
         // A subdirectory is not a log: skip it, never open it as a file.
         if fs.is_dir(&path) {
             continue;
         }
+        candidates += 1;
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            out.notices.push("a service log has no readable name: not included".to_string());
+            out.notices.push("service-logs/(unnamed) (not included: no readable name)".to_string());
+            push_reason(&mut reasons, "no readable name");
             continue;
         };
         match fs.open_checked(&path) {
             Ok(bytes) if std::str::from_utf8(&bytes).is_ok() => {
                 out.logs.push((format!("service-logs/{name}"), bytes));
             }
-            Ok(_) => out.notices.push(format!("{name}: not included: not a text file")),
-            Err(e) => out.notices.push(format!("{name}: not included: {e}")),
+            Ok(_) => {
+                out.notices.push(format!("service-logs/{name} (not included: not a text file)"));
+                push_reason(&mut reasons, "not a text file");
+            }
+            Err(e) => {
+                out.notices.push(format!("service-logs/{name} (not included: {e})"));
+                push_reason(&mut reasons, &e);
+            }
         }
     }
     if out.logs.is_empty() {
-        return Err("Service logs: not included. The service log folder is empty.".to_string());
+        out.status = Some(if candidates == 0 {
+            "Service logs: not included. The service log folder holds no files.".to_string()
+        } else {
+            format!(
+                "Service logs: not included. None of the {candidates} {} could be read: {}.",
+                if candidates == 1 { "file" } else { "files" },
+                reasons.join(", ")
+            )
+        });
     }
     Ok(out)
 }
@@ -123,6 +151,11 @@ fn check(fs: &dyn LogFs, dir: &Path) -> Result<(), String> {
         return Err("Service logs: not included. The service log folder is empty.".to_string());
     }
     for path in files {
+        // A subdirectory is never opened as a log: it is skipped here too, so a foreign-owned
+        // subdirectory cannot void the folder (H1). Files keep the fail-closed check.
+        if fs.is_dir(&path) {
+            continue;
+        }
         refuse_reparse(fs, &path, "a file")?;
         let owner = fs
             .owner(&path)
@@ -559,5 +592,63 @@ mod tests {
         let collected = collect(&fs, Path::new("machine/logs")).unwrap();
         assert_eq!(collected.logs.len(), 1);
         assert_eq!(fs.reads.get(), 1, "the subdirectory was not opened");
+    }
+
+    #[test]
+    fn a_single_oversized_log_names_the_file_and_says_why_it_was_left_out() {
+        let mut fs = fake();
+        fs.logs.clear();
+        let big = PathBuf::from("machine/logs/big.log");
+        fs.logs.push(big.clone());
+        fs.oversized.insert(big);
+        let collected = collect(&fs, Path::new("machine/logs")).unwrap();
+        assert!(collected.logs.is_empty());
+        assert_eq!(
+            collected.notices,
+            vec!["service-logs/big.log (not included: larger than 4 MiB)".to_string()]
+        );
+        let status = collected.status.unwrap();
+        assert!(status.contains("None of the 1 file could be read"), "{status}");
+        assert!(status.contains("larger than 4 MiB"), "{status}");
+        assert!(!status.contains("empty"), "{status}");
+    }
+
+    #[test]
+    fn a_foreign_owned_subdirectory_is_skipped_without_voiding_the_folder() {
+        let mut fs = fake();
+        let sub = PathBuf::from("machine/logs/archive");
+        fs.logs.push(sub.clone());
+        fs.subdirs.insert(sub.clone());
+        fs.owners.insert(sub, "S-1-5-21-999".to_string());
+        assert_eq!(refusal(&fs, Path::new("machine/logs")), None);
+        let collected = collect(&fs, Path::new("machine/logs")).unwrap();
+        assert_eq!(collected.logs.len(), 1);
+        assert!(collected.notices.is_empty());
+        assert_eq!(fs.reads.get(), 1, "only the real file was opened");
+    }
+
+    #[test]
+    fn a_foreign_owned_file_is_still_refused() {
+        let mut fs = fake();
+        fs.owners.insert(
+            PathBuf::from("machine/logs/svc.log"),
+            "S-1-5-21-999".to_string(),
+        );
+        let reason = refusal(&fs, Path::new("machine/logs")).unwrap();
+        assert!(reason.contains("A service log is owned by"), "{reason}");
+        assert_eq!(fs.reads.get(), 0);
+    }
+
+    #[test]
+    fn a_folder_of_only_subdirectories_is_not_called_empty() {
+        let mut fs = fake();
+        let sub = PathBuf::from("machine/logs/archive");
+        fs.logs.clear();
+        fs.logs.push(sub.clone());
+        fs.subdirs.insert(sub);
+        let collected = collect(&fs, Path::new("machine/logs")).unwrap();
+        assert!(collected.logs.is_empty());
+        let status = collected.status.unwrap();
+        assert!(status.contains("holds no files"), "{status}");
     }
 }

@@ -23,6 +23,10 @@ pub const DEVICE_TOKEN: &str = "the device";
 
 /// Adapter prefixes a `DeviceId` may carry, shared by the bundle's alias pass and the error
 /// scrubber. `<prefix>:<rest>` is a device fingerprint, never a sentence or a URL.
+///
+/// `ble:` is written only to `PeripheralInfo.location` in the 8BitDo adapter; the pad's id is
+/// built from `ADAPTER_NAME` (`eightbitdo-ultimate-2`). A location is not a DeviceId and no daemon
+/// error message interpolates it, so `ble` is deliberately absent here (H3).
 pub const ADAPTER_PREFIXES: &[&str] = &[
     "openrgb", "ring", "chione", "royuan", "attack-shark-x6", "eightbitdo-ultimate-2", "hid", "usb", "fake", "cpu",
 ];
@@ -73,8 +77,9 @@ pub fn device_id_end(text: &str, at: usize) -> Option<usize> {
                 if b == b'.' && (end + 1 == bytes.len() || bytes[end + 1].is_ascii_whitespace()) {
                     break;
                 }
-                // "openrgb:ABC: timeout" is one id followed by prose: keep the separator.
-                if b == b':' && bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) {
+                // "openrgb:ABC: timeout" and a trailing "openrgb:ABC:" are one id followed by
+                // a separator: keep the colon, including at the very end (H6).
+                if b == b':' && bytes.get(end + 1).map_or(true, u8::is_ascii_whitespace) {
                     break;
                 }
                 // A backslash escaping a quote in JSON is the end of the id, not part of it.
@@ -477,6 +482,109 @@ mod tests {
         assert_eq!(scrub_device_ids("openrgb:ABC."), "the device.");
         assert_eq!(scrub_device_ids("openrgb:ABC"), "the device");
         assert_eq!(scrub_device_ids("failed on openrgb:ABC: timeout"), "failed on the device: timeout");
+        assert_eq!(scrub_device_ids("openrgb:ABC:"), "the device:");
+    }
+
+    /// The `NAME` and value of a same-file `const NAME: &str = "value";`.
+    fn string_const(line: &str) -> Option<(String, String)> {
+        let at = line.find("const ")?;
+        let rest = &line[at + "const ".len()..];
+        let name = rest[..rest.find(':')?].trim().to_string();
+        let value = rest[rest.find('=')? + 1..].trim_start().strip_prefix('"')?;
+        Some((name, value.split('"').next()?.to_string()))
+    }
+
+    /// Replaces `{CONST}` references in a `DeviceId(format!("..."))` literal with same-file consts.
+    fn expand_consts(literal: &str, consts: &std::collections::BTreeMap<String, String>) -> String {
+        let mut out = literal.to_string();
+        for (name, value) in consts {
+            out = out.replace(&format!("{{{name}}}"), value);
+        }
+        out
+    }
+
+    /// One source line's production DeviceIds: literal prefixes and `{CONST}:` references.
+    fn prefixes_on_line(
+        line: &str,
+        consts: &std::collections::BTreeMap<String, String>,
+        found: &mut std::collections::BTreeSet<String>,
+    ) {
+        for marker in ["DeviceId(format!(\"", "DeviceId(\""] {
+            if let Some(i) = line.find(marker) {
+                let literal = line[i + marker.len()..].split('"').next().unwrap_or("");
+                let expanded = expand_consts(literal, consts);
+                if let Some((prefix, _)) = expanded.split_once(':') {
+                    let prefix = prefix.trim_end_matches(':');
+                    if !prefix.is_empty()
+                        && prefix.chars().all(|c| {
+                            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
+                        })
+                    {
+                        found.insert(prefix.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scans one file, skipping only items marked `#[cfg(test)]` (a `mod` or `fn` block, brace
+    /// matched), so a `#[cfg(test)]` early in a file cannot hide the production ids after it (H3).
+    fn production_prefixes(text: &str) -> std::collections::BTreeSet<String> {
+        use std::collections::{BTreeMap, BTreeSet};
+        let consts: BTreeMap<String, String> = text.lines().filter_map(string_const).collect();
+        let mut found = BTreeSet::new();
+        enum State {
+            Normal,
+            Pending,
+            Seeking,
+            Skipping(usize),
+        }
+        let mut state = State::Normal;
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            let opens = line.matches('{').count();
+            let closes = line.matches('}').count();
+            match state {
+                State::Normal => {
+                    if trimmed.starts_with("#[cfg(test)]") {
+                        state = State::Pending;
+                    } else {
+                        prefixes_on_line(line, &consts, &mut found);
+                    }
+                }
+                State::Pending => {
+                    if trimmed.starts_with('#') {
+                        continue; // another attribute on the same test item
+                    }
+                    let is_test_item = trimmed.starts_with("mod ")
+                        || trimmed.starts_with("fn ")
+                        || trimmed.starts_with("async fn ")
+                        || trimmed.starts_with("pub fn ")
+                        || trimmed.starts_with("pub async fn ");
+                    if !is_test_item {
+                        state = State::Normal;
+                        prefixes_on_line(line, &consts, &mut found);
+                    } else if opens > closes {
+                        state = State::Skipping(opens - closes);
+                    } else {
+                        state = State::Seeking; // a signature that spans lines
+                    }
+                }
+                State::Seeking => {
+                    if opens > closes {
+                        state = State::Skipping(opens - closes);
+                    }
+                }
+                State::Skipping(depth) => {
+                    if closes >= depth {
+                        state = State::Normal;
+                    } else {
+                        state = State::Skipping(depth + opens - closes);
+                    }
+                }
+            }
+        }
+        found
     }
 
     #[test]
@@ -490,43 +598,31 @@ mod tests {
                 if path.is_dir() {
                     walk(&path, found);
                 } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                    let text = std::fs::read_to_string(&path).unwrap();
-                    for line in text.lines() {
-                        // Production ids only: test-only DeviceIds are not adapters.
-                        if line.contains("#[cfg(test)]") {
-                            break;
-                        }
-                        for marker in ["DeviceId(format!(\"", "DeviceId(\""] {
-                            if let Some(i) = line.find(marker) {
-                                let tail = &line[i + marker.len()..];
-                                if let Some(col) = tail.find(':') {
-                                    let prefix = &tail[..col];
-                                    if prefix.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
-                                        found.insert(prefix.to_string());
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(i) = line.find("ADAPTER_NAME: &str = \"") {
-                            let tail = &line[i + "ADAPTER_NAME: &str = \"".len()..];
-                            let name = tail.split('"').next().unwrap_or("");
-                            found.insert(name.to_string());
-                        }
-                        if line.contains("RING_PREFIX") {
-                            found.insert("ring".to_string());
-                        }
-                    }
+                    found.extend(production_prefixes(&std::fs::read_to_string(&path).unwrap()));
                 }
             }
         }
         for root in &roots {
             walk(root, &mut found);
         }
-        // `cpu` is a fan source name, never built as a DeviceId in crates/, so the source scan
-        // cannot find it; it is listed explicitly. `fake` is found in the daemon's fakes now.
+        // `fake` appears only in test-only DeviceIds, which still reach error text through the
+        // fakes; `cpu` is a fan source name, never a DeviceId. Both stay explicit (H3).
+        found.insert("fake".to_string());
         found.insert("cpu".to_string());
+        // Prove the scan sees the three const/literal shapes that regressed before.
+        for required in ["openrgb", "ring", "eightbitdo-ultimate-2", "chione", "royuan", "attack-shark-x6"] {
+            assert!(found.contains(required), "the guard did not find {required} in source");
+        }
         for prefix in found {
             assert!(ADAPTER_PREFIXES.contains(&prefix.as_str()), "missing adapter prefix {prefix:?}");
         }
+    }
+
+    #[test]
+    fn a_cfg_test_block_does_not_hide_a_later_openrgb_id() {
+        // The early `#[cfg(test)] fn moved` in openrgb.rs must not hide `openrgb:{fingerprint}`.
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let text = std::fs::read_to_string(crates.join("canvas-adapters/src/openrgb.rs")).unwrap();
+        assert!(production_prefixes(&text).contains("openrgb"));
     }
 }

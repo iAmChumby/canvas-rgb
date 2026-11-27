@@ -7,12 +7,13 @@
 //! rejection has its whole body scrubbed. A 2xx body is never rewritten: it may hold user-authored
 //! text that a later save writes back (G4). Those fields are scrubbed where the daemon builds them.
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use canvas_proto::api::ApiError;
+use futures_util::StreamExt;
 use std::sync::Arc;
 
 use crate::state::App;
@@ -41,23 +42,37 @@ pub async fn scrub_errors(State(app): State<Arc<App>>, request: Request, next: N
         return response;
     }
     let (mut parts, body) = response.into_parts();
-    // Read frames ourselves so a broken stream passes its bytes through unchanged instead of
-    // turning the body into an empty one.
     let mut stream = body.into_data_stream();
-    let mut bytes = Vec::new();
-    let mut broken = false;
-    while bytes.len() <= MAX_ERROR_BODY {
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
         match futures_util::StreamExt::next(&mut stream).await {
-            Some(Ok(chunk)) => bytes.extend_from_slice(&chunk),
-            Some(Err(_)) => {
-                broken = true;
-                break;
+            Some(Ok(chunk)) => {
+                if bytes.len().saturating_add(chunk.len()) > MAX_ERROR_BODY {
+                    // Past the cap (including a stream with no Content-Length): put the bytes we
+                    // read back in front of the rest and pass the whole body through untouched
+                    // (H2). Nothing is rewritten and no length is guessed.
+                    let head = futures_util::stream::iter(std::iter::once(Ok::<Bytes, axum::Error>(
+                        Bytes::from(std::mem::take(&mut bytes)),
+                    )));
+                    let current = futures_util::stream::iter(std::iter::once(Ok::<Bytes, axum::Error>(chunk)));
+                    return Response::from_parts(
+                        parts,
+                        Body::from_stream(head.chain(current).chain(stream)),
+                    );
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Some(Err(e)) => {
+                // A broken stream forwards what was read and the error, not a truncated rewrite.
+                parts.headers.remove(header::CONTENT_LENGTH);
+                let head = futures_util::stream::iter(std::iter::once(Ok::<Bytes, axum::Error>(
+                    Bytes::from(bytes),
+                )));
+                let error = futures_util::stream::iter(std::iter::once(Err::<Bytes, axum::Error>(e)));
+                return Response::from_parts(parts, Body::from_stream(head.chain(error)));
             }
             None => break, // normal end of the body
         }
-    }
-    if broken {
-        return Response::from_parts(parts, Body::from(bytes));
     }
     let scrubber = app.scrubber.lock().unwrap_or_else(|e| e.into_inner());
     let rewritten = if is_json {
@@ -116,9 +131,12 @@ pub fn scrub_error_text(scrubber: &crate::scrub::Scrubber, text: &str) -> String
 }
 
 /// A plain-text body (an extractor rejection) is one sentence: scrub it and keep its bytes.
+/// Binary is never lossy-converted into text: it passes through byte-identical (H2).
 fn scrub_plain(bytes: &[u8], scrubber: &crate::scrub::Scrubber) -> Vec<u8> {
-    let text = String::from_utf8_lossy(bytes);
-    scrub_error_text(scrubber, &text).into_bytes()
+    match std::str::from_utf8(bytes) {
+        Ok(text) => scrub_error_text(scrubber, text).into_bytes(),
+        Err(_) => bytes.to_vec(),
+    }
 }
 
 /// The next step for each error code. `message` says what happened; `hint` says what to do.
@@ -153,7 +171,6 @@ pub fn error_body(status: StatusCode, code: &str, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Bytes;
     use crate::scrub::Scrubber;
 
     #[test]
