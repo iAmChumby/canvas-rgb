@@ -416,10 +416,13 @@ pub async fn handle_client(
                 } else {
                     "LeaveSafeStart"
                 };
-                let launched = core.lock().await.daemon.daemon_pid();
+                // One lock for the check and the change: the daemon the check admitted is
+                // the one the change kills, with no tick in between.
+                let mut guard = core.lock().await;
+                let launched = guard.daemon.daemon_pid();
                 let readmit = admit_daemon(peer.as_ref(), launched, what);
                 match readmit {
-                    Ok(_) => core.lock().await.handle(request.unwrap(), Instant::now()),
+                    Ok(_) => guard.handle(request.unwrap(), Instant::now()),
                     Err(rejected) => {
                         tracing::warn!(
                             pid = ?rejected.pid,
@@ -1072,9 +1075,10 @@ pub(crate) mod tests {
             mode: canvas_proto::api::SafeStartMode::Safe,
             reason: Some(canvas_proto::api::SafeStartReason::CrashLoop),
             since: Some("t0".into()),
+            ..Default::default()
         };
         crate::safe_start::save(&home, &state).unwrap();
-        core.daemon.set_book(crate::safe_start::Book::open(&home, crate::safe_start::load(&home, |_| true)));
+        core.daemon.set_book(crate::safe_start::Book::open(&home, crate::safe_start::load(&home, |_| true), |_| true));
         core.daemon.start(Instant::now());
         let daemon = core.daemon.daemon_pid().unwrap();
         let core = Arc::new(Mutex::new(core));
@@ -1111,9 +1115,10 @@ pub(crate) mod tests {
             mode: canvas_proto::api::SafeStartMode::Normal,
             reason: None,
             since: None,
+            ..Default::default()
         };
         crate::safe_start::save(&home, &state).unwrap();
-        core.daemon.set_book(crate::safe_start::Book::open(&home, crate::safe_start::load(&home, |_| true)));
+        core.daemon.set_book(crate::safe_start::Book::open(&home, crate::safe_start::load(&home, |_| true), |_| true));
         core.daemon.start(Instant::now());
         let daemon = core.daemon.daemon_pid().unwrap();
         let core = Arc::new(Mutex::new(core));

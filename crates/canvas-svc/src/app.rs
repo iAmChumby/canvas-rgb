@@ -40,7 +40,7 @@ use tokio::sync::Mutex as AsyncMutex;
 pub struct Boot {
     home: PathBuf,
     secure_error: Option<String>,
-    trust: Box<dyn SecureDir>,
+    trust: Arc<Mutex<Box<dyn SecureDir>>>,
 }
 
 impl Boot {
@@ -59,14 +59,21 @@ impl Boot {
     /// True when `path` may be read: the home is secured and the path's owner is SYSTEM or
     /// Administrators, and it is not a reparse point.
     pub fn trusted(&self, path: &Path) -> bool {
-        self.secured() && self.trust.trusted(path)
+        self.secured() && self.trust.lock().unwrap_or_else(|p| p.into_inner()).trusted(path)
+    }
+
+    /// The same owner check, for a caller that outlives the boot (safe start's writes).
+    pub fn trust_check(&self) -> impl Fn(&Path) -> bool + Send + 'static {
+        let secured = self.secured();
+        let trust = Arc::clone(&self.trust);
+        move |path: &Path| secured && trust.lock().unwrap_or_else(|p| p.into_inner()).trusted(path)
     }
 }
 
 /// Step 1: secures the machine home. A failure is recorded, not panicked on.
 pub fn secure_boot(home: &Path, mut secure: Box<dyn SecureDir>) -> Boot {
     let secure_error = secure.secure(home).err().map(|e| format!("{}: {e}", home.display()));
-    Boot { home: home.to_path_buf(), secure_error, trust: secure }
+    Boot { home: home.to_path_buf(), secure_error, trust: Arc::new(Mutex::new(secure)) }
 }
 
 /// Reads permission for one file: `false` (treated as missing) when it is not trusted.
@@ -179,9 +186,6 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
         if l.untrusted_state {
             tracing::error!(path = %safe_start::safe_start_path(home).display(), "safe-start.json is not trusted; reading streak 0 and leaving it alone");
         }
-        if let Err(e) = safe_start::write_svc_run(home) {
-            tracing::error!(path = %safe_start::svc_run_path(home).display(), error = %e, "could not write the service-run marker");
-        }
         l
     } else {
         safe_start::Loaded::default()
@@ -209,14 +213,15 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
 
     let mut daemon = DaemonSupervisor::new(deps.install_dir.join(DAEMON_EXE), deps.launcher);
     if boot.secured() {
-        daemon.set_book(Book::open(home, loaded));
+        let book = Book::open(home, loaded, boot.trust_check());
+        book.mark_running();
+        daemon.set_book(book);
     } else {
         daemon.set_book(Book::disabled(home));
     }
     daemon.start(now);
     let mut core = Core::new(fans, openrgb, daemon);
     if boot.secured() {
-        core.home = Some(home.to_path_buf());
         core.updates = Some(deps.updates.unwrap_or_else(|| Arc::new(UpdateInstaller::production(home.to_path_buf(), deps.install_dir.clone()))));
     }
     core

@@ -8,7 +8,7 @@
 //! untrusted file - it reads as no state and the caller logs the path.
 
 use crate::store::{self, StoreError};
-use canvas_proto::api::{LastExit, SafeStartMode, SafeStartReason};
+use canvas_proto::api::{LastExit, SafeStart, SafeStartMode, SafeStartReason};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -118,11 +118,20 @@ pub struct Persisted {
     pub reason: Option<SafeStartReason>,
     #[serde(default)]
     pub since: Option<String>,
+    /// How the last daemon run ended, so a service restart can still say it.
+    #[serde(default)]
+    pub last_exit: LastExit,
 }
 
 impl Default for Persisted {
     fn default() -> Self {
-        Self { unclean_streak: 0, mode: SafeStartMode::Normal, reason: None, since: None }
+        Self {
+            unclean_streak: 0,
+            mode: SafeStartMode::Normal,
+            reason: None,
+            since: None,
+            last_exit: LastExit::Unknown,
+        }
     }
 }
 
@@ -204,29 +213,39 @@ pub struct Loaded {
     pub untrusted_state: bool,
 }
 
+/// The per-file owner check, the one the reads use, kept for every later write and delete.
+pub type Trust = Box<dyn Fn(&Path) -> bool + Send>;
+
 /// The in-service book. It keeps the verdict of the run that just ended, updates the streak
-/// and the mode, and persists the result before the next daemon is launched.
+/// and the mode, and persists the result before the next daemon is launched. Every write and
+/// delete checks the file first: one that is not trusted is left exactly as it is, and the
+/// book carries on in memory.
 pub struct Book {
     pub persisted: Persisted,
     pub last_exit: LastExit,
     home: PathBuf,
     /// False when the machine home is not secured: no file in it may be written at all.
     writable: bool,
+    trust: Trust,
 }
 
 impl Book {
     /// Opens the book from the fail-closed read. A leftover marker makes the last verdict
     /// `Unknown`, never `Unclean`; the persisted mode is otherwise honoured as written.
-    pub fn open(home: &Path, loaded: Loaded) -> Self {
-        // There is no daemon run in this service instance yet. A leftover marker says the
-        // previous service did not stop cleanly, but that still reads Unknown, never Unclean.
-        let last_exit = LastExit::Unknown;
-        Self { persisted: loaded.persisted, last_exit, home: home.to_path_buf(), writable: true }
+    pub fn open(home: &Path, loaded: Loaded, trust: impl Fn(&Path) -> bool + Send + 'static) -> Self {
+        let last_exit = if loaded.leftover { LastExit::Unknown } else { loaded.persisted.last_exit };
+        Self { persisted: loaded.persisted, last_exit, home: home.to_path_buf(), writable: true, trust: Box::new(trust) }
     }
 
     /// A book for an unsecured home: the decision stays Normal and nothing is ever written.
     pub fn disabled(home: &Path) -> Self {
-        Self { persisted: Persisted::default(), last_exit: LastExit::Unknown, home: home.to_path_buf(), writable: false }
+        Self {
+            persisted: Persisted::default(),
+            last_exit: LastExit::Unknown,
+            home: home.to_path_buf(),
+            writable: false,
+            trust: Box::new(|_| false),
+        }
     }
 
     pub fn mode(&self) -> SafeStartMode {
@@ -247,17 +266,41 @@ impl Book {
         (self.persisted.mode == SafeStartMode::Safe).then(|| self.persisted.since.clone()).flatten()
     }
 
-    /// Records how a daemon run ended and decides the mode for the next one. A normal-mode
-    /// clean or planned end clears the streak; an unclean end adds one. Logons never call this.
+    /// The record the daemon's `Hello` carries, or `None` in normal mode. The fan answer is the
+    /// daemon's to fill, from the fan status it reads.
+    pub fn record(&self) -> Option<SafeStart> {
+        (self.persisted.mode == SafeStartMode::Safe).then(|| SafeStart {
+            active: true,
+            reason: self.reason(),
+            unclean_streak: self.persisted.unclean_streak,
+            since: self.since(),
+            fans_on_bios: None,
+        })
+    }
+
+    /// Records how a daemon run ended and decides the mode for the next one. A clean or planned
+    /// end clears the streak whatever the mode; an unclean end adds one. Logons never call this.
     pub fn record_end(&mut self, v: LastExit, now: &str) {
-        self.last_exit = v;
         if v == LastExit::Unclean {
             self.persisted.unclean_streak = self.persisted.unclean_streak.saturating_add(1);
-        } else if matches!(v, LastExit::Clean | LastExit::Planned) && self.persisted.mode == SafeStartMode::Normal {
+        } else if matches!(v, LastExit::Clean | LastExit::Planned) {
             self.persisted.unclean_streak = 0;
         }
+        self.set_last_exit(v);
         self.decide(now);
-        let _ = self.flush();
+        self.flush();
+    }
+
+    /// Notes an end that was no run this service watched (a stale daemon found at start, a
+    /// launch that never made a process): it is reported, and changes neither streak nor mode.
+    pub fn note_end(&mut self, v: LastExit) {
+        self.set_last_exit(v);
+        self.flush();
+    }
+
+    fn set_last_exit(&mut self, v: LastExit) {
+        self.last_exit = v;
+        self.persisted.last_exit = v;
     }
 
     /// "Start normally" or "Start in safe start" from Help & About, the banner or the tray.
@@ -278,20 +321,21 @@ impl Book {
                 }
             }
         }
-        self.flush_ok_or_log();
+        self.flush();
     }
 
-    /// The mode from the streak, the last verdict and the persisted choice (#577 section 3).
+    /// The mode from the persisted choice, the streak and the last verdict (#577 section 3). The
+    /// owner's choice stays until "Start normally", whatever the runs under it do.
     fn decide(&mut self, now: &str) {
         let streak = self.persisted.unclean_streak;
-        let (mode, reason) = if self.last_exit == LastExit::Unclean && streak < 2 {
-            (SafeStartMode::Safe, Some(SafeStartReason::UncleanOnce))
+        let chosen = self.persisted.mode == SafeStartMode::Safe
+            && self.persisted.reason == Some(SafeStartReason::UserChose);
+        let (mode, reason) = if chosen {
+            (SafeStartMode::Safe, Some(SafeStartReason::UserChose))
         } else if streak >= 2 {
             (SafeStartMode::Safe, Some(SafeStartReason::CrashLoop))
-        } else if self.persisted.mode == SafeStartMode::Safe
-            && self.persisted.reason == Some(SafeStartReason::UserChose)
-        {
-            (SafeStartMode::Safe, Some(SafeStartReason::UserChose))
+        } else if self.last_exit == LastExit::Unclean {
+            (SafeStartMode::Safe, Some(SafeStartReason::UncleanOnce))
         } else {
             (SafeStartMode::Normal, None)
         };
@@ -305,17 +349,53 @@ impl Book {
         self.persisted.reason = reason;
     }
 
-    fn flush(&self) -> Result<(), StoreError> {
-        if self.writable {
-            save(&self.home, &self.persisted)
-        } else {
-            Ok(())
+    /// Whether `path` may be created, replaced or removed: it is absent, or it passes the owner
+    /// check. A refusal is logged with the path.
+    fn may_change(&self, path: &Path) -> bool {
+        let ok = match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+            Ok(_) => (self.trust)(path),
+        };
+        if !ok {
+            tracing::error!(path = %path.display(), "not trusted: leaving this file alone and keeping safe start's state in memory");
+        }
+        ok
+    }
+
+    /// An atomic write goes through a temp file and a rename: both names are checked.
+    fn may_write(&self, path: &Path) -> bool {
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        self.writable && self.may_change(path) && self.may_change(Path::new(&tmp))
+    }
+
+    /// Writes the service-run marker, at service start.
+    pub fn mark_running(&self) {
+        let path = svc_run_path(&self.home);
+        if self.may_write(&path) {
+            if let Err(e) = write_svc_run(&self.home) {
+                tracing::error!(path = %path.display(), error = %e, "could not write the service-run marker");
+            }
         }
     }
 
-    fn flush_ok_or_log(&self) {
-        if let Err(e) = self.flush() {
-            tracing::error!(path = %safe_start_path(&self.home).display(), error = %e, "could not save safe-start.json");
+    /// Removes the service-run marker, on a clean SCM stop.
+    pub fn mark_stopped(&self) {
+        let path = svc_run_path(&self.home);
+        if self.writable && self.may_change(&path) {
+            if let Err(e) = remove_svc_run(&self.home) {
+                tracing::error!(path = %path.display(), error = %e, "could not remove the service-run marker");
+            }
+        }
+    }
+
+    fn flush(&self) {
+        let path = safe_start_path(&self.home);
+        if self.may_write(&path) {
+            if let Err(e) = save(&self.home, &self.persisted) {
+                tracing::error!(path = %path.display(), error = %e, "could not save safe-start.json");
+            }
         }
     }
 }

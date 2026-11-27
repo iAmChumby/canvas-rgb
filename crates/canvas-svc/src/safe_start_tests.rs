@@ -107,7 +107,7 @@ fn svc_run_is_written_at_start_and_removed_at_stop() {
 fn a_leftover_svc_run_is_unknown_and_does_not_trigger_safe_start() {
     let dir = tempfile::tempdir().unwrap();
     write_svc_run(dir.path()).unwrap();
-    let book = Book::open(dir.path(), load(dir.path(), |_| true));
+    let book = Book::open(dir.path(), load(dir.path(), |_| true), |_| true);
     assert_eq!(book.last_exit(), LastExit::Unknown);
     assert_eq!(book.mode(), SafeStartMode::Normal);
 }
@@ -123,7 +123,7 @@ fn an_untrusted_safe_start_file_reads_as_streak_zero_and_is_untouched() {
     assert!(loaded.untrusted_state);
     assert_eq!(loaded.persisted, Persisted::default());
     assert_eq!(fs::read(&path).unwrap(), original, "the untrusted file was changed");
-    let book = Book::open(home, loaded);
+    let book = Book::open(home, loaded, |_| true);
     assert_eq!(book.mode(), SafeStartMode::Normal);
 }
 
@@ -146,6 +146,7 @@ fn the_state_file_is_written_and_read_back_atomically() {
         mode: SafeStartMode::Safe,
         reason: Some(SafeStartReason::CrashLoop),
         since: Some("2026-11-26T00:00:00Z".into()),
+        ..Default::default()
     };
     save(home, &state).unwrap();
     assert_eq!(load(home, |_| true).persisted, state);
@@ -155,9 +156,9 @@ fn the_state_file_is_written_and_read_back_atomically() {
 // ---- sections 2-3: the streak and the decision ----
 
 fn book(home: &Path, streak: u32, mode: SafeStartMode, reason: Option<SafeStartReason>) -> Book {
-    let persisted = Persisted { unclean_streak: streak, mode, reason, since: None };
+    let persisted = Persisted { unclean_streak: streak, mode, reason, since: None, ..Default::default() };
     save(home, &persisted).unwrap();
-    Book::open(home, load(home, |_| true))
+    Book::open(home, load(home, |_| true), |_| true)
 }
 
 #[test]
@@ -168,10 +169,10 @@ fn one_unclean_start_is_safe_once() {
     assert_eq!(b.persisted.unclean_streak, 1);
     assert_eq!(b.mode(), SafeStartMode::Safe);
     assert_eq!(b.reason(), Some(SafeStartReason::UncleanOnce));
-    // A clean end of that safe run does not reset the streak, and the mode goes back to normal.
+    // A clean end of that safe run resets the streak, and the mode goes back to normal.
     b.record_end(LastExit::Clean, "t1");
     assert_eq!(b.mode(), SafeStartMode::Normal);
-    assert_eq!(b.persisted.unclean_streak, 1);
+    assert_eq!(b.persisted.unclean_streak, 0);
 }
 
 #[test]
@@ -202,7 +203,7 @@ fn a_logon_does_not_reset_the_streak() {
     let dir = tempfile::tempdir().unwrap();
     let mut b = book(dir.path(), 0, SafeStartMode::Normal, None);
     b.record_end(LastExit::Unclean, "t0");
-    let after_logon = Book::open(dir.path(), load(dir.path(), |_| true));
+    let after_logon = Book::open(dir.path(), load(dir.path(), |_| true), |_| true);
     assert_eq!(after_logon.persisted.unclean_streak, 1);
     assert_eq!(after_logon.mode(), SafeStartMode::Safe);
 }
@@ -215,7 +216,7 @@ fn user_chosen_safe_is_sticky_until_start_normally() {
     assert_eq!(b.reason(), Some(SafeStartReason::UserChose));
     b.record_end(LastExit::Clean, "t1");
     assert_eq!(b.mode(), SafeStartMode::Safe, "a clean safe run keeps the choice");
-    let mut reopened = Book::open(dir.path(), load(dir.path(), |_| true));
+    let mut reopened = Book::open(dir.path(), load(dir.path(), |_| true), |_| true);
     assert_eq!(reopened.mode(), SafeStartMode::Safe);
     reopened.set_user_choice(SafeStartMode::Normal, "t2");
     assert_eq!(reopened.mode(), SafeStartMode::Normal);
@@ -228,7 +229,7 @@ fn leaving_clears_the_streak_and_the_mode() {
     b.set_user_choice(SafeStartMode::Normal, "t1");
     assert_eq!(b.mode(), SafeStartMode::Normal);
     assert_eq!(b.persisted.unclean_streak, 0);
-    let reopened = Book::open(dir.path(), load(dir.path(), |_| true));
+    let reopened = Book::open(dir.path(), load(dir.path(), |_| true), |_| true);
     assert_eq!(reopened.mode(), SafeStartMode::Normal);
 }
 

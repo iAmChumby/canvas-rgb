@@ -16,6 +16,7 @@ use crate::chip::FanChip;
 use crate::paths;
 use crate::store::{self, BiosState, SavedHeader, StoreError};
 use crate::temps::TempReader;
+use canvas_proto::api::SafeStartMode;
 use canvas_proto::config::{FansFile, FANS_SCHEMA};
 use canvas_proto::fans::{
     floor_for, hot_limit_status, rated_cpu_max_c, runtime_floor_at, validate_hot_limits, validate_mode,
@@ -504,6 +505,8 @@ pub struct FanController {
     /// What the last BIOS restore for the hold achieved. `None` while unknown, `Some(false)`
     /// while a header is still manual, `Some(true)` once every header is on BIOS control.
     fans_on_bios: Option<bool>,
+    /// Headers whose last hand-back to BIOS failed: the status never calls them BIOS.
+    stuck: BTreeSet<usize>,
     /// Retries of a failed restore, one a second, at most `HOLD_RESTORE_RETRIES`.
     hold_retries: u32,
     hold_retry_at: Option<Instant>,
@@ -550,6 +553,7 @@ impl FanController {
             hot_logged: false,
             hold: false,
             fans_on_bios: None,
+            stuck: BTreeSet::new(),
             hold_retries: 0,
             hold_retry_at: None,
         }
@@ -804,13 +808,16 @@ impl FanController {
         }
         // Restore-to-auto is allowed even while unconfirmed: a header must never stay manual
         // because the map is unconfirmed. Applying the profile is not.
-        if !self.restore_all("startup: BIOS before any profile") {
-            tracing::error!("BIOS restore incomplete: the profile is not applied");
+        let restored = self.restore_all("startup: BIOS before any profile");
+        if safe {
+            // The hold goes on also after a failed restore: it keeps retrying, and the profile
+            // is not applied in safe start.
+            tracing::info!(restored, "safe start: the profile is held until safe start ends");
+            self.enter_hold(now);
             return;
         }
-        if safe {
-            tracing::info!("safe start: BIOS restored, profile held until safe start ends");
-            self.enter_hold(now);
+        if !restored {
+            tracing::error!("BIOS restore incomplete: the profile is not applied");
             return;
         }
         if !self.writes_allowed {
@@ -818,6 +825,16 @@ impl FanController {
             return;
         }
         self.apply_profile(now);
+    }
+
+    /// The one place the hold follows the start mode (#577): safe start holds, normal releases
+    /// and applies the profile again. A call that changes nothing does nothing.
+    pub fn sync_hold(&mut self, mode: SafeStartMode, now: Instant) {
+        match (mode, self.hold) {
+            (SafeStartMode::Safe, false) => self.enter_hold(now),
+            (SafeStartMode::Normal, true) => self.leave_hold(now),
+            _ => {}
+        }
     }
 
     /// Turns the hold on and asks every header for BIOS control. A failed header keeps its
@@ -874,6 +891,7 @@ impl FanController {
     pub fn restore_all(&mut self, reason: &str) -> bool {
         let mut any_failed = self.chip.is_none();
         let mut released = Vec::new();
+        let mut failed = Vec::new();
         if let Some(chip) = self.chip.as_mut() {
             for (ch, spec) in chip.channels().iter().enumerate() {
                 if !spec.controllable() {
@@ -886,6 +904,7 @@ impl FanController {
                     }
                     Err(e) => {
                         any_failed = true;
+                        failed.push(ch);
                         tracing::error!(header = spec.id, error = %e, reason, "could not return header to BIOS");
                     }
                 }
@@ -895,7 +914,9 @@ impl FanController {
         // failure would stop `tick` from driving it and leave it stuck at its last duty.
         for ch in released {
             self.slots[ch].manual_since = None;
+            self.stuck.remove(&ch);
         }
+        self.stuck.extend(failed);
         if any_failed {
             // A header may still be manual: keep bios-state.json so the next start restores it.
             tracing::error!(reason, "keeping bios-state.json: nothing or not every header was handed back");
@@ -965,7 +986,17 @@ impl FanController {
         if self.hold {
             // #577: every writer saves its config before it reaches this gate. Nothing is
             // written to the chip until safe start ends, and the status says so.
-            tracing::info!(header = header.as_deref().unwrap_or("?"), "edit saved; applies when safe start ends");
+            if matches!(self.desired(ch), FanMode::Bios) {
+                // Asking for BIOS is not driving: a header the hold could not release is
+                // released now and never left at its last duty.
+                self.release(ch, "mode set to BIOS during safe start");
+                if self.stuck.is_empty() && self.fans_on_bios == Some(false) {
+                    self.fans_on_bios = Some(true);
+                    self.hold_retry_at = None;
+                }
+            } else {
+                tracing::info!(header = header.as_deref().unwrap_or("?"), "edit saved; applies when safe start ends");
+            }
             return;
         }
         if self.sleep.in_window(now) {
@@ -1007,6 +1038,8 @@ impl FanController {
         store::save_bios_state(&paths::bios_state_path(&self.home), &self.bios_state)
             .map_err(|e| format!("cannot save bios-state.json: {e}"))?;
         chip.set_manual(ch, true).map_err(|e| format!("set manual: {e}"))?;
+        // The header is this service's again: an earlier failed hand-back no longer describes it.
+        self.stuck.remove(&ch);
         tracing::info!(header = spec.id, "header taken to manual control");
         self.slots[ch].manual_since = Some(now);
         Ok(())
@@ -1015,7 +1048,7 @@ impl FanController {
     /// Takes a manual header back to BIOS when the user asks for BIOS. Failures are logged.
     fn release(&mut self, ch: usize, reason: &str) {
         let Some(slot) = self.slots.get_mut(ch) else { return };
-        if slot.manual_since.is_none() {
+        if slot.manual_since.is_none() && !self.stuck.contains(&ch) {
             return;
         }
         slot.manual_since = None;
@@ -1025,8 +1058,14 @@ impl FanController {
         slot.mode = None;
         let id = self.chip.as_ref().and_then(|c| c.channels().get(ch)).map_or("", |s| s.id);
         if let Some(chip) = self.chip.as_mut() {
-            if let Err(e) = chip.set_manual(ch, false) {
-                tracing::error!(header = id, error = %e, "could not return header to BIOS");
+            match chip.set_manual(ch, false) {
+                Ok(()) => {
+                    self.stuck.remove(&ch);
+                }
+                Err(e) => {
+                    self.stuck.insert(ch);
+                    tracing::error!(header = id, error = %e, "could not return header to BIOS");
+                }
             }
         }
         self.bios_state.headers.remove(id);
@@ -1608,7 +1647,8 @@ impl FanController {
                 None => (None, None),
             };
             let available = self.header_available(spec.id);
-            let on_bios = !available || !self.writes_allowed || slot.manual_since.is_none() || matches!(mode, FanMode::Bios);
+            let on_bios = !self.stuck.contains(&ch)
+                && (!available || !self.writes_allowed || slot.manual_since.is_none() || matches!(mode, FanMode::Bios));
             let override_reason = if !available {
                 None
             } else if self.writes_allowed {

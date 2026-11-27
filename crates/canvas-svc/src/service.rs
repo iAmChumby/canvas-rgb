@@ -23,9 +23,6 @@ pub struct Core {
     pub daemon: DaemonSupervisor,
     /// Installs signed updates (#43). `None` when the machine home is not secured: updates are refused.
     pub updates: Option<Arc<UpdateInstaller>>,
-    /// The fail-closed machine home, when the service has one. Its `svc-run.json` marker is
-    /// removed on Stop, Shutdown and PreShutdown (all three reach [`Core::shutdown`]).
-    pub home: Option<std::path::PathBuf>,
 }
 
 fn error(code: &str, message: impl Into<String>) -> PipeResponse {
@@ -51,7 +48,7 @@ fn ok_or(result: Result<(), FanError>) -> PipeResponse {
 
 impl Core {
     pub fn new(fans: FanController, openrgb: OpenRgbSupervisor, daemon: DaemonSupervisor) -> Self {
-        Self { fans, openrgb, daemon, updates: None, home: None }
+        Self { fans, openrgb, daemon, updates: None }
     }
 
     /// One pass per second. The fan loop and the OpenRGB supervisor run whether or not a
@@ -63,7 +60,11 @@ impl Core {
             // its clock (#163).
             self.daemon.refresh_heartbeat(now);
         }
-        if self.daemon.tick(now) == DaemonAction::WriteBlack {
+        let action = self.daemon.tick(now);
+        // In the same pass as any launch the tick made, and before the new daemon can be
+        // answered: the hold follows the mode that launch was decided in (#577).
+        self.fans.sync_hold(self.daemon.start_decision().0, now);
+        if action == DaemonAction::WriteBlack {
             // Not "whoever is listed right now": the same wait for detection as the boot color.
             self.openrgb.request_black(now);
         }
@@ -93,13 +94,9 @@ impl Core {
         self.fans.restore_all(reason);
         self.daemon.stop();
         self.openrgb.stop(reason, self.daemon.before_openrgb_stop());
-        if let Some(home) = &self.home {
-            // A clean SCM stop leaves no marker, so the next start does not read a false
-            // Unknown. Never touched when the home is not secured.
-            if let Err(e) = crate::safe_start::remove_svc_run(home) {
-                tracing::error!(path = %crate::safe_start::svc_run_path(home).display(), error = %e, "could not remove the service-run marker");
-            }
-        }
+        // A clean SCM stop (Stop, Shutdown and PreShutdown all come here) leaves no marker,
+        // so the next start does not read a false Unknown.
+        self.daemon.mark_service_stopped();
     }
 
     /// Answers one request. Every fan value is validated before anything is written.
@@ -118,8 +115,7 @@ impl Core {
                     service_version: env!("CARGO_PKG_VERSION").into(),
                     start_mode,
                     last_exit,
-                    // #577: the service's record (reason, streak, since) is wired in the fix pass.
-                    safe_start: None,
+                    safe_start: self.daemon.safe_record(),
                 }
             }
             PipeRequest::Heartbeat => {
@@ -166,14 +162,14 @@ impl Core {
                 } else {
                     canvas_proto::api::SafeStartMode::Normal
                 };
+                // The mode already in force changes nothing: no restart, and the streak stays.
+                if mode == self.daemon.start_decision().0 {
+                    return PipeResponse::Ok;
+                }
                 if let Some(book) = self.daemon.book_mut() {
                     book.set_user_choice(mode, &crate::safe_start::stamp_now());
                 }
-                if mode == canvas_proto::api::SafeStartMode::Safe {
-                    self.fans.enter_hold(now);
-                } else {
-                    self.fans.leave_hold(now);
-                }
+                self.fans.sync_hold(self.daemon.start_decision().0, now);
                 self.daemon.restart_in_new_mode(now);
                 PipeResponse::Ok
             }
