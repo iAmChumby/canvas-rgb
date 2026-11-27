@@ -328,10 +328,13 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
     }, scrollTo);
     await page.waitForTimeout(200);
   }
-  // UI_CAPTURE_CLICK clicks one selector before the shot (an opened disclosure).
+  // UI_CAPTURE_CLICK activates one selector before the shot (an opened
+  // disclosure). It dispatches the click in the page rather than using
+  // page.click: Playwright auto-scrolls to the element, which would push a
+  // section captured with UI_CAPTURE_SCROLL_TO back out of view.
   const clickSelector = process.env.UI_CAPTURE_CLICK;
   if (clickSelector) {
-    await page.click(clickSelector);
+    await page.$eval(clickSelector, (el) => el.click());
     await page.waitForTimeout(200);
   }
   const fileName = `${view.name}${scrollTo ? "-scrolled" : ""}${clickSelector ? "-open" : ""}-react-${viewport.w}x${viewport.h}-${theme}.png`;

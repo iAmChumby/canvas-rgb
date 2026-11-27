@@ -84,6 +84,7 @@ export function CreditsView() {
             <CreditList entries={data.foundations} />
           </Panel>
           <Panel
+            className="rd-credits-notices"
             title="Third-party notices"
             actions={
               <span className={s.counts}>

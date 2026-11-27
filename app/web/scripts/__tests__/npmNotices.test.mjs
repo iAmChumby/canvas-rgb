@@ -55,10 +55,11 @@ describe("npm notice platform filtering", () => {
 
   it("excludes every platform-gated binary by its package metadata, not by the host", () => {
     const result = planWith(WIN);
-    expect(result.packages.map((p) => p.name)).toEqual(["react"]);
-    expect(result.excluded.map((e) => e.name)).toEqual([LINUX, WIN, SWC]);
+    expect(result.packages).toBe(1);
+    expect(result.groups.flatMap((g) => g.packages.map((p) => p.name))).toEqual(["react"]);
+    expect(result.excluded.map((e) => e.name)).toEqual(expect.arrayContaining([LINUX, WIN, SWC]));
     const reason = result.excluded.find((e) => e.name === WIN).reason;
-    expect(result.excluded.find((e) => e.name === LINUX).reason).toBe(reason);
+    expect(planWith(LINUX).excluded.find((e) => e.name === WIN).reason).toBe(reason);
     expect(reason).toContain("platform-native package");
   });
 });

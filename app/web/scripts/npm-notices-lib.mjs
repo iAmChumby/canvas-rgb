@@ -52,22 +52,22 @@ function licenceOf(component, pkg) {
 export function buildNotices({ components = [], lock = {}, manifest = {}, readPackage, readLicense, accepted, generatedAt }) {
   if (!readPackage || !readLicense || !accepted) throw new Error("buildNotices needs readers and an accepted-licence set");
   const excluded = new Map(buildOnly);
+  // Record every platform-gated package from the committed lock file, not just
+  // the variants npm sbom happened to list on this OS. The exclusion catalog is
+  // then identical on Windows and Linux, whatever npm installed locally.
+  for (const [rel, meta] of Object.entries(lock.packages ?? {})) {
+    const reason = platformExclusion(meta);
+    if (!reason) continue;
+    excluded.set(meta.name ?? rel.split("node_modules/").pop(), reason);
+  }
   const packages = [];
   const seen = new Set();
 
-  const excludedReason = (name, rel) => {
-    if (excluded.has(name)) return true;
-    const reason = platformExclusion(lock.packages?.[rel]);
-    if (!reason) return false;
-    // Recorded from package metadata, not from the host: the same names and
-    // reasons appear in the output on Windows and Linux.
-    excluded.set(name, reason);
-    return true;
-  };
+  const excludedReason = (name) => excluded.has(name);
 
   for (const component of components) {
     const rel = (component.properties ?? []).find((p) => p.name === "cdx:npm:package:path")?.value ?? `node_modules/${component.name}`;
-    if (excludedReason(component.name, rel)) continue;
+    if (excludedReason(component.name)) continue;
     const pkg = readPackage(rel);
     const licence = licenceOf(component, pkg);
     const notice = readLicense(rel, component.name, component.version);
@@ -79,7 +79,7 @@ export function buildNotices({ components = [], lock = {}, manifest = {}, readPa
   // peer dependencies. They are in the shipped client bundle, so add them here.
   for (const name of Object.keys(manifest.dependencies ?? {})) {
     const rel = `node_modules/${name}`;
-    if (seen.has(name) || excludedReason(name, rel)) continue;
+    if (seen.has(name) || excludedReason(name)) continue;
     const locked = lock.packages?.[rel];
     if (!locked) throw new Error(`${name}: direct dependency missing from package-lock.json`);
     const licence = locked.license ?? readPackage(rel).license;
