@@ -718,15 +718,21 @@ pub const SAFE_SCENE: &str = "safe-start";
 /// The colour safe start paints when Breathing cannot be built, and what a surface calls it.
 const STEADY: (&str, canvas_proto::Rgb8) = ("One steady colour, blue", canvas_proto::Rgb8::new(40, 90, 160));
 
-/// The name status gives the safe-start scene: it names the fallback colour, so no surface has
-/// to know it.
-pub fn safe_scene_name(fallback: bool) -> &'static str {
+/// What the safe-start record says the lights run (`SafeStart::lights`): the fallback colour by
+/// name, so no surface has to know it; `None` before anything plays.
+pub fn safe_lights_words(fallback: bool, playing: bool) -> Option<&'static str> {
     if fallback {
-        STEADY.0
+        Some(STEADY.0)
+    } else if playing {
+        Some("Breathing")
     } else {
-        "Safe start"
+        None
     }
 }
+
+/// The name of the in-memory safe-start scene. Status always gives this short name; what the
+/// lights run is in `SafeStart::lights`.
+pub const SAFE_SCENE_NAME: &str = "Safe start";
 
 /// True for the whole of a safe-start run: the saved scene is saved and never applied.
 pub fn safe_mode(app: &App) -> bool {
@@ -746,7 +752,7 @@ fn safe_scene(app: &App, lights: &[Light]) -> Scene {
     let members: Vec<LightId> = lights.iter().map(|l| l.id.clone()).collect();
     let group = Group {
         id: SAFE_SCENE.into(),
-        name: safe_scene_name(false).into(),
+        name: SAFE_SCENE_NAME.into(),
         members,
         plays,
         mode: GroupMode::default(),
@@ -755,7 +761,7 @@ fn safe_scene(app: &App, lights: &[Light]) -> Scene {
     };
     Scene {
         id: SAFE_SCENE.into(),
-        name: safe_scene_name(false).into(),
+        name: SAFE_SCENE_NAME.into(),
         rev: 0,
         // With no light there is nothing to build, and that is not a failure.
         groups: if lights.is_empty() { Vec::new() } else { vec![group] },

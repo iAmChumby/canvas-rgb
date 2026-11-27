@@ -18,4 +18,9 @@ since?: string | null,
  * `Some(true)` once the service confirms every fan header is on BIOS control, `Some(false)`
  * when a header could not be released, `None` while unknown.
  */
-fans_on_bios?: boolean | null, };
+fans_on_bios?: boolean | null, 
+/**
+ * What the lights run, in words: "Breathing", or the fallback such as "One steady colour,
+ * blue". The daemon fills it; `None` from the service and before the lights start.
+ */
+lights?: string | null, };

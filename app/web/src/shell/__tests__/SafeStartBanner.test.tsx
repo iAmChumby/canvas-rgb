@@ -47,6 +47,7 @@ const base: SafeStart = {
   unclean_streak: 1,
   since: null,
   fans_on_bios: true,
+  lights: "Breathing",
 };
 
 function show(safe: SafeStart | null, over: Partial<Status> = {}) {
@@ -88,16 +89,13 @@ describe("the safe-start banner (#577)", () => {
     expect(screen.queryByText(/did not end cleanly|You chose/)).toBeNull();
   });
 
-  it("takes the fallback colour's name from the status", () => {
-    show(base, {
-      active_effects: ["solid"],
-      active_scene: { id: "safe-start", name: "One steady colour, teal" },
-    });
+  it("takes the fallback colour's name from the safe-start record", () => {
+    show({ ...base, lights: "One steady colour, teal" }, { active_effects: ["solid"] });
     expect(screen.getByText("Lights: one steady colour, teal.")).toBeTruthy();
   });
 
   it("claims no light before one is playing", () => {
-    show(base, { active_effects: [] });
+    show({ ...base, lights: null }, { active_effects: [] });
     expect(screen.getByText("Lights: not started yet.")).toBeTruthy();
   });
 

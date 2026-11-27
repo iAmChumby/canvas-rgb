@@ -18,7 +18,6 @@ import { patchSnap, useSnap } from "@/lib/store";
 import { UpdatedToast } from "@/shell/UpdatedToast";
 import { requestChainSetup } from "@/views/chain/request";
 import type { SafeStart } from "@/proto/SafeStart";
-import type { Status } from "@/proto/Status";
 
 /** The service banner appears after this many ms without the fan service (G4). */
 const SERVICE_BANNER_MS = 10_000;
@@ -254,15 +253,14 @@ function reasonLine(safe: SafeStart): string | null {
 }
 
 /**
- * What the lights run. Breathing is named by its effect id. Anything else is the fallback, and the
- * daemon names it in the synthetic scene ("One steady colour, ..."), so the editor knows no colour.
+ * What the lights run, in the daemon's words (`SafeStart.lights`: "Breathing", or the fallback
+ * such as "One steady colour, blue"), so the editor knows no colour.
  */
-function lightsLine(status: Status): string {
-  const effect = status.active_effects?.[0];
-  if (effect === "breathing") return "Lights: Breathing.";
-  const name = status.active_scene?.name;
-  if (!effect || !name) return "Lights: not started yet.";
-  return `Lights: ${name.charAt(0).toLowerCase()}${name.slice(1)}.`;
+function lightsLine(safe: SafeStart): string {
+  const words = safe.lights;
+  if (!words) return "Lights: not started yet.";
+  if (words === "Breathing") return "Lights: Breathing.";
+  return `Lights: ${words.charAt(0).toLowerCase()}${words.slice(1)}.`;
 }
 
 function fanLine(onBios: boolean | null | undefined): string {
@@ -314,7 +312,7 @@ export function SafeStartBanner({ onHelp = false }: { onHelp?: boolean }) {
       <div className="safe-lines">
         {reason && <p>{reason}</p>}
         <p>Off until you start normally: your saved scene, effects, and display and peripheral readings.</p>
-        <p>{lightsLine(status)}</p>
+        <p>{lightsLine(safe)}</p>
         <p>{fanLine(safe.fans_on_bios)}</p>
       </div>
       {!onHelp && (

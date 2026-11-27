@@ -401,6 +401,11 @@ pub struct SafeStart {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub fans_on_bios: Option<bool>,
+    /// What the lights run, in words: "Breathing", or the fallback such as "One steady colour,
+    /// blue". The daemon fills it; `None` from the service and before the lights start.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub lights: Option<String>,
 }
 
 /// `PUT /api/v1/safe-start`.

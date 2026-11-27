@@ -344,6 +344,7 @@ impl PipeLink for RecordPipe {
                 unclean_streak: 3,
                 since: Some("2026-11-27T10:00:00Z".into()),
                 fans_on_bios: None,
+                lights: None,
             }),
         })
     }
@@ -394,6 +395,9 @@ async fn m4_a_breathing_failure_shows_a_steady_colour_that_status_names() {
         Some(&canvas_proto::props::PropValue::Color(canvas_proto::Rgb8::new(40, 90, 160)))
     );
     let status = app.status().await.unwrap();
-    assert_eq!(status.active_scene.unwrap().name, "One steady colour, blue");
+    // The scene keeps its short name (the rail and strip never truncate it); the colour is
+    // named in the safe-start record.
+    assert_eq!(status.active_scene.unwrap().name, "Safe start");
+    assert_eq!(status.safe_start.unwrap().lights.as_deref(), Some("One steady colour, blue"));
     assert_eq!(status.active_effects, vec!["solid".to_string()]);
 }

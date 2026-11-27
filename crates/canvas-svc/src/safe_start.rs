@@ -275,6 +275,7 @@ impl Book {
             unclean_streak: self.persisted.unclean_streak,
             since: self.since(),
             fans_on_bios: None,
+            lights: None,
         })
     }
 

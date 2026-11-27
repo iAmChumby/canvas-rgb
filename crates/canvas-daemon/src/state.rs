@@ -859,8 +859,9 @@ impl App {
                 unclean_streak: 0,
                 since: None,
                 fans_on_bios: None,
+                lights: None,
             });
-            SafeStart { active: true, fans_on_bios: None, ..record }
+            SafeStart { active: true, fans_on_bios: None, lights: None, ..record }
         });
     }
 
@@ -1056,15 +1057,21 @@ impl App {
         // saved scene is not run. The status names what plays, not what would play after a
         // restart. Nothing here is written to the store.
         let mut safe = self.safe_start_status();
+        let safe_effect = self.safe_effect.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(safe) = safe.as_mut() {
             safe.fans_on_bios = self.fans_on_bios().await;
+            safe.lights = crate::scenes::safe_lights_words(
+                self.safe_fallback.load(Ordering::SeqCst),
+                safe_effect.is_some(),
+            )
+            .map(String::from);
         }
         let (active_scene, active_effects) = if safe.as_ref().is_some_and(|s| s.active) {
-            let effect = self.safe_effect.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let effect = safe_effect;
             (
                 Some(canvas_proto::api::SceneRef {
                     id: crate::scenes::SAFE_SCENE.into(),
-                    name: crate::scenes::safe_scene_name(self.safe_fallback.load(Ordering::SeqCst)).into(),
+                    name: crate::scenes::SAFE_SCENE_NAME.into(),
                 }),
                 effect.into_iter().collect::<Vec<_>>(),
             )
