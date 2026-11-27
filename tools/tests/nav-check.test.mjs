@@ -17,9 +17,10 @@ function measurement() {
     links: PAGES.map((p, i) => ({
       text: p.label,
       active: p.label === "Peripherals",
-      left: i * 50, right: i * 50 + 48, top: 810, bottom: 866,
+      // 46 px a link keeps every page of the dock, Help included, inside the 390 px viewport.
+      left: i * 46, right: i * 46 + 44, top: 810, bottom: 866,
       hidden: p.label !== "Peripherals",
-      labelScroll: 10, labelClient: 10, labelLeft: i * 50, labelRight: i * 50 + 10,
+      labelScroll: 10, labelClient: 10, labelLeft: i * 46, labelRight: i * 46 + 10,
       fontPx: 14, display: "grid",
       iconCentre: 818, iconTop: 809, iconHeight: 18,
     })),
