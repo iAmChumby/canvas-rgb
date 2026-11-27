@@ -726,11 +726,18 @@ pub fn fake_fans_file() -> canvas_proto::config::FansFile {
 /// `\\.\pipe\canvas-rgb-svc`.
 pub struct FakePipeLink {
     config: std::sync::Mutex<canvas_proto::config::FansFile>,
+    /// Test-only: `CANVAS_RGB_FAKE_SAFE_START` makes this fake service answer the start
+    /// `Hello` with Safe / Unclean, so a screenshot run can show the safe-start surfaces.
+    /// It never reaches the real service or any hardware.
+    safe: bool,
 }
 
 impl Default for FakePipeLink {
     fn default() -> Self {
-        Self { config: std::sync::Mutex::new(fake_fans_file()) }
+        Self {
+            config: std::sync::Mutex::new(fake_fans_file()),
+            safe: std::env::var_os("CANVAS_RGB_FAKE_SAFE_START").is_some(),
+        }
     }
 }
 
@@ -741,8 +748,16 @@ impl crate::pipe_client::PipeLink for FakePipeLink {
             PipeRequest::Hello { .. } => Ok(PipeResponse::Hello {
                 protocol: canvas_proto::pipe::PROTOCOL_VERSION,
                 service_version: "fake".into(),
-                start_mode: Default::default(),
-                last_exit: Default::default(),
+                start_mode: if self.safe {
+                    canvas_proto::api::SafeStartMode::Safe
+                } else {
+                    canvas_proto::api::SafeStartMode::Normal
+                },
+                last_exit: if self.safe {
+                    canvas_proto::api::LastExit::Unclean
+                } else {
+                    canvas_proto::api::LastExit::Unknown
+                },
             }),
             PipeRequest::FanStatus => Ok(PipeResponse::FanStatus { status: fake_fans_status() }),
             PipeRequest::OpenRgbState => Ok(PipeResponse::OpenRgb {
@@ -773,6 +788,18 @@ impl crate::pipe_client::PipeLink for FakePipeLink {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn the_safe_fake_service_answers_the_start_hello_in_safe_mode() {
+        use crate::pipe_client::PipeLink;
+        let link = FakePipeLink { config: std::sync::Mutex::new(fake_fans_file()), safe: true };
+        let reply = link.exchange(&PipeRequest::Hello { protocol: 1, daemon_pid: 1 }).await.unwrap();
+        assert!(matches!(
+            reply,
+            PipeResponse::Hello { start_mode: canvas_proto::api::SafeStartMode::Safe,
+                last_exit: canvas_proto::api::LastExit::Unclean, .. }
+        ), "{reply:?}");
+    }
 
     #[test]
     fn fakes_mode_skips_every_real_touchpoint() {

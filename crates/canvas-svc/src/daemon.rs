@@ -1031,7 +1031,7 @@ impl DaemonSupervisor {
     /// counts against the session-end budget, and the relaunch is held until the session is
     /// gone, the console id changes, or the hold times out.
     fn session_end(&mut self, now: Instant, code: i32, was: Option<u32>) -> DaemonAction {
-        let v = self.record(EndCause::SessionEnd, Some(code), Beat::BeforeFirst);
+        self.record(EndCause::SessionEnd, Some(code), Beat::BeforeFirst);
         let described = crate::process::describe_exit_code(code);
         let console = self.launcher.console_session();
         // The budget belongs to one console session: a new one starts a new budget. It is the

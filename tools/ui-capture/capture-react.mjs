@@ -44,7 +44,7 @@ if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(DAEMON_BASE)) {
   throw new Error(`UI_CAPTURE_API_BASE must be http://127.0.0.1:<port> (the token is sent there), not ${DAEMON_BASE}`);
 }
 
-const VIEWS = [
+const ALL_VIEWS = [
   { name: "scenes", path: "/" },
   { name: "effects", path: "/effects/" },
   { name: "devices", path: "/devices/" },
@@ -53,9 +53,17 @@ const VIEWS = [
   { name: "updates", path: "/updates/" },
   { name: "displays", path: "/displays/" },
   { name: "peripherals", path: "/peripherals/" },
+  // #577: Help & About shows the safe-start state and its mode action.
+  { name: "help", path: "/help/" },
 ];
 
-const VIEWPORTS = [
+// Optional selection for a focused capture (e.g. #577's safe-start surfaces):
+// UI_CAPTURE_VIEWS=scenes,help UI_CAPTURE_VIEWPORTS=1440x900,390x844.
+const WANTED_VIEWS = process.env.UI_CAPTURE_VIEWS?.split(",").filter(Boolean);
+const WANTED_SIZES = process.env.UI_CAPTURE_VIEWPORTS?.split(",").filter(Boolean);
+const VIEWS = WANTED_VIEWS ? ALL_VIEWS.filter((v) => WANTED_VIEWS.includes(v.name)) : ALL_VIEWS;
+
+const ALL_VIEWPORTS = [
   { w: 1920, h: 1040 },
   { w: 1440, h: 900 },
   { w: 1280, h: 860 },
@@ -63,6 +71,9 @@ const VIEWPORTS = [
   { w: 960, h: 1032 },
   { w: 390, h: 844 },
 ];
+const VIEWPORTS = WANTED_SIZES
+  ? ALL_VIEWPORTS.filter((v) => WANTED_SIZES.includes(`${v.w}x${v.h}`))
+  : ALL_VIEWPORTS;
 
 const THEMES = ["dark", "light"];
 
@@ -208,10 +219,18 @@ function serveStatic(port, dir) {
 // The __TAURI__ stand-in: shaped exactly like app/web/src/lib/host.ts
 // (TauriGlobal { core.invoke, event.listen }). Commands from
 // app/web/src/proto/tauri.ts that host.ts invokes.
-function tauriInit({ daemonBase, token, theme }) {
+function tauriInit({ daemonBase, token, theme, suppressChain }) {
   window.__uiCaptureTheme = theme;
   try {
     localStorage.setItem("canvas-rgb.theme", theme);
+    if (suppressChain) {
+      // A fresh fake home has an ARGB header with no chain record, so Scenes opens the
+      // header-setup modal over the page. A focused capture of another surface says
+      // "Later" for this launch, which is a session-storage id.
+      const launch = "ui-capture-launch";
+      sessionStorage.setItem("canvas-rgb.launch", launch);
+      localStorage.setItem("canvas-rgb.chains-later", launch);
+    }
   } catch {
     // storage can be blocked; the data-theme is also set below
   }
@@ -293,7 +312,12 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
   page.on("requestfailed", onRequestFailed);
   // The theme lives in localStorage before load (like the existing scripts)
   // and the __TAURI__ stand-in is injected on every navigation.
-  await page.addInitScript(tauriInit, { daemonBase, token, theme });
+  await page.addInitScript(tauriInit, {
+    daemonBase,
+    token,
+    theme,
+    suppressChain: Boolean(process.env.UI_CAPTURE_SUPPRESS_CHAIN_SETUP),
+  });
   const url = base + view.path;
   const loaded = await page.goto(url, { waitUntil: "load", timeout: 30000 });
   if (!loaded || !loaded.ok()) notLoaded.push(`page ${url} answered ${loaded ? loaded.status() : "nothing"}`);
