@@ -40,6 +40,10 @@ pub trait LogFs {
     fn owner(&self, path: &Path) -> Result<String, String>;
     /// The files in a directory, checked without following their links.
     fn files(&self, dir: &Path) -> Result<Vec<PathBuf>, String>;
+    /// A subdirectory is skipped and never opened as a file.
+    fn is_dir(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path).map(|m| m.is_dir()).unwrap_or(false)
+    }
     /// Opens once with `FILE_FLAG_OPEN_REPARSE_POINT`, checks the handle's attributes and owner,
     /// then reads from that handle. Never re-opens by path.
     fn open_checked(&self, path: &Path) -> Result<Vec<u8>, String>;
@@ -48,6 +52,14 @@ pub trait LogFs {
 /// One service log, named for its place inside the zip.
 pub type Log = (String, Vec<u8>);
 
+/// The logs that were read and the reasons for files that were left out. A per-file problem
+/// never voids the folder: the good logs still go into the bundle (G2).
+#[derive(Debug, Default)]
+pub struct Collected {
+    pub logs: Vec<Log>,
+    pub notices: Vec<String>,
+}
+
 /// `None` when the folder may be read; `Some(reason)` when it must be refused. The reason is
 /// written into `DiagBundle.service_logs` verbatim, so it is plain words a person can act on.
 /// This does not read the files: it is the check the tray uses before opening Explorer.
@@ -55,22 +67,30 @@ pub fn refusal(fs: &dyn LogFs, dir: &Path) -> Option<String> {
     check(fs, dir).err()
 }
 
-/// Reads the logs after the whole path passes. An empty folder is a refusal too: the UI must
-/// never say "included" unless at least one log really went into the zip.
-pub fn collect(fs: &dyn LogFs, dir: &Path) -> Result<Vec<Log>, String> {
+/// Reads the logs after the whole path passes. Folder-wide refusals still fail here; a bad file
+/// only names itself in `notices`. An empty folder is a refusal too: the UI must never say
+/// "included" unless at least one log really went into the zip (G1/G2).
+pub fn collect(fs: &dyn LogFs, dir: &Path) -> Result<Collected, String> {
     check(fs, dir)?;
-    let mut out = Vec::new();
+    let mut out = Collected::default();
     for path in fs.files(dir)? {
-        let bytes = fs
-            .open_checked(&path)
-            .map_err(|e| format!("Service logs: not included. Windows did not let canvas-rgb read them. ({e})"))?;
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| "Service logs: not included. A service log has no readable name.".to_string())?;
-        out.push((format!("service-logs/{name}"), bytes));
+        // A subdirectory is not a log: skip it, never open it as a file.
+        if fs.is_dir(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            out.notices.push("a service log has no readable name: not included".to_string());
+            continue;
+        };
+        match fs.open_checked(&path) {
+            Ok(bytes) if std::str::from_utf8(&bytes).is_ok() => {
+                out.logs.push((format!("service-logs/{name}"), bytes));
+            }
+            Ok(_) => out.notices.push(format!("{name}: not included: not a text file")),
+            Err(e) => out.notices.push(format!("{name}: not included: {e}")),
+        }
     }
-    if out.is_empty() {
+    if out.logs.is_empty() {
         return Err("Service logs: not included. The service log folder is empty.".to_string());
     }
     Ok(out)
@@ -337,7 +357,20 @@ mod real {
 #[cfg(test)]
 mod windows_tests {
     use super::*;
-    use std::os::windows::fs::symlink_dir;
+
+    /// A directory junction needs no Developer Mode or elevation (unlike symlink_dir).
+    fn junction(target: &Path, link: &Path) -> std::io::Result<()> {
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(String::from_utf8_lossy(&output.stderr).into_owned()))
+        }
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("canvas-rgb-logs-{name}-{}", std::process::id()));
@@ -374,7 +407,12 @@ mod windows_tests {
     fn a_real_junction_inside_the_folder_is_refused() {
         let dir = temp_dir("junction");
         let elsewhere = temp_dir("junction-target");
-        symlink_dir(&elsewhere, dir.join("link")).unwrap();
+        if let Err(e) = junction(&elsewhere, &dir.join("link")) {
+            println!("skipping junction test: mklink /J failed: {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&elsewhere);
+            return;
+        }
         let fs = RealLogFs::with_owner_check(|_| true);
         let error = refusal(&fs, &dir).unwrap();
         assert!(error.contains("junction or symlink"), "{error}");
@@ -394,6 +432,9 @@ mod tests {
         reparse: HashSet<PathBuf>,
         owners: HashMap<PathBuf, String>,
         unreadable: HashSet<PathBuf>,
+        invalid: HashSet<PathBuf>,
+        oversized: HashSet<PathBuf>,
+        subdirs: HashSet<PathBuf>,
         reads: Cell<usize>,
         folder: bool,
         logs: Vec<PathBuf>,
@@ -412,10 +453,17 @@ mod tests {
         fn files(&self, _dir: &Path) -> Result<Vec<PathBuf>, String> {
             Ok(self.logs.clone())
         }
+        fn is_dir(&self, path: &Path) -> bool {
+            self.subdirs.contains(path)
+        }
         fn open_checked(&self, path: &Path) -> Result<Vec<u8>, String> {
             self.reads.set(self.reads.get() + 1);
             if self.unreadable.contains(path) {
                 Err("access denied".to_string())
+            } else if self.oversized.contains(path) {
+                Err("larger than 4 MiB".to_string())
+            } else if self.invalid.contains(path) {
+                Ok(vec![0xff, 0xfe, 0x00])
             } else {
                 Ok(b"service line".to_vec())
             }
@@ -436,8 +484,9 @@ mod tests {
     #[test]
     fn a_system_owned_plain_folder_is_read() {
         let fs = fake();
-        let logs = collect(&fs, Path::new("machine/logs")).unwrap();
-        assert_eq!(logs, vec![("service-logs/svc.log".to_string(), b"service line".to_vec())]);
+        let collected = collect(&fs, Path::new("machine/logs")).unwrap();
+        assert_eq!(collected.logs, vec![("service-logs/svc.log".to_string(), b"service line".to_vec())]);
+        assert!(collected.notices.is_empty());
         assert_eq!(fs.reads.get(), 1);
     }
 
@@ -465,5 +514,49 @@ mod tests {
         fs.logs.clear();
         let reason = collect(&fs, Path::new("machine/logs")).unwrap_err();
         assert!(reason.contains("folder is empty"), "{reason}");
+    }
+
+    #[test]
+    fn a_non_text_service_log_is_named_but_the_good_one_stays() {
+        let mut fs = fake();
+        let bad = PathBuf::from("machine/logs/bad.log");
+        fs.logs.push(bad.clone());
+        fs.invalid.insert(bad);
+        let collected = collect(&fs, Path::new("machine/logs")).unwrap();
+        assert_eq!(collected.logs.len(), 1, "the valid log is still included");
+        assert!(collected.notices.iter().any(|n| n.contains("bad.log") && n.contains("not a text file")), "{:?}", collected.notices);
+    }
+
+    #[test]
+    fn an_oversized_log_never_voids_the_folder() {
+        let mut fs = fake();
+        let big = PathBuf::from("machine/logs/big.log");
+        fs.logs.push(big.clone());
+        fs.oversized.insert(big);
+        let collected = collect(&fs, Path::new("machine/logs")).unwrap();
+        assert_eq!(collected.logs.len(), 1, "the normal log is still included");
+        assert!(collected.notices.iter().any(|n| n.contains("big.log") && n.contains("larger than 4 MiB")), "{:?}", collected.notices);
+    }
+
+    #[test]
+    fn an_unreadable_log_is_named_without_failing_the_folder() {
+        let mut fs = fake();
+        let locked = PathBuf::from("machine/logs/locked.log");
+        fs.logs.push(locked.clone());
+        fs.unreadable.insert(locked);
+        let collected = collect(&fs, Path::new("machine/logs")).unwrap();
+        assert_eq!(collected.logs.len(), 1);
+        assert!(collected.notices.iter().any(|n| n.contains("locked.log") && n.contains("access denied")), "{:?}", collected.notices);
+    }
+
+    #[test]
+    fn a_subdirectory_is_skipped_and_never_opened() {
+        let mut fs = fake();
+        let sub = PathBuf::from("machine/logs/archive");
+        fs.logs.push(sub.clone());
+        fs.subdirs.insert(sub);
+        let collected = collect(&fs, Path::new("machine/logs")).unwrap();
+        assert_eq!(collected.logs.len(), 1);
+        assert_eq!(fs.reads.get(), 1, "the subdirectory was not opened");
     }
 }

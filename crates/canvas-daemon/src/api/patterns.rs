@@ -194,9 +194,12 @@ async fn delete_the_pattern(
         if !app.draft.is_active() {
             crate::scenes::apply_active_ungated(&app, false).await;
         }
-        note = Some(format!(
-            "{} was deleted while a group played it, so that group is dark",
-            removed.id
+        note = Some(crate::api::scrub_errors::scrub_error_text(
+            &app.scrubber.lock().unwrap_or_else(|e| e.into_inner()),
+            &format!(
+                "{} was deleted while a group played it, so that group is dark",
+                removed.id
+            ),
         ));
         tracing::warn!(pattern = %removed.id, "a pattern a group played was deleted");
     }

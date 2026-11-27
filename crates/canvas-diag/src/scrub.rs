@@ -73,6 +73,10 @@ pub fn device_id_end(text: &str, at: usize) -> Option<usize> {
                 if b == b'.' && (end + 1 == bytes.len() || bytes[end + 1].is_ascii_whitespace()) {
                     break;
                 }
+                // "openrgb:ABC: timeout" is one id followed by prose: keep the separator.
+                if b == b':' && bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) {
+                    break;
+                }
                 // A backslash escaping a quote in JSON is the end of the id, not part of it.
                 if b == b'\\' && matches!(bytes.get(end + 1), Some(b'"' | b'\\')) {
                     break;
@@ -472,14 +476,13 @@ mod tests {
         assert_eq!(scrub_device_ids("royuan:3151:4015 refused"), "the device refused");
         assert_eq!(scrub_device_ids("openrgb:ABC."), "the device.");
         assert_eq!(scrub_device_ids("openrgb:ABC"), "the device");
+        assert_eq!(scrub_device_ids("failed on openrgb:ABC: timeout"), "failed on the device: timeout");
     }
 
     #[test]
     fn every_adapter_prefix_in_the_adapters_is_scrubbed() {
-        let adapters = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("canvas-adapters/src");
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let roots = [crates.join("canvas-adapters/src"), crates.join("canvas-daemon/src")];
         let mut found = std::collections::BTreeSet::new();
         fn walk(dir: &std::path::Path, found: &mut std::collections::BTreeSet<String>) {
             for entry in std::fs::read_dir(dir).unwrap() {
@@ -489,12 +492,18 @@ mod tests {
                 } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
                     let text = std::fs::read_to_string(&path).unwrap();
                     for line in text.lines() {
-                        if let Some(i) = line.find("DeviceId(format!(\"") {
-                            let tail = &line[i + "DeviceId(format!(\"".len()..];
-                            if let Some(col) = tail.find(':') {
-                                let prefix = &tail[..col];
-                                if prefix.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
-                                    found.insert(prefix.to_string());
+                        // Production ids only: test-only DeviceIds are not adapters.
+                        if line.contains("#[cfg(test)]") {
+                            break;
+                        }
+                        for marker in ["DeviceId(format!(\"", "DeviceId(\""] {
+                            if let Some(i) = line.find(marker) {
+                                let tail = &line[i + marker.len()..];
+                                if let Some(col) = tail.find(':') {
+                                    let prefix = &tail[..col];
+                                    if prefix.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+                                        found.insert(prefix.to_string());
+                                    }
                                 }
                             }
                         }
@@ -510,8 +519,11 @@ mod tests {
                 }
             }
         }
-        walk(&adapters, &mut found);
-        found.insert("fake".to_string());
+        for root in &roots {
+            walk(root, &mut found);
+        }
+        // `cpu` is a fan source name, never built as a DeviceId in crates/, so the source scan
+        // cannot find it; it is listed explicitly. `fake` is found in the daemon's fakes now.
         found.insert("cpu".to_string());
         for prefix in found {
             assert!(ADAPTER_PREFIXES.contains(&prefix.as_str()), "missing adapter prefix {prefix:?}");

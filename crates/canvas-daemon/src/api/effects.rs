@@ -1173,7 +1173,9 @@ pub async fn delete_effect(
             if let Some(note) = &ended.note {
                 tracing::warn!(%note, "the draft ended when its prior effect was deleted");
             }
-            draft_ended = Some(DraftEnded { note: ended.note });
+            draft_ended = Some(DraftEnded {
+                note: crate::api::scrub_errors::scrub_optional(app.as_ref(), ended.note),
+            });
         }
         // The scene goes on again: the group that played the deleted effect is dark.
         crate::scenes::apply_active_ungated(&app, false).await;

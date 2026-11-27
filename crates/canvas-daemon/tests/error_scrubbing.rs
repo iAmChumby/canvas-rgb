@@ -187,3 +187,37 @@ async fn the_bundle_route_lists_then_writes() {
     assert_eq!(path.parent().unwrap(), canvas_diag::paths::diagnostics_dir());
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// The layer itself, through a real axum router: only a non-2xx body is rewritten (G4).
+#[tokio::test]
+async fn the_layer_leaves_2xx_user_data_byte_identical() {
+    let (_router, app, _home) = build();
+    async fn bad() -> (StatusCode, axum::Json<serde_json::Value>) {
+        (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "detail": { "note": format!("failed at {FAKE}\\a.html: openrgb:SERIAL-42") }
+            })),
+        )
+    }
+    async fn fine() -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({ "note": "use cpu:fan" }))
+    }
+    let router = axum::Router::new()
+        .route("/bad", axum::routing::get(bad))
+        .route("/fine", axum::routing::get(fine))
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            api::scrub_errors::scrub_errors,
+        ));
+    let rejected = router.clone().oneshot(Request::builder().uri("/bad").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let text = body(rejected).await;
+    assert!(!text.to_ascii_lowercase().contains("alice"), "{text}");
+    assert!(!text.contains("SERIAL-42"), "{text}");
+
+    let ok = router.oneshot(Request::builder().uri("/fine").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    let text = body(ok).await;
+    assert_eq!(text, serde_json::json!({ "note": "use cpu:fan" }).to_string());
+}

@@ -2,11 +2,12 @@
 //!
 //! An error is built in many places — an `ApiFailure`, the auth guard, and axum's plain-text
 //! extractor rejections — and none of them has the `App` that owns the scrubber. This layer
-//! holds `Arc<App>` and rewrites every error response body at the edge: a JSON `ApiError` has
-//! its `message` and `hint` scrubbed, and a plain-text rejection has its whole body scrubbed.
-//! Nothing touches a successful response, so a preview frame or a config file is never copied.
+//! holds `Arc<App>` and rewrites every non-2xx response body at the edge: a JSON error has its
+//! `message`, `error`, `note`, `hint` and `problem` fields scrubbed at any depth, and a plain-text
+//! rejection has its whole body scrubbed. A 2xx body is never rewritten: it may hold user-authored
+//! text that a later save writes back (G4). Those fields are scrubbed where the daemon builds them.
 
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
@@ -16,24 +17,20 @@ use std::sync::Arc;
 
 use crate::state::App;
 
-/// The largest error body we will rewrite. A rejection is a sentence, never a file.
-/// A 2xx preview body carries a base64 picture, so the layer must not truncate it while looking
-/// for a `note` field. Errors stay tiny; success bodies are bounded well above a preview frame.
-const MAX_ERROR_BODY: usize = 32 * 1024 * 1024;
+/// The most error body we will buffer. A rejection is a sentence, never a file.
+const MAX_ERROR_BODY: usize = 1024 * 1024;
 
 pub async fn scrub_errors(State(app): State<Arc<App>>, request: Request, next: Next) -> Response {
     let response = next.run(request).await;
-    let status = response.status();
-    let is_error = status.is_client_error() || status.is_server_error();
+    // A 2xx body is user data: never rewrite it here (G4).
+    if !response.status().is_client_error() && !response.status().is_server_error() {
+        return response;
+    }
     let is_json = response
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.to_ascii_lowercase().contains("json"));
-    if !is_error && !is_json {
-        return response;
-    }
-    // A large 2xx body (effects list, source) must never be dropped by the layer.
     let too_large = response
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -43,29 +40,47 @@ pub async fn scrub_errors(State(app): State<Arc<App>>, request: Request, next: N
     if too_large {
         return response;
     }
-    let (parts, body) = response.into_parts();
-    let bytes = match axum::body::to_bytes(body, MAX_ERROR_BODY).await {
-        Ok(bytes) => bytes,
-        Err(_) => return Response::from_parts(parts, Body::empty()),
-    };
+    let (mut parts, body) = response.into_parts();
+    // Read frames ourselves so a broken stream passes its bytes through unchanged instead of
+    // turning the body into an empty one.
+    let mut stream = body.into_data_stream();
+    let mut bytes = Vec::new();
+    let mut broken = false;
+    while bytes.len() <= MAX_ERROR_BODY {
+        match futures_util::StreamExt::next(&mut stream).await {
+            Some(Ok(chunk)) => bytes.extend_from_slice(&chunk),
+            Some(Err(_)) => {
+                broken = true;
+                break;
+            }
+            None => break, // normal end of the body
+        }
+    }
+    if broken {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
     let scrubber = app.scrubber.lock().unwrap_or_else(|e| e.into_inner());
     let rewritten = if is_json {
         match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Ok(mut value) => {
                 scrub_json_value(&mut value, &scrubber);
-                serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec())
+                serde_json::to_vec(&value).unwrap_or_else(|_| bytes.clone())
             }
-            Err(_) if is_error => scrub_plain(&bytes, &scrubber),
-            Err(_) => bytes.to_vec(),
+            Err(_) => scrub_plain(&bytes, &scrubber),
         }
     } else {
         scrub_plain(&bytes, &scrubber)
     };
+    if parts.headers.contains_key(header::CONTENT_LENGTH) {
+        if let Ok(value) = header::HeaderValue::from_str(&rewritten.len().to_string()) {
+            parts.headers.insert(header::CONTENT_LENGTH, value);
+        }
+    }
     Response::from_parts(parts, Body::from(rewritten))
 }
 
-/// Every person-facing string field, at any depth in any JSON body — 2xx included (F7). Rewriting
-/// only error status bodies leaves `EffectError.message` and `note` fields unscrubbed.
+/// Every person-facing string field, at any depth in a non-2xx JSON body (R2/G4). For 2xx bodies
+/// these fields are scrubbed at construction, never by this layer.
 pub fn scrub_json_value(value: &mut serde_json::Value, scrubber: &crate::scrub::Scrubber) {
     match value {
         serde_json::Value::Object(map) => {
@@ -88,13 +103,20 @@ pub fn scrub_json_value(value: &mut serde_json::Value, scrubber: &crate::scrub::
     }
 }
 
+/// Scrubs a daemon-built optional field before it goes into a 2xx body (G4). User-authored text
+/// never reaches this helper: only sentences the daemon itself writes are passed here.
+pub fn scrub_optional(app: &App, text: Option<String>) -> Option<String> {
+    let scrubber = app.scrubber.lock().unwrap_or_else(|e| e.into_inner());
+    text.map(|value| scrub_error_text(&scrubber, &value))
+}
+
 /// One rule for every string a person reads: names first, then device ids (P6).
 pub fn scrub_error_text(scrubber: &crate::scrub::Scrubber, text: &str) -> String {
     canvas_diag::scrub::scrub_device_ids(&scrubber.scrub(text))
 }
 
 /// A plain-text body (an extractor rejection) is one sentence: scrub it and keep its bytes.
-fn scrub_plain(bytes: &Bytes, scrubber: &crate::scrub::Scrubber) -> Vec<u8> {
+fn scrub_plain(bytes: &[u8], scrubber: &crate::scrub::Scrubber) -> Vec<u8> {
     let text = String::from_utf8_lossy(bytes);
     scrub_error_text(scrubber, &text).into_bytes()
 }
@@ -131,6 +153,7 @@ pub fn error_body(status: StatusCode, code: &str, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Bytes;
     use crate::scrub::Scrubber;
 
     #[test]

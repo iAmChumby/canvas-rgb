@@ -129,9 +129,13 @@ impl Bundle {
             }
         }
         let service_logs = match service_logs::collect(self.fs.as_ref(), &self.machine_logs) {
-            Ok(logs) => {
-                for (name, bytes) in logs {
+            Ok(collected) => {
+                for (name, bytes) in collected.logs {
                     files.push(Source { name, bytes });
+                }
+                // Each bad service log names itself in the file list; the other logs stay in.
+                for reason in collected.notices {
+                    notices.push(DiagFile { name: format!("service-logs/{reason}"), bytes: 0 });
                 }
                 None
             }
@@ -456,6 +460,41 @@ mod tests {
         assert!(second.file_name().and_then(|n| n.to_str()).unwrap().ends_with("-2.zip"), "{:?}", second.file_name());
         assert_eq!(std::fs::read(&first).unwrap(), b"keep me");
         assert!(!second.exists());
+    }
+
+    #[test]
+    fn two_writers_on_one_stamp_get_distinct_files() {
+        let dir = home().join("race");
+        std::fs::create_dir_all(&dir).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let dir = dir.clone();
+                let barrier = barrier.clone();
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    loop {
+                        let candidate = output_path(&dir).unwrap();
+                        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+                            Ok(_) => {
+                                tx.send(candidate).unwrap();
+                                break;
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                            Err(e) => panic!("could not reserve a zip: {e}"),
+                        }
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let paths: Vec<_> = rx.iter().take(2).collect();
+        assert_eq!(paths.len(), 2);
+        assert_ne!(paths[0], paths[1], "two racing writers must not share a path");
     }
 
     #[test]

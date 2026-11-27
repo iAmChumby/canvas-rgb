@@ -1,0 +1,11 @@
+[
+  { "input": "eightbitdo-ultimate-2:2dc8", "expected": "the device" },
+  { "input": "royuan:3151:4015.", "expected": "the device." },
+  { "input": "device=openrgb:ABC,", "expected": "device=the device," },
+  { "input": "[hid:1234:5678]", "expected": "[the device]" },
+  { "input": "id=\"chione:XYZ\"", "expected": "id=\"the device\"" },
+  { "input": "openrgb:ABC: timeout", "expected": "the device: timeout" },
+  { "input": "failed on openrgb:ABC", "expected": "failed on the device" },
+  { "input": "failed on openrgb:ABC.", "expected": "failed on the device." },
+  { "input": "http://a:b", "expected": "http://a:b" }
+]
