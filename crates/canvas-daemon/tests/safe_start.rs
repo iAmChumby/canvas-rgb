@@ -172,6 +172,36 @@ async fn a_safe_mode_plays_breathing_on_every_saved_light_without_writing_the_st
     assert_eq!(status.active_effects, vec!["breathing".to_string()]);
 }
 
+#[tokio::test]
+async fn a_restart_replays_a_chain_restore_record_left_by_the_killed_daemon() {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.0);
+    let engine = Arc::new(FakeEngine::default());
+    let adapter = FakeAdapter::default();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(App::new(store, engine, Box::new(adapter), TOKEN.into(), "test".into(), tx));
+
+    // A mode-change restart kills the daemon without `quit_sequence`, so an open setup's record
+    // survives. The next start replays it when its device list arrives (#577 section 6).
+    let record = canvas_daemon::chain_records::RestoreRecord {
+        device_id: canvas_proto::device::DeviceId("fake:x".into()),
+        zone_index: 0,
+        leds: 60,
+    };
+    canvas_daemon::chain_records::write_restore(&home.0, &record).unwrap();
+    let path = home.0.join(canvas_proto::scene::CHAIN_RESTORE_FILE);
+    assert!(path.exists());
+
+    let logs = common::global_logs();
+    canvas_daemon::api::chains::replay_leftovers(&app).await;
+    let text = logs.text();
+    assert!(
+        text.contains("a chain setup was interrupted: the header's earlier length is back"),
+        "the record was not replayed: {text}"
+    );
+    assert!(!path.exists(), "the replayed record was not cleared");
+}
+
 /// A fake pipe that records the request and then waits for the test to release it. The PUT must
 /// answer while this exchange is still held.
 struct HeldPipe {

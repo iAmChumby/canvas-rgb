@@ -1099,6 +1099,39 @@ pub(crate) mod tests {
         assert_eq!(processes.spawns().len(), 3, "the relaunch was blocked by DaemonQuitting");
     }
 
+    /// "Start in safe start" from Help & About arrives as `EnterSafeStart`: the same planned
+    /// relaunch, but the persisted choice is `UserChose` and the streak is kept.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_launched_daemon_may_enter_safe_start_and_is_relaunched() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let (mut core, processes) = test_core_with_processes(home.clone());
+        let state = crate::safe_start::Persisted {
+            unclean_streak: 2,
+            mode: canvas_proto::api::SafeStartMode::Normal,
+            reason: None,
+            since: None,
+        };
+        crate::safe_start::save(&home, &state).unwrap();
+        core.daemon.set_book(crate::safe_start::Book::open(&home, crate::safe_start::load(&home, |_| true)));
+        core.daemon.start(Instant::now());
+        let daemon = core.daemon.daemon_pid().unwrap();
+        let core = Arc::new(Mutex::new(core));
+        let name = unique_name("safe-enter");
+        let first = create_instance(&name, true).unwrap();
+        tokio::spawn(serve(Arc::clone(&core), name.clone(), first, peers(peer(CONSOLE, daemon))));
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        assert_eq!(round_trip(&mut client, &PipeRequest::EnterSafeStart).await, PipeResponse::Ok);
+
+        let guard = core.lock().await;
+        assert_eq!(processes.spawns().len(), 2, "the daemon was relaunched once");
+        assert_eq!(guard.daemon.start_decision().0, canvas_proto::api::SafeStartMode::Safe);
+        let saved = crate::safe_start::load(&home, |_| true).persisted;
+        assert_eq!(saved.unclean_streak, 2, "an enter keeps the streak");
+        assert_eq!(saved.reason, Some(canvas_proto::api::SafeStartReason::UserChose));
+    }
+
     #[test]
     fn admit_daemon_needs_the_launched_daemon_and_says_which_request_it_was() {
         let none = admit_daemon(&peer(CONSOLE, 77), None, "DaemonQuitting").unwrap_err();

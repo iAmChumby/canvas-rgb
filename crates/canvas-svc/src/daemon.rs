@@ -484,8 +484,8 @@ impl DaemonSupervisor {
     /// when the next daemon's device list arrives.
     pub fn restart_in_new_mode(&mut self, now: Instant) {
         if let Some(mut child) = self.child.take() {
-            let beat = self.safe_beat();
-            self.record(EndCause::ServiceKill, Some(1), beat);
+            // The kill is the mode change itself, not an end of a daemon run: recording it as
+            // Planned would let the streak re-decide the mode the owner just chose.
             self.planned_kill = false;
             let pid = child.id();
             let _ = terminate_daemon(child.as_mut(), "safe start mode change");
