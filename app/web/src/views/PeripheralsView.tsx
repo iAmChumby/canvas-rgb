@@ -37,7 +37,7 @@ import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { notify } from "@/components/Notify";
 import { UnreadValue } from "@/components/UnreadValue";
 import { api } from "@/lib/endpoints";
-import { errorText } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import { POLL_MS, usePoll } from "@/lib/usePoll";
 import {
   choiceWord,
@@ -60,6 +60,7 @@ import type { PropValue } from "@/proto/PropValue";
 import type { Props } from "@/proto/props";
 import { PageActions, PageTitle } from "@/shell/PageHeader";
 import { Tooltip } from "@/components/Tooltip";
+import { ErrorState } from "@/components/ErrorState";
 
 /** The icon each kind of peripheral wears. */
 const KIND_GLYPH = {
@@ -240,12 +241,12 @@ function useReadProgress(id: string | null, active: boolean): ReadProgress | nul
 
 export function PeripheralsView() {
   const [list, setList] = useState<PeripheralRow[] | null>(null);
-  const [listError, setListError] = useState<string | null>(null);
+  const [listError, setListError] = useState<Failure | null>(null);
   const [pickedId, setSelectedId] = useState<string | null>(null);
   // The detail of the device that is picked. It carries the id it belongs to, so a slow answer
   // never lands on the wrong device.
   const [loaded, setLoaded] = useState<{ id: string; key: string; detail: PeripheralDetail } | null>(null);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<Failure | null>(null);
   // The change that is on the device already, and whose refresh failed: the page says the
   // change was saved, because it was.
   const [changeSaved, setChangeSaved] = useState(false);
@@ -262,10 +263,10 @@ export function PeripheralsView() {
     });
   }, []);
   const [saving, setSaving] = useState(false);
-  // A failed write's message, per device key: one device's read must not clear another
+  // A failed write's error, per device key: one device's read must not clear another
   // device's failure (#156). Only the selected device's own message is shown.
-  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
-  const setDeviceSaveError = useCallback((id: string, message: string | null) => {
+  const [saveErrors, setSaveErrors] = useState<Record<string, Failure>>({});
+  const setDeviceSaveError = useCallback((id: string, message: Failure | null) => {
     setSaveErrors((prev) => {
       const next = { ...prev };
       if (message) next[id] = message;
@@ -396,7 +397,7 @@ export function PeripheralsView() {
     } catch (e) {
       if (n !== detailRequest.current) return;
       setLoaded(null);
-      setDetailError(errorText(e));
+      setDetailError(caught(e));
       setChangeSaved(landed);
     } finally {
       if (forceRead) rereading.current = false;
@@ -434,7 +435,7 @@ export function PeripheralsView() {
         setSaveErrors((prev) => keepLive(prev, live));
       })
       .catch((e: unknown) => {
-        if (!stop && !background) setListError(errorText(e));
+        if (!stop && !background) setListError(caught(e));
       })
       .finally(() => {
         if (!stop) setListBusy(false);
@@ -487,7 +488,7 @@ export function PeripheralsView() {
         if (stop || n !== detailRequest.current) return;
         setReloadingId(null);
         setLoaded(null);
-        setDetailError(errorText(e));
+        setDetailError(caught(e));
         setChangeSaved(false);
       });
     return () => {
@@ -578,7 +579,7 @@ export function PeripheralsView() {
     } catch (e) {
       // The change itself failed: nothing was changed.
       noteFailure(detail.info.id, true);
-      setDeviceSaveError(detail.info.id, errorText(e));
+      setDeviceSaveError(detail.info.id, caught(e));
       setSaving(false);
       return;
     }
@@ -614,7 +615,7 @@ export function PeripheralsView() {
     } catch (e) {
       // The change itself failed: nothing was changed.
       noteFailure(detail.info.id, false);
-      setDeviceSaveError(detail.info.id, errorText(e));
+      setDeviceSaveError(detail.info.id, caught(e));
       return;
     }
     // The access is saved. The read that follows only refreshes the page.
@@ -647,7 +648,7 @@ export function PeripheralsView() {
                 "The change was saved, but the page could not be refreshed."
               : "canvas-rgb could not read that device. Nothing was changed."
           }
-          message={detailError}
+          error={detailError}
           onRetry={() => {
             if (!selectedId) return;
             setDetailError(null);
@@ -715,7 +716,7 @@ export function PeripheralsView() {
             <ErrorPanel
               title="The peripherals could not be listed"
               summary="canvas-rgb could not look for the peripherals. Nothing was changed."
-              message={listError}
+              error={listError}
               onRetry={retryList}
             />
           }
@@ -771,9 +772,7 @@ export function PeripheralsView() {
       </div>
 
       {saveError && (
-        <p className="rule rule-warn" role="status">
-          <span>{saveError}</span>
-        </p>
+        <ErrorState error={saveError} />
       )}
 
       <div className="peripheral-detail">

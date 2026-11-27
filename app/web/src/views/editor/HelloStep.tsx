@@ -1,5 +1,4 @@
 "use client";
-import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, ArrowsClockwise, Check, Circle } from "@phosphor-icons/react";
@@ -11,6 +10,8 @@ import { Fold, StepFrame } from "@/views/editor/OnboardStep";
 import { HELLO_EFFECT } from "@/views/editor/onboardEffects";
 import { rescanForDevices, refreshStatus, useSnap } from "@/lib/store";
 import s from "@/views/editor/onboarding.module.css";
+import { ErrorState } from "@/components/ErrorState";
+import type { Failure } from "@/lib/errors";
 
 /**
  * The first screen. It is five screens in one, chosen by what is true right now:
@@ -169,7 +170,7 @@ function Ladder({
   const status = useSnap((st) => st.status);
   const [busy, setBusy] = useState(false);
   const [asked, setAsked] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
+  const [failure, setFailure] = useState<Failure | null>(null);
   const noOtherApps = (status?.conflicts.length ?? 0) === 0;
 
   const rescan = async () => {
@@ -210,7 +211,7 @@ function Ladder({
         <Rung>Turn off Fast Startup.</Rung>
         <Rung>Rescan.</Rung>
       </ol>
-      {failure && !busy && <ErrorLine>Rescan failed: {failure}</ErrorLine>}
+      {failure && !busy && <ErrorState compact context="Rescan failed:" error={failure} />}
       {asked && !busy && !volunteer && !failure && <p className={s.hint}>Still no lights.</p>}
       <Fold label="More help">
         <p className={s.hint}>Close iCUE, Armoury Crate and Razer Synapse.</p>

@@ -9,6 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { hintOf, messageOf } from "@/lib/errors";
+import { openLogsFolder, tauriHost } from "@/lib/host";
 import s from "./ErrorState.module.css";
 
 /**
@@ -16,8 +17,10 @@ import s from "./ErrorState.module.css";
  * the next step as the lead, and a key row for the actions that can be taken. The card reserves
  * its height so a late hint never moves the page. An error never lives only in a toast.
  *
- * `message` is a daemon or tray message, already scrubbed before it reaches the editor.
- * `detail` is the local text from `messageOf(e)`; it is never used as the report's `what-happened`.
+ * Views hand over the caught value as `error`; the words are formed here. `message` is the title
+ * the view wants over it, and the error's own words then stand under it as the detail. A daemon or
+ * tray message is already scrubbed before it reaches the editor; `detail` is never used as the
+ * report's `what-happened`.
  */
 export function ErrorState({
   message,
@@ -30,21 +33,23 @@ export function ErrorState({
   onOpenLogs,
   onSaveDiagnostics,
   onReport,
-  logsEnabled = true,
+  logsEnabled,
+  retryLabel = "Try again",
+  busy = false,
   compact = false,
+  context,
+  tooltip = false,
   className,
   style,
   id,
-  role: _role,
 }: {
-  /** The scrubbed "what happened" (or inline error text). */
+  /** The title, when the view words it. Without one, the error's own words are the title. */
   message?: ReactNode | null;
-  role?: string;
   /** The scrubbed next step. Falls back to the hint on an `ApiFailure`. */
   hint?: string | null;
-  /** A local detail, e.g. `errorText(e)` for a plain `Error`. */
+  /** A local detail. Defaults to the error's words when `message` is the title. */
   detail?: string | null;
-  /** Convenience: take title, hint and detail from one caught value. */
+  /** The caught value (a `Failure`): the title or detail, and the hint. */
   error?: unknown;
   /** The version appended by Copy error. */
   version?: string | null;
@@ -55,19 +60,39 @@ export function ErrorState({
   onReport?: () => void;
   /** False outside the tray: the key says "Tray app only" and is disabled. */
   logsEnabled?: boolean;
+  /** The retry key's words, when the retry is a different step ("Start again"). */
+  retryLabel?: string;
+  /** The retry is running: the key shows the wait and takes no second press. */
+  busy?: boolean;
   /** An inline error in a row or a modal: the same anatomy, one line. */
   compact?: boolean;
+  /** Compact only: the words in front of the error's own ("Rescan failed:"). */
+  context?: string;
+  /** Compact only: the whole line is also the tooltip, for a row that cuts it short. */
+  tooltip?: boolean;
   className?: string;
   style?: CSSProperties;
   id?: string;
 }) {
-  const title = message ?? (error !== undefined ? messageOf(error) : "Something went wrong.");
+  const said = error !== undefined && error !== null ? messageOf(error) : null;
+  const title = message ?? said ?? "Something went wrong.";
+  // A repeated sentence is dropped: the detail never says the title again (U5).
+  const words = detail ?? (message != null ? said : null);
   const lead = hint ?? (error !== undefined ? hintOf(error) : null);
+  const under = words && words !== title && words !== lead ? words : null;
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
+  const [logsRefused, setLogsRefused] = useState<unknown>(null);
+  const logs = logsEnabled ?? tauriHost() !== null;
+  const openLogs =
+    onOpenLogs ??
+    (() => {
+      setLogsRefused(null);
+      void openLogsFolder().catch((e: unknown) => setLogsRefused(e));
+    });
 
   const copy = async () => {
-    const text = [title, lead, version].filter(Boolean).join("\n");
+    const text = [title, lead, under, version].filter(Boolean).join("\n");
     setCopyFailed(false);
     try {
       await navigator.clipboard.writeText(text);
@@ -81,30 +106,50 @@ export function ErrorState({
 
   if (compact) {
     // A row-sized error still goes through this component; ErrorLine lives here, so no view
-    // writes a bare error paragraph (F8/F9).
-    return <ErrorLine className={className} style={style} id={id} role="alert">{title}</ErrorLine>;
+    // writes a bare error paragraph (F8/F9). With nothing to say the line stays, empty, so a
+    // reserved row keeps its room.
+    const body = message ?? said;
+    const line = body !== null && context ? `${context} ${String(body)}` : body;
+    return (
+      <ErrorLine
+        className={className}
+        style={style}
+        id={id}
+        role="alert"
+        title={tooltip && typeof line === "string" ? line : undefined}
+      >
+        {line ?? ""}
+      </ErrorLine>
+    );
   }
 
   return (
-    <div className={s.state} role="alert" data-anatomy="error-state">
+    <div
+      className={[s.state, className].filter(Boolean).join(" ")}
+      style={style}
+      id={id}
+      role="alert"
+      data-anatomy="error-state"
+    >
       <p className={s.title}>{title}</p>
       {lead ? <p className={s.lead}>{lead}</p> : null}
-      {detail ? <p className={s.detail}>{detail}</p> : null}
+      {under ? <p className={s.detail}>{under}</p> : null}
       <div className={s.keys}>
         {onRetry ? (
-          <Button size="sm" icon={<ArrowClockwise size={15} />} onClick={onRetry}>
-            Try again
+          <Button size="sm" icon={<ArrowClockwise size={15} />} onClick={onRetry} busy={busy}>
+            {retryLabel}
           </Button>
         ) : null}
         <Button size="sm" variant="ghost" icon={<Copy size={15} />} onClick={() => void copy()}>
           {copied ? "Copied" : "Copy error"}
         </Button>
-        <KeyRow icon={FolderOpen} label={logsEnabled ? "Open logs folder" : "Tray app only"} onClick={onOpenLogs} disabled={!logsEnabled || !onOpenLogs} />
+        <KeyRow icon={FolderOpen} label={logs ? "Open logs folder" : "Tray app only"} onClick={openLogs} disabled={!logs} />
         {onSaveDiagnostics ? (
           <KeyRow icon={FolderOpen} label="Save diagnostics" onClick={onSaveDiagnostics} />
         ) : null}
         {onReport ? <KeyRow icon={Copy} label="Report issue" onClick={onReport} /> : null}
         {copyFailed ? <span className={s.note}>The clipboard refused the copy.</span> : null}
+        {logsRefused !== null ? <span className={s.note}>{messageOf(logsRefused)}</span> : null}
       </div>
     </div>
   );

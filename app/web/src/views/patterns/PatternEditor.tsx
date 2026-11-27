@@ -29,7 +29,7 @@ import { ShapePicker, type Shape } from "@/components/ShapePicker";
 import { useFocusTrap } from "@/components/useFocusTrap";
 import { BLACK_HEX, parseHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
-import { errorText } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import { cancelNavigation, continueNavigation, hasPendingNavigation } from "@/lib/navigationGuard";
 import { motionOffNow } from "@/lib/motion";
 import { kindWords } from "@/lib/patternFit";
@@ -49,6 +49,7 @@ import type { Arrangement } from "@/proto/Arrangement";
 import type { LightView } from "@/proto/LightView";
 import type { Pattern } from "@/proto/Pattern";
 import s from "@/views/patterns/patterns.module.css";
+import { ErrorState } from "@/components/ErrorState";
 
 /** The `history.state` key of the editor's guard entry; `PATTERN_ENTRY_SPENT` marks one the editor left. */
 export const PATTERN_GUARD = "canvasRgbPatternGuard";
@@ -90,11 +91,11 @@ export function PatternEditor({
   const alive = useRef(false);
   const heartbeat = useRef(HEARTBEAT_MS);
   const [daemonNote, setDaemonNote] = useState<string | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<Failure | null>(null);
   /** A shape change or its undo that did not reach the light: the pattern keeps the shape it shows. */
-  const [shapeProblem, setShapeProblem] = useState<string | null>(null);
+  const [shapeProblem, setShapeProblem] = useState<Failure | null>(null);
   /** A save that did not land: the document on the lights is not the saved one. */
-  const [saveProblem, setSaveProblem] = useState<string | null>(null);
+  const [saveProblem, setSaveProblem] = useState<Failure | null>(null);
   /** How many answers in a row said this editor's stroke is not on the lights. */
   const notApplied = useRef(0);
   /** A save is in flight. */
@@ -177,7 +178,7 @@ export function PatternEditor({
         setProblem(null);
       } catch (error) {
         if (!alive.current) return;
-        setProblem(errorText(error));
+        setProblem(caught(error));
       }
     },
     [epoch],
@@ -214,7 +215,7 @@ export function PatternEditor({
       await refreshLights();
     } catch (error) {
       // The note row is gone with the editor: no state update after the unmount (#491).
-      if (alive.current) setShapeProblem(errorText(error));
+      if (alive.current) setShapeProblem(caught(error));
       throw error;
     }
   }, []);
@@ -346,7 +347,7 @@ export function PatternEditor({
       await refreshLights();
       identifyFirst(led);
     } catch (error) {
-      setShapeProblem(errorText(error));
+      setShapeProblem(caught(error));
     }
   };
   const setReversed = async (next: boolean) => {
@@ -359,7 +360,7 @@ export function PatternEditor({
       );
       await refreshLights();
     } catch (error) {
-      setShapeProblem(errorText(error));
+      setShapeProblem(caught(error));
     }
   };
 
@@ -390,8 +391,8 @@ export function PatternEditor({
   const name = pattern.id.startsWith(PATTERN_ID_PREFIX) ? pattern.id.slice(PATTERN_ID_PREFIX.length) : pattern.id;
   const leds = editor.builtOn.led_count;
   const lit = editor.colours.filter((colour) => (parseHex(colour) ?? BLACK_HEX) !== BLACK_HEX).length;
-  const line = saveProblem ?? shapeProblem ?? problem ?? daemonNote ?? (note && note.length > 0 ? note : null);
-  const failed = saveProblem !== null || shapeProblem !== null || problem !== null;
+  const failure = saveProblem ?? shapeProblem ?? problem;
+  const line = daemonNote ?? (note && note.length > 0 ? note : null);
 
   // The guard: the shell asks it before it changes page, the browser's Back lands on an entry
   // of the editor's own, and the browser is warned when the window closes. The editor asks
@@ -422,7 +423,7 @@ export function PatternEditor({
     } catch (error) {
       // The save failed, so the editor is not leaving after all.
       pendingLeave.current = false;
-      setSaveProblem(errorText(error));
+      setSaveProblem(caught(error));
     }
     setSaving(false);
     if (landed) then?.();
@@ -570,9 +571,13 @@ export function PatternEditor({
       {/* The daemon's own sentence (no device of this kind, another window has the lights), or a
           save that did not land. The row keeps its height either way, so the device never moves
           when a sentence arrives. */}
-      <p className={s.noteRow} role="status">
-        {line !== null && <span className={failed ? s.problem : s.note}>{line}</span>}
-      </p>
+      <div className={s.noteRow} role="status">
+        {failure !== null ? (
+          <ErrorState compact className={s.problem} error={failure} />
+        ) : (
+          line !== null && <span className={s.note}>{line}</span>
+        )}
+      </div>
 
       <div className={s.stage}>
         <DotCanvas

@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, errorText } from "@/lib/errors";
+import { ApiFailure, caught, toastText, type Failure } from "@/lib/errors";
 import {
   cancelNavigation,
   continueNavigation,
@@ -75,10 +75,10 @@ export function useSaveAndLeave({
   promptRef: RefObject<HTMLDivElement | null>;
 }) {
   const [saveState, setSaveState] = useState<"idle" | "saving">("idle");
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<Failure | null>(null);
   /** The stack is saved but would not start: the id that was saved and the daemon's reason. Not a
    *  save error, so the banner says "Saved" and offers Start again, not a second write. */
-  const [startFailure, setStartFailure] = useState<{ id: string; message: string } | null>(null);
+  const [startFailure, setStartFailure] = useState<{ id: string; error: Failure } | null>(null);
   const [starting, setStarting] = useState(false);
   const [clash, setClash] = useState<string | null>(null);
   const [naming, setNaming] = useState(false);
@@ -309,7 +309,7 @@ export function useSaveAndLeave({
         setClash(wanted);
         return;
       }
-      setSaveError(errorText(e));
+      setSaveError(caught(e));
       return;
     }
     // The activation ends the draft on the lights without putting the old effect back.
@@ -343,10 +343,10 @@ export function useSaveAndLeave({
       await api.activateEffect(saved.id, { props: {}, preset: null });
       await refreshAll();
     } catch (e) {
-      setStartFailure({ id: saved.id, message: errorText(e) });
+      setStartFailure({ id: saved.id, error: caught(e) });
       // Save and leave: the builder closes, and its banner with it, so the note says what the banner
       // would have said. It stays until it is dismissed.
-      if (then) notify(`${nameOf(saved.id)} is saved, but it did not start: ${errorText(e)}`, "warn");
+      if (then) notify(toastText(e, `${nameOf(saved.id)} is saved, but it did not start:`), "warn");
     }
     then?.();
   };
@@ -363,7 +363,7 @@ export function useSaveAndLeave({
       setStartFailure(null);
       notify(`${nameOf(failed.id)} is running`);
     } catch (e) {
-      setStartFailure({ id: failed.id, message: errorText(e) });
+      setStartFailure({ id: failed.id, error: caught(e) });
     } finally {
       setStarting(false);
     }

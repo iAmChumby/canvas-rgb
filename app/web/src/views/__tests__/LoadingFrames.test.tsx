@@ -72,31 +72,23 @@ const status: Status = {
   faults: [],
 };
 
-/** The error frame: one line, a way to try again, and the raw words behind the disclosure. */
-function expectGoodErrorFrame(title: string, raw: string) {
+/** The error frame: the one anatomy, with the title, a lead, the daemon's words and the keys. */
+function expectGoodErrorFrame(title: string, words: string) {
   expect(screen.getByText(title)).toBeTruthy();
-  // One line, in plain words: no raw answer from the service.
   const alerts = screen.getAllByRole("alert");
   expect(alerts).toHaveLength(1);
-  expect(alerts[0]?.textContent ?? "").not.toMatch(/daemon/i);
-  // The raw words are behind the disclosure, and it is folded away.
-  const details = document.querySelector("details.load-detail") as HTMLDetailsElement | null;
-  expect(details).not.toBeNull();
-  expect(details?.open).toBe(false);
-  expect(details?.textContent).toContain(raw);
-  // The raw words are nowhere else in the frame: not in the line the reader sees, and not
-  // anywhere else outside the disclosure.
-  const frameEl = document.querySelector(".load-frame") as HTMLElement | null;
-  expect(frameEl).not.toBeNull();
-  const outside = frameEl?.cloneNode(true) as HTMLElement;
-  outside.querySelectorAll("details").forEach((d) => d.remove());
-  expect(outside.textContent ?? "").not.toContain(raw);
+  const card = alerts[0] as HTMLElement;
+  expect(card.getAttribute("data-anatomy")).toBe("error-state");
+  expect(card.textContent).toContain(words);
+  // Nothing is folded away: what happened is on the card.
+  expect(card.querySelector("details")).toBeNull();
   // And there is a way to ask again.
   expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Copy error" })).toBeTruthy();
 }
 
 describe("the error frame", () => {
-  it("says it in one line and keeps the raw words behind the details (displays)", async () => {
+  it("says it in the one anatomy (displays)", async () => {
     setUrl("/displays/?state=fail:displays");
     await act(async () => {
       await refreshDisplays();
@@ -106,7 +98,7 @@ describe("the error frame", () => {
     expectGoodErrorFrame("The displays could not be read", "could not read the displays: the request came back with an error");
   });
 
-  it("says it in one line and keeps the raw words behind the details (effects)", async () => {
+  it("says it in the one anatomy (effects)", async () => {
     setUrl("/effects/?state=fail:effects");
     await act(async () => {
       await refreshEffects();
@@ -124,7 +116,7 @@ describe("the error frame", () => {
     expectGoodErrorFrame("The effects could not be read", "could not read the effects: the request came back with an error");
   });
 
-  it("says it in one line and keeps the raw words behind the details (peripherals)", async () => {
+  it("says it in the one anatomy (peripherals)", async () => {
     setUrl("/peripherals/?state=fail:peripherals");
     render(<PeripheralsView />);
     await screen.findByText("The peripherals could not be listed");
@@ -134,7 +126,7 @@ describe("the error frame", () => {
     );
   });
 
-  it("says it in one line and keeps the raw words behind the details (devices)", async () => {
+  it("says it in the one anatomy (devices)", async () => {
     setUrl("/devices/?state=fail:devices");
     await act(async () => {
       await refreshDevices();

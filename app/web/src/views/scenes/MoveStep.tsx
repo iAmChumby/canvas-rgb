@@ -23,6 +23,8 @@ import type { GroupMoved } from "@/proto/GroupMoved";
 import type { LightView } from "@/proto/LightView";
 import type { Scene } from "@/proto/Scene";
 import s from "@/views/scenes/moveStep.module.css";
+import { ErrorState } from "@/components/ErrorState";
+import { titleText, type Failure } from "@/lib/errors";
 
 export interface MoveStepProps {
   /** The group that goes. */
@@ -51,9 +53,9 @@ function rowKey(id: string, question: string): string {
 }
 
 /** The daemon's own refusal, when it refused. */
-function refusalOf(check: MoveCheck | undefined): string | null {
+function refusalOf(check: MoveCheck | undefined): Failure | null {
   if (!check || check.state !== "refused") return null;
-  return check.message;
+  return check.error;
 }
 
 /** The daemon's answer, when it answered. */
@@ -266,12 +268,15 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
           const failed = state === "failed";
           // While the daemon has not answered, the line is the loading kit's own placeholder in
           // the same box (#258: a wait is never drawn as a sentence).
-          const line: ReactNode = refused
-            ?? (answer
-              ? moveOutcomeLine(answer, { away })
-              : failed
-                ? FAILED_LINE
-                : <InlineSkeleton width="26ch" />);
+          const line: ReactNode = refused ? (
+            <ErrorState compact error={refused} />
+          ) : answer ? (
+            moveOutcomeLine(answer, { away })
+          ) : failed ? (
+            <ErrorState compact message={FAILED_LINE} />
+          ) : (
+            <InlineSkeleton width="26ch" />
+          );
           return (
             <div className={s.row} key={target.id}>
               <Chip
@@ -281,7 +286,7 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
                 pending={state === "pending"}
                 disabled={busy !== null || !answer}
                 icon={copy ? <CopySimple size={16} /> : <ArrowRight size={16} />}
-                title={refused ?? undefined}
+                title={refused ? titleText(refused) : undefined}
                 describedBy={`move-outcome-${target.id}`}
                 testId={`move-to-${target.id}`}
                 onClick={() => void commit(target)}
@@ -289,14 +294,14 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
                 {copy ? `Copy to ${target.name}` : `Move to ${target.name}`}
               </Chip>
               <div className={s.under}>
-                <p
+                <div
                   className={`${s.outcome} fig`}
                   id={`move-outcome-${target.id}`}
                   data-refused={refused ? "true" : undefined}
                   data-state={state}
                 >
                   {line}
-                </p>
+                </div>
                 {failed && (
                   <Button
                     variant="ghost"

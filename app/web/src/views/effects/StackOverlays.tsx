@@ -1,5 +1,4 @@
 "use client";
-import { ErrorLine } from "@/components/ErrorState";
 
 // The builder's overlays (#257 phase 4), moved out of StackBuilder.tsx: the name prompt, the two
 // effect popovers, the drag ghost with its hint, and the live region. Their markup and classes
@@ -19,6 +18,7 @@ import { isHtmlEffect } from "@/views/effects/stackDraft";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { StackLayer } from "@/proto/StackLayer";
 import type { DragState } from "@/lib/dragSession";
+import { ErrorState } from "@/components/ErrorState";
 
 export function NameStackDialog({
   nameDraft,
@@ -57,9 +57,7 @@ export function NameStackDialog({
           onEscape={onEscape}
         />
         {namingError && (
-          <ErrorLine id="stack-name-error" role="alert">
-            {namingError}
-          </ErrorLine>
+          <ErrorState compact id="stack-name-error" error={namingError} />
         )}
         <div className="rd-picker-foot">
           <Button variant="ghost" onClick={onCancel}>

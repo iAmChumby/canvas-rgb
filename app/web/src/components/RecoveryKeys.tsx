@@ -3,12 +3,12 @@
 import { useState } from "react";
 import { Copy, FolderOpen, DownloadSimple, ArrowSquareOut } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
-import { KeyRow } from "@/components/ErrorState";
+import { ErrorState, KeyRow } from "@/components/ErrorState";
 import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { ReportIssue } from "@/components/ReportIssue";
 import { openLogsFolder, openServiceLogsFolder, reportPrefill, tauriHost } from "@/lib/host";
-import { errorText } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import type { AboutReport } from "@/proto/AboutReport";
 
 /**
@@ -29,7 +29,7 @@ export function RecoveryKeys({
 }) {
   const [panel, setPanel] = useState<"none" | "diag" | "report">("none");
   const [report, setReport] = useState<AboutReport | null>(null);
-  const [refused, setRefused] = useState<string | null>(null);
+  const [refused, setRefused] = useState<Failure | null>(null);
   const [copied, setCopied] = useState(false);
   const tray = tauriHost() !== null;
 
@@ -46,7 +46,7 @@ export function RecoveryKeys({
             other_rgb_apps: "not collected: daemon not running",
           }),
         )
-        .catch((e: unknown) => setRefused(errorText(e)));
+        .catch((e: unknown) => setRefused(caught(e)));
     }
   };
 
@@ -64,14 +64,14 @@ export function RecoveryKeys({
           icon={FolderOpen}
           label="Open logs folder"
           disabled={!tray}
-          onClick={() => void openLogsFolder().catch((e: unknown) => setRefused(errorText(e)))}
+          onClick={() => void openLogsFolder().catch((e: unknown) => setRefused(caught(e)))}
         />
         {withServiceLogs ? (
           <KeyRow
             icon={FolderOpen}
             label="Open service logs"
             disabled={!tray}
-            onClick={() => void openServiceLogsFolder().catch((e: unknown) => setRefused(errorText(e)))}
+            onClick={() => void openServiceLogsFolder().catch((e: unknown) => setRefused(caught(e)))}
           />
         ) : null}
         <KeyRow icon={DownloadSimple} label="Save diagnostics" disabled={!tray} onClick={() => setPanel(panel === "diag" ? "none" : "diag")} />
@@ -80,7 +80,7 @@ export function RecoveryKeys({
           {copied ? "Copied details" : "Copy details"}
         </Button>
       </div>
-      {refused ? <p className="recovery-refused">{refused}</p> : null}
+      {refused ? <ErrorState compact error={refused} /> : null}
       {panel === "diag" ? <DiagnosticsPanel compact /> : null}
       {panel === "report" ? (
         <div className="recovery-panel">

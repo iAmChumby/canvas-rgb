@@ -54,7 +54,7 @@ export function DiagnosticsPanel({ compact = false }: { compact?: boolean }) {
         <ErrorState message="Save diagnostics is available in the tray app only." />
       ) : error !== null ? (
         <>
-          <ErrorState error={error} onRetry={load} logsEnabled={false} />
+          <ErrorState error={error} onRetry={load} />
         </>
       ) : (
         <>

@@ -5,7 +5,7 @@
 // applied here only keeps a request from being refused for being under it.
 
 import { baseFloor } from "@/lib/fan-rules";
-import { messageOf } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
 import type { FanMode } from "@/proto/FanMode";
@@ -32,8 +32,10 @@ export interface BulkOutcome {
   id: string;
   label: string;
   state: BulkState;
-  /** What happened to this header, in words. */
+  /** What happened to this header, in words. Empty when `error` holds the refusal. */
   detail: string;
+  /** The caught value of a write that failed: `ErrorState` says it. */
+  error?: Failure;
 }
 
 /** A header's label without the "(tach only)" the daemon appends: the row's chip says it. */
@@ -133,14 +135,14 @@ export async function applyBulk(
       out.push({ ...base, state: "failed", detail: "The header to copy from is no longer on a curve." });
       continue;
     }
-    const failure: { text: string | null } = { text: null };
+    const failure: { error: Failure | null } = { error: null };
     const sent = await write(h.id, mode, (e) => {
-      failure.text = messageOf(e);
+      failure.error = caught(e);
     });
     if (sent === "superseded") {
       out.push({ ...base, state: "skipped", detail: "Superseded by your edit of this header: that edit went out instead." });
-    } else if (failure.text !== null) {
-      out.push({ ...base, state: "failed", detail: failure.text });
+    } else if (failure.error !== null) {
+      out.push({ ...base, state: "failed", detail: "", error: failure.error });
     } else if (action.kind === "fixed" && mode.mode === "fixed" && mode.percent !== Math.round(action.percent)) {
       out.push({ ...base, state: "applied", detail: `Raised to its floor, Fixed ${mode.percent}%.` });
     } else {

@@ -1,6 +1,5 @@
 "use client";
 import { ErrorState } from "@/components/ErrorState";
-import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useState } from "react";
 import { Button, ButtonLink } from "@/components/Button";
@@ -8,7 +7,7 @@ import { Field, StateDot } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Toggle } from "@/components/Toggle";
-import { errorText } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import {
   canUpdate,
   getTrayPrefs,
@@ -37,7 +36,7 @@ const EDITORS: { value: EditorChoice; label: string }[] = [
  */
 export function UpdatesPanel() {
   const u = useSnap((s) => s.update);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<Failure | null>(null);
   // The tray's own preferences: which feed it reads (#203).
   const [prefs, setPrefs] = useState<TrayPrefs | null>(null);
   const acts = canUpdate();
@@ -58,7 +57,7 @@ export function UpdatesPanel() {
     setErr(null);
     void setUpdateChannel(experimental ? "experimental" : "stable")
       .then(setPrefs)
-      .catch((e: unknown) => setErr(errorText(e)));
+      .catch((e: unknown) => setErr(caught(e)));
   };
 
   // The editor the tray opens (#202). Only an experimental build has the choice: the running
@@ -68,7 +67,7 @@ export function UpdatesPanel() {
     setErr(null);
     void setEditor(editor)
       .then(setPrefs)
-      .catch((e: unknown) => setErr(errorText(e)));
+      .catch((e: unknown) => setErr(caught(e)));
   };
 
   const status = u ? settingsStatus(u) : null;
@@ -137,7 +136,7 @@ export function UpdatesPanel() {
         )}
       </div>
       {!acts && <p className="mute upd-note">Tray app only</p>}
-      {err && <ErrorState compact message={err} />}
+      {err && <ErrorState compact error={err} />}
     </>
   );
 }

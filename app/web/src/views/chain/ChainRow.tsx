@@ -19,14 +19,13 @@ import { createPortal } from "react-dom";
 import { PencilSimple } from "@phosphor-icons/react";
 
 import { Button } from "@/components/Button";
-import { ErrorLine } from "@/components/ErrorState";
 import { KindIcon } from "@/components/KindIcon";
 import { NameField } from "@/components/NameField";
 import { StateDot } from "@/components/Panel";
 import { Segmented, type SegOption } from "@/components/Segmented";
 import { Toggle } from "@/components/Toggle";
 import { api } from "@/lib/endpoints";
-import { errorText } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import { refreshChains, refreshLights } from "@/lib/store";
 import type { ChainPartKind } from "@/proto/ChainPartKind";
 import type { ChainView } from "@/proto/ChainView";
@@ -61,7 +60,7 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(view.label);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Failure | null>(null);
 
   /** Every edit is one PATCH of this light; the two lists are read back so both windows agree. */
   const patch = async (body: LightPatch): Promise<boolean> => {
@@ -72,7 +71,7 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
       await Promise.all([refreshLights(), refreshChains()]);
       return true;
     } catch (e) {
-      setError(errorText(e));
+      setError(caught(e));
       return false;
     } finally {
       setBusy(false);
@@ -155,7 +154,7 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
           onChange={(next) => void patch({ reversed: next })}
         />
       </span>
-      {error && <ErrorState compact message={error} className={s.partError} />}
+      {error && <ErrorState compact error={error} className={s.partError} />}
     </li>
   );
 }

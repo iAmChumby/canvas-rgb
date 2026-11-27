@@ -1,5 +1,4 @@
 "use client";
-import { ErrorLine } from "@/components/ErrorState";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -23,7 +22,7 @@ import { Panel, StateDot } from "@/components/Panel";
 import { Receipt } from "@/components/Receipt";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { api } from "@/lib/endpoints";
-import { errorText } from "@/lib/errors";
+import { toastText } from "@/lib/errors";
 import { openExternal } from "@/lib/host";
 import { useSnap } from "@/lib/store";
 import { settingsStatus } from "@/lib/updateWords";
@@ -94,7 +93,7 @@ export function HelpView() {
       await api.setSafeStart(mode);
       // The service restarts the daemon in the chosen mode. The next status poll shows it.
     } catch (e) {
-      notify(errorText(e), "warn");
+      notify(toastText(e), "warn");
     } finally {
       setModeBusy(false);
     }
@@ -241,7 +240,7 @@ export function HelpView() {
                       This is the exact text that goes to the clipboard.
                     </span>
                   </div>
-                  {copyFailed && <ErrorLine>The clipboard refused the copy.</ErrorLine>}
+                  {copyFailed && <ErrorState compact message="The clipboard refused the copy." />}
                 </>
               )}
             </Panel>
@@ -282,7 +281,7 @@ export function HelpView() {
                 <KeyRow
                   icon={ShieldCheck}
                   label="Privacy"
-                  address="ΓÇª/docs/privacy.md"
+                  address="…/docs/privacy.md"
                   href={PRIVACY}
                   external
                   onOpen={() => openAway(PRIVACY)}
@@ -290,7 +289,7 @@ export function HelpView() {
                 <KeyRow
                   icon={Star}
                   label="Credits"
-                  address="ΓÇª/docs/thanks.md"
+                  address="…/docs/thanks.md"
                   href={CREDITS}
                   external
                   onOpen={() => openAway(CREDITS)}

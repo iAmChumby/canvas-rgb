@@ -32,7 +32,7 @@ const { api, notifySpy, dismissSpy } = vi.hoisted(() => ({
 vi.mock("@/lib/endpoints", () => ({ api }));
 vi.mock("@/components/Notify", () => ({ notify: notifySpy, dismissNotification: dismissSpy }));
 
-import { ApiFailure } from "@/lib/errors";
+import { ApiFailure, messageOf, type Failure } from "@/lib/errors";
 import { getSnap, patchSnap, refreshScenes } from "@/lib/store";
 import { DEMO_LIGHTS, DEMO_SCENES, demoSceneProblem } from "@/lib/fixtures";
 import { htmlLimitSentence } from "@/lib/htmlLimit";
@@ -44,6 +44,9 @@ import type { Scene } from "@/proto/Scene";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { ScenesWrite } from "@/proto/ScenesWrite";
 import type { Props } from "@/proto/props";
+
+/** The words the anatomy would show for what the hook holds; null stays null. */
+const words = (failure: Failure | null) => (failure === null ? null : messageOf(failure));
 
 const clone = <T,>(value: T): T => structuredClone(value);
 
@@ -296,7 +299,7 @@ describe("useScene", () => {
       }, "Rename scene");
     });
 
-    await waitFor(() => expect(result.current.error).toBe("Changed in another window"));
+    await waitFor(() => expect(words(result.current.error)).toBe("Changed in another window"));
     expect(result.current.scene?.name).toBe("Gaming (other window)");
     expect(result.current.scene?.rev).toBe(9);
     expect(result.current.canUndo).toBe(false);
@@ -644,7 +647,7 @@ describe("useScene", () => {
       refuse(new ApiFailure(500, "http", "the daemon said no"));
       await vi.advanceTimersByTimeAsync(200);
     });
-    expect(result.current.error).toBe("the daemon said no");
+    expect(words(result.current.error)).toBe("the daemon said no");
     // The value that came while it was out still goes.
     const last = api.scenes.patchGroupProps.mock.calls.at(-1) as [string, string, Props];
     expect(last[2].amount).toEqual({ type: "number", value: 2 });
@@ -868,7 +871,7 @@ describe("useScene", () => {
     // This window's last rev was 7, so its live write should answer 8. It answered 9: another
     // window saved in between. The unsent "Mine" is not sent on top of the other window's rename.
     expect(api.scenes.put).not.toHaveBeenCalled();
-    expect(result.current.error).toBe("Changed in another window");
+    expect(words(result.current.error)).toBe("Changed in another window");
     expect(result.current.scene?.name).toBe("Gaming (other window)");
   });
 
@@ -966,7 +969,7 @@ describe("useScene", () => {
 
     // The read found the other window's 7, not this window's 42: a conflict, said out loud, and
     // this window's value is not taken for saved.
-    expect(result.current.error).toBe("Changed in another window");
+    expect(words(result.current.error)).toBe("Changed in another window");
     const plays = result.current.scene?.groups[0]?.plays;
     expect(plays?.type === "effect" ? plays.props.amount : undefined).toEqual({ type: "number", value: 7 });
   });
@@ -1001,7 +1004,7 @@ describe("useScene", () => {
       await vi.advanceTimersByTimeAsync(200);
     });
 
-    expect(result.current.error).toBe("Changed in another window");
+    expect(words(result.current.error)).toBe("Changed in another window");
     const plays = result.current.scene?.groups[0]?.plays;
     expect(plays?.type === "effect" ? plays.props.amount : undefined).toEqual({ type: "number", value: 1 });
   });
@@ -1085,7 +1088,7 @@ describe("useScene", () => {
 
     // The read found the other window's green, not this window's red: a conflict, said out loud,
     // and the red is not taken for saved.
-    expect(result.current.error).toBe("Changed in another window");
+    expect(words(result.current.error)).toBe("Changed in another window");
     const plays = result.current.scene?.groups[0]?.plays;
     expect(plays?.type === "effect" ? plays.props.tint : undefined).toEqual({
       type: "color",
@@ -1113,7 +1116,7 @@ describe("useScene", () => {
     });
     expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(3);
     expect(api.scenes.putGroupBrightness).toHaveBeenCalledTimes(3);
-    expect(result.current.error).toBe("the daemon said no");
+    expect(words(result.current.error)).toBe("the daemon said no");
   });
 
   it("a value of the other kind that was never tried survives a kind's third failure", async () => {
@@ -1449,7 +1452,7 @@ describe("useScene", () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
     expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(3);
-    expect(result.current.error).toBe("the daemon said no");
+    expect(words(result.current.error)).toBe("the daemon said no");
     // The screen shows what the daemon saved, not the refused value.
     const shownPlays = result.current.scene?.groups[0]?.plays;
     expect(shownPlays?.type === "effect" ? shownPlays.props : {}).toEqual({});
@@ -1543,7 +1546,7 @@ describe("useScene", () => {
       }, "Rename");
     });
 
-    await waitFor(() => expect(result.current.error).toBe("the daemon said no"));
+    await waitFor(() => expect(words(result.current.error)).toBe("the daemon said no"));
     // The change that failed is not on the undo stack: the first undo is not a no-op.
     expect(result.current.canUndo).toBe(false);
     await act(async () => {
@@ -1676,7 +1679,7 @@ describe("the move of a group and the order of the scenes", () => {
     await act(async () => {
       result.current.undo();
     });
-    await waitFor(() => expect(result.current.error).toBe(NOTHING_UNDONE));
+    await waitFor(() => expect(words(result.current.error)).toBe(NOTHING_UNDONE));
     expect(api.scenes.write).not.toHaveBeenCalled();
   });
 
@@ -1734,7 +1737,7 @@ describe("the move of a group and the order of the scenes", () => {
       result.current.undo();
     });
     await waitFor(() =>
-      expect(result.current.error).toBe("the scenes cannot be saved yet: the file is blocked"),
+      expect(words(result.current.error)).toBe("the scenes cannot be saved yet: the file is blocked"),
     );
     // The step is dropped: it is neither undone nor redoable.
     expect(result.current.canUndo).toBe(false);
@@ -1753,7 +1756,7 @@ describe("the move of a group and the order of the scenes", () => {
     await act(async () => {
       await result.current.moveGroup("left", "other", false);
     });
-    await waitFor(() => expect(result.current.error).toBe(NOTHING_MOVED));
+    await waitFor(() => expect(words(result.current.error)).toBe(NOTHING_MOVED));
     expect(api.scenes.write).not.toHaveBeenCalled();
   });
 
@@ -1838,7 +1841,7 @@ describe("the move of a group and the order of the scenes", () => {
     act(() => {
       result.current.reorderScenes(["focus", "gaming", "evening"]);
     });
-    await waitFor(() => expect(result.current.error).toBe(NOTHING_MOVED));
+    await waitFor(() => expect(words(result.current.error)).toBe(NOTHING_MOVED));
     // The daemon's order is the one that counts: the page goes back to it.
     expect(result.current.scenes.map((s) => s.id)).toEqual(["gaming", "focus", "evening"]);
   });
@@ -2007,7 +2010,7 @@ describe("the move of a group and the order of the scenes", () => {
 
     await act(async () => {
       const check = await result.current.dryRunMove("left", "other", false);
-      expect(check).toEqual({ state: "refused", message: htmlLimitSentence(3) });
+      expect(check).toMatchObject({ state: "refused", error: { message: htmlLimitSentence(3) } });
     });
   });
 
@@ -2138,7 +2141,7 @@ describe("the move of a group and the order of the scenes", () => {
     await act(async () => {
       result.current.undo();
     });
-    await waitFor(() => expect(result.current.error).toBe(NOTHING_UNDONE));
+    await waitFor(() => expect(words(result.current.error)).toBe(NOTHING_UNDONE));
     expect(api.scenes.write).not.toHaveBeenCalled();
   });
 
@@ -2359,7 +2362,7 @@ describe("the order of the groups inside a scene", () => {
       result.current.reorderGroups(MOVED);
     });
 
-    await waitFor(() => expect(result.current.error).toBe(NOTHING_MOVED));
+    await waitFor(() => expect(words(result.current.error)).toBe(NOTHING_MOVED));
     // The order on the screen is the order the daemon has.
     expect(result.current.scene?.groups.map((g) => g.id)).toEqual(ORDER);
   });

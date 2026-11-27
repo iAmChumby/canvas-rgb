@@ -1,10 +1,8 @@
 "use client";
-import { ErrorLine } from "@/components/ErrorState";
 
-import type { ReactNode } from "react";
-import { CaretRight } from "@phosphor-icons/react";
-import { Panel } from "@/components/Panel";
-import { Button } from "@/components/Button";
+import type { ReactElement, ReactNode } from "react";
+import { ErrorState } from "@/components/ErrorState";
+import { hintOf } from "@/lib/errors";
 import { useLoadDelay } from "@/lib/loadDelay";
 
 // The delay now lives in lib/loadDelay.ts (Button needs it, and Button cannot import this file);
@@ -63,39 +61,25 @@ function StageChip({ stage }: { stage: LoadStage }) {
   );
 }
 
-/** The words behind a short message, folded away until asked for: the raw text of an error. */
-export function Details({ summary = "Details", children }: { summary?: string; children: ReactNode }) {
-  return (
-    <details className="load-detail">
-      <summary>
-        <CaretRight className="load-detail-caret" size={14} aria-hidden="true" />
-        <span>{summary}</span>
-      </summary>
-      <p className="state-detail">{children}</p>
-    </details>
-  );
-}
-
 /**
- * The plain error: a titled panel with what went wrong, and a way to try again.
+ * A load that failed: the error anatomy, in the frame the page loads into.
  *
- * The line under the title is the one the reader sees: one sentence in plain words, with no
- * jargon and no raw answer from the service. The raw words stay behind the `Details`
- * disclosure, where a person who wants them can open it. Pass `onRetry` wherever a load can
- * be asked for again; a panel without one is a dead end.
+ * The title and the lead are plain words. The lead is the daemon's next step when it sent one,
+ * and the view's `summary` otherwise; the error's own words stand under it. Pass `onRetry`
+ * wherever a load can be asked for again; an error without one is a dead end.
  */
 export function ErrorPanel({
   title,
-  message,
+  error,
   summary = "The answer did not arrive. Nothing was changed.",
   onRetry,
-  retryLabel = "Try again",
-  busy = false,
+  retryLabel,
+  busy,
 }: {
   title: string;
-  /** The raw words, shown only inside the disclosure. */
-  message?: ReactNode;
-  /** The one line the reader sees. */
+  /** The caught value. */
+  error?: unknown;
+  /** The next step the reader sees when the daemon sent none. */
   summary?: string;
   onRetry?: () => void;
   /** The action's words: "Try again" unless the retry is a different step, like "Start again". */
@@ -104,21 +88,14 @@ export function ErrorPanel({
   busy?: boolean;
 }) {
   return (
-    <Panel>
-      {/* An error title is a sentence, not the uppercase mono panel label (U9). */}
-      <h2 className="err-panel-title">{title}</h2>
-      <ErrorLine role="alert">
-        {summary}
-      </ErrorLine>
-      {message ? <Details>{message}</Details> : null}
-      {onRetry && (
-        <div className="load-note-action">
-          <Button size="sm" onClick={onRetry} busy={busy}>
-            {retryLabel}
-          </Button>
-        </div>
-      )}
-    </Panel>
+    <ErrorState
+      message={title}
+      hint={hintOf(error) ?? summary}
+      error={error ?? undefined}
+      onRetry={onRetry}
+      retryLabel={retryLabel}
+      busy={busy}
+    />
   );
 }
 
@@ -127,7 +104,7 @@ export function LoadFrame({
   shape,
   stage,
   refreshing = false,
-  error,
+  error: errorPanel,
   empty,
   label = "Loading",
   className,
@@ -140,8 +117,8 @@ export function LoadFrame({
   stage?: LoadStage | null;
   /** Content the page already knows is on screen (`state="ready"`) while it is read again. */
   refreshing?: boolean;
-  /** The error state: an `ErrorPanel`, or any panel. */
-  error?: ReactNode;
+  /** The error state: an `ErrorPanel` or an element built on `ErrorState`, never loose words. */
+  error?: ReactElement | null;
   /** The empty state: a panel holding an `EmptyState`. */
   empty?: ReactNode;
   /** What a screen reader hears while the placeholder stands. */
@@ -172,7 +149,7 @@ export function LoadFrame({
           <div className="load-shape" aria-hidden="true">
             {shape}
           </div>
-          {state === "error" && <ErrorLine className="load-note">{error}</ErrorLine>}
+          {state === "error" && <div className="load-note">{errorPanel}</div>}
           {state === "empty" && <div className="load-note">{empty}</div>}
           {/* The region stands while loading; its words come with the placeholder, so a load that
               ends inside the delay is never announced. */}

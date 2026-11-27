@@ -10,7 +10,7 @@ import { demoRequest } from "@/lib/demo";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { routes } from "@/proto/routes";
 
-export { ApiFailure, errorText, hintOf, isScrubbedMessage, isUnreachable, messageOf } from "@/lib/errors";
+export { ApiFailure, hintOf, isScrubbedMessage, isUnreachable, messageOf } from "@/lib/errors";
 
 let cachedConfig: ApiConfig | null = null;
 let pendingConfig: Promise<ApiConfig> | null = null;

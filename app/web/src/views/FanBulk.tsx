@@ -21,6 +21,7 @@ import {
 } from "@/lib/fanBulk";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
 import type { FansStatus } from "@/proto/FansStatus";
+import { ErrorState } from "@/components/ErrorState";
 
 /**
  * The bar over the Headers list: what is ticked, and the three things to do with it. Its height
@@ -222,7 +223,11 @@ export function FanBulkBar({
               <li key={o.id} data-state={o.state}>
                 <span className="fig fan-bulk-name">{o.label}</span>
                 <span className="fan-bulk-state">{o.state}</span>
-                <span className="fan-bulk-detail">{o.detail}</span>
+                {o.state === "failed" ? (
+                  <ErrorState compact className="fan-bulk-detail" error={o.error ?? o.detail} />
+                ) : (
+                  <span className="fan-bulk-detail">{o.detail}</span>
+                )}
                 {o.state === "applied" && now && now.pwm_percent !== null && (
                   <span className="fig fan-bulk-duty">
                     runs at {now.pwm_percent}%{now.override_reason ? `, ${now.override_reason}` : ""}

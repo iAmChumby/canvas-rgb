@@ -8,7 +8,7 @@
 // are turned into CodeMirror diagnostics here, which draw the gutter markers and the squiggles.
 
 import { useEffect, useRef } from "react";
-import { errorText } from "@/lib/errors";
+import { lintText } from "@/lib/errors";
 import { EditorState } from "@codemirror/state";
 import {
   EditorView,
@@ -122,7 +122,7 @@ function diagnosticsFor(state: EditorState, errors: CodeError[]): Diagnostic[] {
       from,
       to: Math.max(from, to),
       severity: "error" as const,
-      message: errorText(error),
+      message: lintText(error),
       source: "effect",
     };
   });

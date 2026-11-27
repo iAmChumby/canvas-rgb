@@ -1,5 +1,4 @@
 "use client";
-import { ErrorLine } from "@/components/ErrorState";
 
 // The picked layer's inspector (#257 phase 4): its effect and blend, its area, the effect's own
 // controls, and its mask, moved out of StackBuilder.tsx unchanged. The phone's Tune sheet renders
@@ -40,6 +39,7 @@ import type { PropValue } from "@/proto/PropValue";
 import type { Stack } from "@/proto/Stack";
 import type { StackLayer } from "@/proto/StackLayer";
 import type { StackLayerStatus } from "@/proto/StackLayerStatus";
+import { ErrorState } from "@/components/ErrorState";
 
 export function Inspector({
   layer,
@@ -213,7 +213,7 @@ export function Inspector({
       <InspectorSection title="Properties">
         {schemas[layer.effect] === null || statuses[layer.id]?.status === "missing_effect" ? (
           <div className="rd-gone">
-            <ErrorLine>This effect is gone. Choose another.</ErrorLine>
+            <ErrorState compact message="This effect is gone. Choose another." />
             <span ref={chooseRef}>
               <Button
                 size="sm"
@@ -309,9 +309,7 @@ export function Inspector({
                   onChange={onMaskEffect}
                 />
                 {maskProblem && (
-                  <ErrorLine role="alert">
-                    {maskProblem}
-                  </ErrorLine>
+                  <ErrorState compact error={maskProblem} />
                 )}
               </div>
               <div className="layer-field wide">
@@ -359,7 +357,7 @@ export function Inspector({
               </div>
             </div>
             {schemas[mask.effect] === null ? (
-              <ErrorLine>This mask effect is gone. Choose another, or remove the mask.</ErrorLine>
+              <ErrorState compact message="This mask effect is gone. Choose another, or remove the mask." />
             ) : schemas[mask.effect] === undefined ? (
               <LoadFrame
                 state="loading"
@@ -405,9 +403,7 @@ export function Inspector({
         </p>
       )}
       {layerProblem && (
-        <ErrorLine role="alert">
-          {layerProblem}
-        </ErrorLine>
+        <ErrorState compact error={layerProblem} />
       )}
     </Panel>
   );

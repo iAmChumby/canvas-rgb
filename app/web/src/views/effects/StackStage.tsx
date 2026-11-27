@@ -1,5 +1,4 @@
 "use client";
-import { ErrorLine } from "@/components/ErrorState";
 
 // The builder's stage panel (#257 phase 4): the picture, its tools, the foot that starts a draft
 // or says what the preview is doing. Moved out of StackBuilder.tsx unchanged.
@@ -17,6 +16,8 @@ import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { Stack } from "@/proto/Stack";
 import type { StackLayer } from "@/proto/StackLayer";
+import { ErrorState } from "@/components/ErrorState";
+import type { Failure } from "@/lib/errors";
 
 export function StackStage({
   draft,
@@ -78,8 +79,8 @@ export function StackStage({
   schema: PropertySchema | null;
   onPropChange: (id: string, key: string, value: PropValue, run: string, hold: boolean) => void;
   onPropChangeEnd: () => void;
-  previewError: string | null;
-  draftError: string | null;
+  previewError: Failure | null;
+  draftError: Failure | null;
   feedProblem: string | null;
   count: number;
   fpsTarget: number;
@@ -134,17 +135,22 @@ export function StackStage({
       />
       {draftState === "off" ? (
         <div className="rd-stage-foot">
-          <span className="note">
-            {previewError
-              ? `The preview stopped: ${previewError}`
-              : draftError
-                ? `Try on the lights failed: ${draftError}`
-                : feedProblem
-                  ? `The preview is not showing: ${feedProblem}`
-                  : count === 0
-                    ? "An empty stack runs nothing; the lights keep their effect."
-                    : "Preview only ΓÇö nothing is on the lights."}
-          </span>
+          {previewError || draftError || feedProblem ? (
+            <ErrorState
+              compact
+              className="note"
+              context={
+                previewError ? "The preview stopped:" : draftError ? "Try on the lights failed:" : "The preview is not showing:"
+              }
+              error={previewError ?? draftError ?? feedProblem}
+            />
+          ) : (
+            <span className="note">
+              {count === 0
+                ? "An empty stack runs nothing; the lights keep their effect."
+                : "Preview only — nothing is on the lights."}
+            </span>
+          )}
           <span className="row-wrap">
             {fpsTarget > 50 && html > 0 && (
               <span className="rd-budget-note" title="The per-layer budget above 50 fps">
@@ -203,9 +209,7 @@ export function StackStage({
         </div>
       )}
       {draftState === "restore-error" && draftError && (
-        <ErrorLine role="alert">
-          {draftError}
-        </ErrorLine>
+        <ErrorState compact error={draftError} />
       )}
     </Panel>
   );

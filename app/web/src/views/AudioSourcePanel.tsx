@@ -1,6 +1,5 @@
 "use client";
 import { ErrorState } from "@/components/ErrorState";
-import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { SpeakerHigh } from "@phosphor-icons/react";
@@ -12,7 +11,7 @@ import { Toggle } from "@/components/Toggle";
 import { Popover } from "@/components/Popover";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, errorText } from "@/lib/errors";
+import { ApiFailure, caught, type Failure } from "@/lib/errors";
 import type { AudioSources } from "@/proto/AudioSources";
 import type { AudioSource } from "@/proto/AudioSource";
 import type { AudioTestState } from "@/proto/AudioTestState";
@@ -145,7 +144,7 @@ export function isInputSelection(sources: AudioSources | null): boolean {
  */
 export function AudioSourcePanel() {
   const [sources, setSources] = useState<AudioSources | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<Failure | null>(null);
   const [listen, setListen] = useState(false);
   const [state, setState] = useState<AudioTestState | null>(null);
   const [popoverOpen, setPopoverOpen] = useState(false);
@@ -166,7 +165,7 @@ export function AudioSourcePanel() {
         if (!cancelled) setSources(s);
       })
       .catch((e: unknown) => {
-        if (!cancelled) setErr(errorText(e));
+        if (!cancelled) setErr(caught(e));
       });
     return () => {
       cancelled = true;
@@ -309,7 +308,7 @@ export function AudioSourcePanel() {
       const fresh = await api.audioSources();
       setSources(fresh);
     } catch (e) {
-      setErr(errorText(e));
+      setErr(caught(e));
     }
   };
 
@@ -385,7 +384,7 @@ export function AudioSourcePanel() {
               {popoverOpen ? "Hide readings" : "Show readings"}
             </Button>
           </span>
-          {err && <ErrorState compact message={err} />}
+          {err && <ErrorState compact error={err} />}
           <Popover
             anchor={triggerRef as unknown as RefObject<HTMLElement | null>}
             open={popoverOpen}
@@ -404,7 +403,7 @@ export function AudioSourcePanel() {
           <p className="audio-state" role="status" aria-busy={waiting || undefined}>
             <StateWords words={words} waiting={waiting} />
           </p>
-          {err && <ErrorState compact message={err} />}
+          {err && <ErrorState compact error={err} />}
           {readings}
         </>
       )}

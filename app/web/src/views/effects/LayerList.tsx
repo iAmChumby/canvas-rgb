@@ -1,5 +1,4 @@
 "use client";
-import { ErrorLine } from "@/components/ErrorState";
 
 // The builder's layer stack (#257 phase 4): the rows, their grips, masks and eye keys, moved out
 // of StackBuilder.tsx unchanged. The list is drawn top first; the draft is bottom first.
@@ -19,6 +18,7 @@ import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { StackLayer } from "@/proto/StackLayer";
 import type { StackLayerStatus } from "@/proto/StackLayerStatus";
+import { ErrorState } from "@/components/ErrorState";
 
 export function LayerList({
   layers,
@@ -173,9 +173,7 @@ export function LayerList({
                       onEscape={onRenameEscape}
                     />
                     {renameProblem && (
-                      <ErrorLine id="layer-name-error" role="alert">
-                        {renameProblem}
-                      </ErrorLine>
+                      <ErrorState compact id="layer-name-error" error={renameProblem} />
                     )}
                   </div>
                 ) : (

@@ -35,6 +35,7 @@ import { shouldOpen } from "@/views/editor/flow";
 import type { LightView } from "@/proto/LightView";
 import s from "@/views/scenes/scenes.module.css";
 import r from "@/views/scenes/groupReorder.module.css";
+import { toastText } from "@/lib/errors";
 
 /** The room the list holds while the scenes are read: the strip's rows, drawn as placeholders. */
 const SKEL_NAMES = ["52%", "38%", "46%"] as const;
@@ -156,7 +157,7 @@ export function ScenesView() {
 
   // A refused write says so in the toast lane, which floats: the page does not move for it.
   useEffect(() => {
-    if (error) notify(error, "down");
+    if (error) notify(toastText(error), "down");
   }, [error]);
 
   // Ctrl+Z and Ctrl+Shift+Z are the undo and redo of every change on this page. A key in a text
@@ -541,7 +542,7 @@ export function ScenesView() {
             <ErrorPanel
               title="The scenes could not be read"
               summary="canvas-rgb could not read the scenes. Try the read again."
-              message={scenesError}
+              error={scenesError}
               onRetry={() => void retryScenes()}
               busy={retrying}
             />

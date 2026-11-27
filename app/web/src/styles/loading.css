@@ -262,10 +262,6 @@
 
 .rd-devices .rd-wb-failed {
   grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s3);
 }
 
 /* ---------- the peripheral keys, while the list is read ---------- */

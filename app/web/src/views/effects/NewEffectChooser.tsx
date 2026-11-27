@@ -1,5 +1,4 @@
 "use client";
-import { ErrorLine } from "@/components/ErrorState";
 
 // New from code: the "Code" branch of New effect. A blank file is the second key, a copy of an
 // existing HTML effect the first. A Rust built-in has no HTML source to copy (the route answers
@@ -12,6 +11,8 @@ import { Chip } from "@/components/Chip";
 import { Panel } from "@/components/Panel";
 import { Thumb } from "@/components/Thumb";
 import type { EffectSummary } from "@/proto/EffectSummary";
+import { ErrorState } from "@/components/ErrorState";
+import type { Failure } from "@/lib/errors";
 
 export function NewEffectChooser({
   effects,
@@ -25,7 +26,7 @@ export function NewEffectChooser({
   effects: EffectSummary[];
   /** The effect whose source is being read now. */
   busy: string | null;
-  error: string | null;
+  error: Failure | null;
   narrow: boolean;
   onBlank: () => void;
   onCopy: (id: string) => void;
@@ -79,9 +80,7 @@ export function NewEffectChooser({
           </div>
         )}
         {error && (
-          <ErrorLine role="alert">
-            {error}
-          </ErrorLine>
+          <ErrorState compact error={error} />
         )}
       </Panel>
 

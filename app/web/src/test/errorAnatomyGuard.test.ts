@@ -1,7 +1,7 @@
-// Class guard for #576/#575 (P9, in the style of toastGuard.test.ts): error text reaches a page
-// only through `ErrorState`/`ErrorLine` in components/ErrorState.tsx. The scan reads source as
-// text, so a copy of the old pattern cannot land. `ERROR_GUARD_ROOT` points it at another copy of
-// `src`, which is how the failures on the tree before this fix are shown.
+// Class guard for #576/#575 (P9 and F8, in the style of toastGuard.test.ts): error text reaches a
+// page only through `ErrorState` in components/ErrorState.tsx, which alone draws `ErrorLine`.
+// The scan reads source as text, so a copy of the old pattern cannot land. `ERROR_GUARD_ROOT`
+// points it at another copy of `src`, which is how the failures on the tree before this fix are shown.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
@@ -33,66 +33,101 @@ function nameOf(file: string): string {
   return relative(ROOT, file).split(sep).join("/");
 }
 
-/** The raw helper call: views and components take text through `errorText` instead. */
-export function rawMessageOf(source: string): boolean {
-  return /\bmessageOf\s*\(/.test(source);
-}
+/** A call of the text helpers: views and components hand the caught value to `ErrorState`. */
+const TEXT_CALL = /\b(?:messageOf|errorText)\s*\(/g;
 
-/** A hand-written error element, a plain `.message` read, `String(e)`, or a bare JSX error. */
-export function violations(source: string): string[] {
+/**
+ * The three ways a failure's words may leave the anatomy, each pinned to one use: a toast, a
+ * `title` attribute and the code editor's gutter tooltip. Any other call is a violation, so none
+ * of them can become another name for `messageOf`.
+ */
+const SINKS: { call: RegExp; allowed: (before: string, file: string) => boolean }[] = [
+  { call: /\btoastText\s*\(/g, allowed: (before) => /\bnotify\(\s*$/.test(before) },
+  { call: /\btitleText\s*\(/g, allowed: (before) => /\btitle=\{[^{}\n]*$/.test(before) },
+  { call: /\blintText\s*\(/g, allowed: (_before, file) => file === "components/CodeEditor.tsx" },
+];
+
+/**
+ * Every way error text reaches a page by hand: the text helpers, a bare `ErrorLine`, a
+ * hand-written error element, a raw `.message` read, `String(e)`, or a bare JSX error.
+ */
+export function violations(source: string, file = "views/Planted.tsx"): string[] {
   const found: string[] = [];
-  if (rawMessageOf(source)) found.push("messageOf(");
-  for (const match of source.matchAll(/<(?:p|span)\s+className=(?:"[^"]*error-line|`[^`]*error-line)/g)) {
+  for (const match of source.matchAll(TEXT_CALL)) found.push(match[0]);
+  for (const sink of SINKS) {
+    for (const match of source.matchAll(sink.call)) {
+      if (!sink.allowed(source.slice(0, match.index), file)) found.push(match[0]);
+    }
+  }
+  for (const match of source.matchAll(/<ErrorLine\b|\bimport\s*\{[^}]*\bErrorLine\b/g)) found.push(match[0]);
+  for (const match of source.matchAll(/<(?:p|span|div)\s+className=(?:"|\{`|\{s\.)[^"`}]*[^"`}>]*?(?<![\w-])(?:error-line|errorText|presetError|recovery-refused)/g)) {
     found.push(match[0].replace(/\s+/g, " "));
   }
+  // The raw words behind a disclosure: the stale-read notices did this with a store error.
+  for (const match of source.matchAll(/<Details>\s*\{\w*(?:e|E)rr(?:or)?\}/g)) found.push(match[0]);
   for (const match of source.matchAll(/\b(?:e|err|error)\s*\.\s*message\b/g)) found.push(match[0]);
   for (const match of source.matchAll(/\bString\s*\(\s*(?:e|err|error)\s*\)/g)) found.push(match[0]);
   for (const match of source.matchAll(/\?\.\s*message\b/g)) found.push(match[0]);
   for (const match of source.matchAll(/\(\s*(?:e|err|error)\s+as\s+Error\s*\)\s*\.\s*message\b/g)) found.push(match[0]);
-  // A caught error's `.error` field rendered straight into the page (F8).
-  for (const match of source.matchAll(/(?<!message=)\{(?:f|failure|issue)\.error\}/g)) found.push(match[0]);
-  for (const match of source.matchAll(/<(?:p|span|div)[^>]*>\{(?:e|err|error)\}<\/(?:p|span|div)>/g)) {
+  // A daemon's `.error` field rendered straight into the page (F8).
+  for (const match of source.matchAll(/(?<![\w]=|\$)\{(?:f|failure|issue)\.(?:error|message)\}/g)) found.push(match[0]);
+  // An error value rendered as an element's whole content.
+  for (const match of source.matchAll(
+    /<(p|span|div)\b[^<>]*>\s*\{(?:e|err|error|\w+(?:Error|Err|Problem))(?:\.message)?\}\s*<\/\1>/g,
+  )) {
     found.push(match[0].replace(/\s+/g, " "));
   }
   return found;
 }
 
-describe("every error has one anatomy (#576, P9)", () => {
+describe("every error has one anatomy (#576, F8/F9)", () => {
   it("finds the views and components", () => {
     expect(guarded().length).toBeGreaterThan(80);
   });
 
-  it("keeps messageOf and raw error text inside ErrorState", () => {
+  it("keeps error text inside ErrorState", () => {
     const offenders: string[] = [];
     for (const file of guarded()) {
       const name = nameOf(file);
       if (name === ALLOWED) continue;
-      for (const hit of violations(readFileSync(file, "utf8"))) offenders.push(`${name}: ${hit}`);
+      for (const hit of violations(readFileSync(file, "utf8"), name)) offenders.push(`${name}: ${hit}`);
     }
-    expect(offenders, "Error text reaches the page only through ErrorState/ErrorLine").toEqual([]);
+    expect(offenders, "Error text reaches the page only through ErrorState").toEqual([]);
   });
 
   describe("the matcher", () => {
-    it("catches three planted violations", () => {
-      expect(violations("setErr(messageOf(e));")).toContain("messageOf(");
-      expect(violations("<p className=\"error-line\">{err}</p>").length).toBeGreaterThan(0);
-      expect(violations("return { state: 'refused', message: e.message };")).toContain("e.message");
-      expect(violations("const text = String(error);")).toContain("String(error)");
-      expect(violations("<div className=\"load-note\">{error}</div>").length).toBeGreaterThan(0);
-      expect(violations("setErr(e?.message);")).toContain("?.message");
-      expect(violations("setErr((e as Error).message);").length).toBeGreaterThan(0);
-      expect(violations("<span>{f.error}</span>").length).toBeGreaterThan(0);
-      // The two bans still tracked separately: errorText( and a bare ErrorLine in a view.
-      expect(/\berrorText\s*\(/.test("setErr(errorText(e));")).toBe(true);
-      expect(/<ErrorLine\b/.test("<ErrorLine>{err}</ErrorLine>")).toBe(true);
+    it.each([
+      ["messageOf", "setErr(messageOf(e));"],
+      ["errorText", "setErr(errorText(e));"],
+      ["a bare ErrorLine", "<ErrorLine>{err}</ErrorLine>"],
+      ["an ErrorLine import", 'import { ErrorLine } from "@/components/ErrorState";'],
+      ["a toast helper outside notify", "setErr(toastText(e));"],
+      ["a title helper outside title", "setErr(titleText(e));"],
+      ["a lint helper outside the code editor", "setErr(lintText(e));"],
+      ["a hand-written error line", '<p className="error-line">{words}</p>'],
+      ["a hand-written module class", "<p className={s.errorText}>{setup.error}</p>"],
+      ["raw words behind a disclosure", "<Details>{devicesError}</Details>"],
+      [".message", "return { state: 'refused', message: e.message };"],
+      ["String(error)", "const text = String(error);"],
+      ["?.message", "setErr(e?.message);"],
+      ["a cast .message", "setErr((e as Error).message);"],
+      ["a daemon .error field", "<span>{f.error}</span>"],
+      ["a bare error element", '<div className="load-note">{error}</div>'],
+      ["a named error element", "<span>{saveError}</span>"],
+    ])("catches %s", (_name, planted) => {
+      expect(violations(planted)).not.toEqual([]);
     });
 
     it("leaves the anatomy and its callers alone", () => {
-      expect(violations("import { errorText } from \"@/lib/errors\";")).toEqual([]);
-      expect(violations("setErr(errorText(e));")).toEqual([]);
-      expect(violations("<ErrorLine>{err}</ErrorLine>")).toEqual([]);
+      expect(violations("setErr(caught(e));")).toEqual([]);
+      expect(violations('notify(toastText(e), "down");')).toEqual([]);
+      expect(violations("title={refused ? titleText(refused) : undefined}")).toEqual([]);
+      expect(violations("message: lintText(error),", "components/CodeEditor.tsx")).toEqual([]);
+      expect(violations("<ErrorState compact error={err} />")).toEqual([]);
       expect(violations("<ErrorState error={e} onRetry={load} />")).toEqual([]);
       expect(violations("patternRefusal.message")).toEqual([]);
+      expect(violations('<span className="fig eff-error-line">')).toEqual([]);
+      expect(violations("key={`${issue.message}-${i}`}")).toEqual([]);
     });
   });
 });

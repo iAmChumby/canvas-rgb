@@ -1,5 +1,4 @@
 "use client";
-import { ErrorLine } from "@/components/ErrorState";
 
 // The Effects inspector in edit mode (issue #2, D2.2 to D2.5): the source of an `html:` effect
 // beside the daemon's live preview of it, with Save through the import route, a draft on the
@@ -25,7 +24,7 @@ import { Panel, StateDot } from "@/components/Panel";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { EffectCode } from "@/views/effects/EffectCode";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, errorText } from "@/lib/errors";
+import { ApiFailure, caught, inContext, type Failure } from "@/lib/errors";
 import { cancelNavigation, continueNavigation, setNavigationGuard } from "@/lib/navigationGuard";
 import { matchingPreset } from "@/lib/presetMatch";
 import { sourceLineOf } from "@/lib/effectSource";
@@ -38,6 +37,7 @@ import type { PropKind } from "@/proto/PropKind";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { Props } from "@/proto/props";
 import type { PropValue } from "@/proto/PropValue";
+import { ErrorState } from "@/components/ErrorState";
 
 /** Sent this long after the last keystroke (D2.4). */
 const PREVIEW_DEBOUNCE_MS = 400;
@@ -76,7 +76,7 @@ export interface EditorTarget {
 }
 
 /** The saving end: the saved effect, and why it did not start when that happened. */
-export type SavedEffect = { id: string; name: string; startError: string | null };
+export type SavedEffect = { id: string; name: string; startError: Failure | null };
 
 export type EffectEditorHandle = { requestLeave: () => void };
 
@@ -104,7 +104,7 @@ export function EffectEditor({
   const [values, setValues] = useState<Values>(target.props);
   const [showCode, setShowCode] = useState(!narrow);
   const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<Failure | null>(null);
   // A new file whose name is taken: the same replace prompt the import uses, said as "file
   // exists" so it is not mistaken for the preset conflict.
   const [clash, setClash] = useState<string | null>(null);
@@ -118,11 +118,11 @@ export function EffectEditor({
   // source text itself, so a later failure can say whether the loop still matches the draft.
   const [lastGood, setLastGood] = useState<{ thumb: Thumb; hash: string; source: string } | null>(null);
   const [previewState, setPreviewState] = useState<PreviewState>("idle");
-  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<Failure | null>(null);
 
   const [draft, setDraft] = useState<DraftStatus | null>(null);
   const [draftState, setDraftState] = useState<DraftState>("off");
-  const [draftError, setDraftError] = useState<string | null>(null);
+  const [draftError, setDraftError] = useState<Failure | null>(null);
   const [draftNote, setDraftNote] = useState<string | null>(null);
   const [expiresIn, setExpiresIn] = useState(0);
 
@@ -280,7 +280,7 @@ export function EffectEditor({
         return;
       }
       setPreviewState("error");
-      setPreviewError(errorText(e));
+      setPreviewError(caught(e));
     }
   }, []);
 
@@ -380,7 +380,7 @@ export function EffectEditor({
     } catch (e) {
       if (!mounted.current || !draftOn.current) return;
       // One missed beat is survivable: the lease has three. The banner counts what is left.
-      setDraftError(errorText(e));
+      setDraftError(caught(e));
       setDraftState("expiring");
       scheduleBeat(heartbeatMs.current);
     }
@@ -408,7 +408,7 @@ export function EffectEditor({
     } catch (e) {
       if (!mounted.current) return;
       setDraftState("off");
-      setDraftError(errorText(e));
+      setDraftError(caught(e));
     }
   };
 
@@ -434,7 +434,7 @@ export function EffectEditor({
     } catch (e) {
       if (!mounted.current) return;
       setDraftState("restore-error");
-      setDraftError(errorText(e));
+      setDraftError(caught(e));
     }
   };
 
@@ -530,7 +530,7 @@ export function EffectEditor({
         })
         .catch((e: unknown) => {
           if (!mounted.current) return;
-          setDraftError(errorText(e));
+          setDraftError(caught(e));
           setDraftState("expiring");
         });
     }
@@ -582,17 +582,17 @@ export function EffectEditor({
         setClash(wanted);
         return;
       }
-      setSaveError(errorText(e));
+      setSaveError(caught(e));
       setClash(null);
       return;
     }
-    let startError: string | null = null;
+    let startError: Failure | null = null;
     try {
       await api.activateEffect(savedId, { props: {}, preset: null });
       await refreshAll();
     } catch (e) {
-      startError = errorText(e);
-      setSaveError(`Saved, but it did not start: ${startError}`);
+      startError = caught(e);
+      setSaveError(inContext("Saved, but it did not start:", e));
       // The saved file did not start, so the draft it would have replaced is stopped too: the
       // lights go back to what they were before it, and the screen says what happened. A stop
       // that fails leaves the banner in its restore-error state with Retry; the editor stays
@@ -603,7 +603,7 @@ export function EffectEditor({
         } catch (stopError) {
           draftOn.current = true;
           setDraftState("restore-error");
-          setDraftError(errorText(stopError));
+          setDraftError(caught(stopError));
           pendingSaved.current = { id: savedId, name: savedName, startError };
           setSaving(false);
           setClash(null);
@@ -713,16 +713,16 @@ export function EffectEditor({
                 onClick={() => focusError(codeErrors[i]?.line, i)}
               >
                 <Warning size={14} aria-hidden="true" />
-                <ErrorLine className="fig">
+                <span className="fig eff-error-line">
                   {codeErrors[i]?.line !== undefined ? `line ${codeErrors[i]?.line}` : "error"}
-                </ErrorLine>
-                <ErrorLine className="eff-error-text">{issue.message}</ErrorLine>
+                </span>
+                <ErrorState compact className="eff-error-text" error={issue} />
               </button>
             </li>
           ))}
         </ul>
       )}
-      {previewError && <ErrorLine className="eff-preview-error">{previewError}</ErrorLine>}
+      {previewError && <ErrorState compact className="eff-preview-error" error={previewError} />}
     </div>
   );
 
@@ -809,9 +809,7 @@ export function EffectEditor({
         </p>
       )}
       {draftState === "restore-error" && draftError && (
-        <ErrorLine role="alert">
-          {draftError}
-        </ErrorLine>
+        <ErrorState compact error={draftError} />
       )}
 
       <div className="eff-edit-main" data-code={showCode && !narrow ? "true" : "false"}>
@@ -908,14 +906,10 @@ export function EffectEditor({
               )}
             </div>
             {draftState === "off" && draftError && (
-              <ErrorLine role="alert">
-                {draftError}
-              </ErrorLine>
+              <ErrorState compact error={draftError} />
             )}
             {saveError && (
-              <ErrorLine role="alert">
-                {saveError}
-              </ErrorLine>
+              <ErrorState compact error={saveError} />
             )}
             {clash && (
               <div className="import-note" data-tone="ask" role="alert">

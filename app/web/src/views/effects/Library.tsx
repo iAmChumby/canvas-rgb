@@ -1,8 +1,7 @@
 "use client";
-import { ErrorLine } from "@/components/ErrorState";
 
 // The builder's library (#257 phase 2): what you can place. A rail at 1180 px and wider, a tray
-// under the stage at 721-1179, and a tab on a phone. Two tabs ΓÇö Effects and Masks ΓÇö a search, and
+// under the stage at 721-1179, and a tab on a phone. Two tabs — Effects and Masks — a search, and
 // two columns of Thumb tiles; the masks list leads with the six that read best as masks. The last
 // tile opens the code flow. A tile adds on a click or a tap, and lifts on a drag or Space/Enter.
 
@@ -14,6 +13,7 @@ import { Highlighted, matchEffect } from "@/components/Search";
 import { addLayerRefusal, isHtmlEffect, MASK_LEAD_EFFECTS } from "@/views/effects/stackDraft";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { StackLayer } from "@/proto/StackLayer";
+import { ErrorState } from "@/components/ErrorState";
 
 export type LibraryMode = "rail" | "tray" | "tab";
 type LibraryTab = "effects" | "masks";
@@ -134,9 +134,7 @@ export function Library({
         </div>
       </div>
       {problem && (
-        <ErrorLine className="rd-library-problem" role="alert">
-          {problem}
-        </ErrorLine>
+        <ErrorState compact className="rd-library-problem" error={problem} />
       )}
     </div>
   );

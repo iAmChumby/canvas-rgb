@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/endpoints";
-import { ApiFailure, errorText } from "@/lib/errors";
+import { ApiFailure, caught, type Failure } from "@/lib/errors";
 import { refreshChains, refreshLights } from "@/lib/store";
 import type { ChainPartKind } from "@/proto/ChainPartKind";
 import type { ChainView } from "@/proto/ChainView";
@@ -117,7 +117,7 @@ export interface ChainSetup {
   /** Marks the header empty. True when the daemon took it. */
   markEmpty(): Promise<boolean>;
   later(): void;
-  error: string | null;
+  error: Failure | null;
   /** Sends again what failed: a commit, the empty call, or a whole new session. One call at a time. */
   retry(): Promise<void>;
   /** The slider reached the header's own maximum and the header goes on past it. */
@@ -229,7 +229,7 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
   const [copies, setCopiesState] = useState(startCopies);
   const [rows, setRows] = useState<ChainPartRow[]>(() => seedRows(opening, startCount, startLength));
   const [mirrorName, setMirrorNameState] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Failure | null>(null);
   const [doneKind, setDoneKind] = useState<"saved" | "empty">("saved");
   const [intent, setIntent] = useState<ChainIntent>("setup");
 
@@ -310,7 +310,7 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
       .catch((e: unknown) => {
         if (finished.current) return;
         failure.current = "light";
-        setError(errorText(e));
+        setError(caught(e));
         if (e instanceof ApiFailure && e.status === 409) {
           // The daemon ended the session (its timeout, or another window): only a new one goes on.
           finished.current = true;
@@ -402,7 +402,7 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
         // for was never accepted, and repeating a write that keeps them dark is theirs to ask again.
         intentRef.current = "setup";
         setIntent("setup");
-        setError(errorText(e));
+        setError(caught(e));
         apply({ step: "error" }, { send: false });
         return false;
       }
@@ -410,7 +410,7 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
       // Retry, and the session stays open. "Nothing is plugged in here" was never shown a light, so
       // it goes back to the introduction; the checklist would advise about a light nobody saw.
       failure.current = "empty";
-      setError(errorText(e));
+      setError(caught(e));
       apply({ step: from === "starting" ? "intro" : "nothing" });
       return false;
     } finally {
@@ -450,7 +450,7 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
       apply({ step: "lit" });
     } catch (e) {
       failure.current = "start";
-      setError(errorText(e));
+      setError(caught(e));
       apply({ step: "error" }, { send: false });
     }
   }, [apply, device, markEmpty, zone]);
@@ -664,13 +664,13 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
         session.current = null;
         stopTrailing();
         failure.current = "stale";
-        setError(errorText(e));
+        setError(caught(e));
         apply({ step: "error" }, { send: false });
         return;
       }
       // The step stays, and so does the session: the daemon keeps it open for a retry.
       failure.current = "commit";
-      setError(errorText(e));
+      setError(caught(e));
     } finally {
       confirming.current = false;
     }

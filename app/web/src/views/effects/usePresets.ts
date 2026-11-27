@@ -6,12 +6,13 @@
 import { useMemo, useState } from "react";
 import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
-import { errorText } from "@/lib/errors";
+
 import { applyMergedProps, mergedProps } from "@/views/effects/stackDraft";
 import type { Preset } from "@/proto/Preset";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { Stack } from "@/proto/Stack";
 import type { StackLayer } from "@/proto/StackLayer";
+import { toastText } from "@/lib/errors";
 
 export function usePresets({
   layers,
@@ -59,7 +60,7 @@ export function usePresets({
       setPresets((current) => ({ ...current, user: answer.user_presets }));
       setPresetName(null);
     } catch (e) {
-      notify(errorText(e), "down");
+      notify(toastText(e), "down");
     }
   };
 
