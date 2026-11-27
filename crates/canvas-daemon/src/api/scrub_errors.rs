@@ -44,7 +44,7 @@ pub async fn scrub_errors(State(app): State<Arc<App>>, request: Request, next: N
                 if let Some(object) = value.as_object_mut() {
                     for key in ["message", "hint", "problem"] {
                         if let Some(text) = object.get(key).and_then(|v| v.as_str()) {
-                            let scrubbed = scrubber.scrub(text);
+                            let scrubbed = scrub_error_text(&scrubber, text);
                             object.insert(key.to_string(), serde_json::Value::String(scrubbed));
                         }
                     }
@@ -59,10 +59,15 @@ pub async fn scrub_errors(State(app): State<Arc<App>>, request: Request, next: N
     Response::from_parts(parts, Body::from(rewritten))
 }
 
+/// One rule for every string a person reads: names first, then device ids (P6).
+pub fn scrub_error_text(scrubber: &crate::scrub::Scrubber, text: &str) -> String {
+    canvas_diag::scrub::scrub_device_ids(&scrubber.scrub(text))
+}
+
 /// A plain-text body (an extractor rejection) is one sentence: scrub it and keep its bytes.
 fn scrub_plain(bytes: &Bytes, scrubber: &crate::scrub::Scrubber) -> Vec<u8> {
     let text = String::from_utf8_lossy(bytes);
-    scrubber.scrub(&text).into_bytes()
+    scrub_error_text(scrubber, &text).into_bytes()
 }
 
 /// The next step for each error code. `message` says what happened; `hint` says what to do.
@@ -97,6 +102,7 @@ pub fn error_body(status: StatusCode, code: &str, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scrub::Scrubber;
 
     #[test]
     fn every_error_code_has_a_next_step() {
@@ -117,6 +123,27 @@ mod tests {
         );
         let bytes = Bytes::from(concat!("failed to read C:\\", "Use", "rs\\Alice\\x.json").to_string());
         let out = String::from_utf8(scrub_plain(&bytes, &scrubber)).unwrap();
+        assert!(!out.to_ascii_lowercase().contains("alice"), "{out}");
+        assert!(out.contains("<profile>"), "{out}");
+    }
+
+    #[test]
+    fn a_device_id_in_an_error_becomes_the_device() {
+        let scrubber = crate::scrub::Scrubber::default();
+        let out = scrub_error_text(&scrubber, "the device openrgb:SERIAL-42 refused the write");
+        assert_eq!(out, "the device the device refused the write");
+    }
+
+    #[test]
+    fn a_fake_profile_path_in_a_200_body_field_is_scrubbed() {
+        let scrubber = Scrubber::new(
+            Some(concat!("C:\\", "Use", "rs\\Alice").into()),
+            Some("Alice".into()),
+            None,
+        );
+        // The same helper is called where FailedEffect.error and StackPreviewLayer.error are
+        // built, because a 200 body never reaches this layer (P7).
+        let out = scrub_error_text(&scrubber, concat!("could not parse C:\\", "Use", "rs\\Alice\\bad.html"));
         assert!(!out.to_ascii_lowercase().contains("alice"), "{out}");
         assert!(out.contains("<profile>"), "{out}");
     }

@@ -451,7 +451,7 @@ export function DisplaysView() {
         error={
           <ErrorPanel
             title="The displays could not be read"
-            summary="canvas-rgb could not read the displays. The lights are unaffected."
+            summary="canvas-rgb could not read the displays. Try the read again."
             message={displaysError}
             onRetry={() => void retryDisplays()}
           />

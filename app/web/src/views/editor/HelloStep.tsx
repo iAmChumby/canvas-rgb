@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, ArrowsClockwise, Check, Circle } from "@phosphor-icons/react";
@@ -209,7 +210,7 @@ function Ladder({
         <Rung>Turn off Fast Startup.</Rung>
         <Rung>Rescan.</Rung>
       </ol>
-      {failure && !busy && <p className="error-line">Rescan failed: {failure}</p>}
+      {failure && !busy && <ErrorLine>Rescan failed: {failure}</ErrorLine>}
       {asked && !busy && !volunteer && !failure && <p className={s.hint}>Still no lights.</p>}
       <Fold label="More help">
         <p className={s.hint}>Close iCUE, Armoury Crate and Razer Synapse.</p>

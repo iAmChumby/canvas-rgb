@@ -18,6 +18,7 @@ import { createPortal } from "react-dom";
 import { PencilSimple } from "@phosphor-icons/react";
 
 import { Button } from "@/components/Button";
+import { ErrorLine } from "@/components/ErrorState";
 import { KindIcon } from "@/components/KindIcon";
 import { NameField } from "@/components/NameField";
 import { StateDot } from "@/components/Panel";
@@ -153,7 +154,7 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
           onChange={(next) => void patch({ reversed: next })}
         />
       </span>
-      {error && <span className={`error-line ${s.partError}`}>{error}</span>}
+      {error && <ErrorLine className={s.partError}>{error}</ErrorLine>}
     </li>
   );
 }

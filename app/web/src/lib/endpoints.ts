@@ -141,8 +141,7 @@ export const api = {
   aboutReport: () => request<AboutReport>("GET", ABOUT_REPORT),
   /** #575: list, then write, the scrubbed diagnostics zip. */
   diagBundleList: () => request<DiagBundle>("GET", routes.diagBundle),
-  diagBundleSave: (path?: string) =>
-    request<DiagBundle>("POST", routes.diagBundle, path ? { path } : {}),
+  diagBundleSave: () => request<DiagBundle>("POST", routes.diagBundle),
   /** Enter or leave safe start (#577). The daemon answers first, then the service relaunches it. */
   setSafeStart: (mode: SafeStartMode) => request<SafeStartAnswer>("PUT", SAFE_START, { mode }),
 

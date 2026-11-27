@@ -1,8 +1,8 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  ArrowClockwise,
   ArrowSquareOut,
   BookOpen,
   Check,
@@ -15,6 +15,7 @@ import {
 import { Button, ButtonLink } from "@/components/Button";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
+import { ErrorState } from "@/components/ErrorState";
 import { ReportIssue } from "@/components/ReportIssue";
 import { notify } from "@/components/Notify";
 import { Panel, StateDot } from "@/components/Panel";
@@ -148,27 +149,31 @@ export function HelpView() {
               </div>
               <p className="help-hero-note">Facts from canvas-rgb on this PC.</p>
               {failed ? (
-                <div className="help-error">
-                  <p className="error-line">Identity and the system report could not be read.</p>
-                  <Button
-                    icon={<ArrowClockwise size={16} />}
-                    onClick={() => {
-                      setFailed(false);
-                      load();
-                    }}
-                  >
-                    Retry
-                  </Button>
-                </div>
+                <ErrorState
+                  message="Identity and the system report could not be read."
+                  hint="Check that canvas-rgb is running, then try again."
+                  onRetry={() => {
+                    setFailed(false);
+                    load();
+                  }}
+                />
               ) : (
                 <div className="help-facts">
                   <IdentityRow label="Version">{about ? shown(about.version) : undefined}</IdentityRow>
                   <IdentityRow label="Commit">{about ? shown(about.commit) : undefined}</IdentityRow>
                   <IdentityRow label="Built">{about ? shown(about.build_date) : undefined}</IdentityRow>
                   <IdentityRow label="Windows">{about ? shown(about.os) : undefined}</IdentityRow>
-                  <IdentityRow label="Service">{about ? shown(about.service_version) : undefined}</IdentityRow>
+                  <IdentityRow label="Service">
+                    {about
+                      ? about.service_version ?? "not collected: the fan service has not answered"
+                      : undefined}
+                  </IdentityRow>
                   <IdentityRow label="Last run">
-                    {about ? lastExitWords(about.last_exit) : undefined}
+                    {about
+                      ? about.last_exit === null
+                        ? "not collected: the service has not reported a last run"
+                        : lastExitWords(about.last_exit)
+                      : undefined}
                   </IdentityRow>
                   <IdentityRow label="Safe start">
                     {snap === null ? undefined : safe ? "on" : "off"}
@@ -191,7 +196,7 @@ export function HelpView() {
                   busy={modeBusy}
                   onClick={() => void setMode(safe ? "normal" : "safe")}
                 >
-                  {safe ? "Start normally" : "Start in safe start"}
+                  {safe ? "Start normally" : "Restart in safe start"}
                 </Button>
                 <ButtonLink href="/updates/" size="sm" icon={<ArrowSquareOut size={14} />}>
                   Release notes for this version
@@ -219,7 +224,14 @@ export function HelpView() {
               }
             >
               {failed ? (
-                <p className="error-line">The report could not be read. Nothing was copied.</p>
+                <ErrorState
+                  message="The report could not be read."
+                  hint="Nothing was copied. Try again, or copy the identity facts above."
+                  onRetry={() => {
+                    setFailed(false);
+                    load();
+                  }}
+                />
               ) : (
                 <>
                   <Receipt text={receipt} label="System report" loading={report === null} />
@@ -228,7 +240,7 @@ export function HelpView() {
                       This is the exact text that goes to the clipboard.
                     </span>
                   </div>
-                  {copyFailed && <p className="error-line">The clipboard refused the copy.</p>}
+                  {copyFailed && <ErrorLine>The clipboard refused the copy.</ErrorLine>}
                 </>
               )}
             </Panel>

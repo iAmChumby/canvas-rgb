@@ -1540,7 +1540,7 @@ export function EffectsView() {
               </div>
             </>
           ) : (
-            <span className="error-line">{importError}</span>
+            <ErrorLine>{importError}</ErrorLine>
           )}
         </div>
       )}

@@ -298,7 +298,8 @@
   padding: var(--s2) var(--s3);
   border-radius: var(--r-sm);
   border-left: 2px solid var(--warn);
-  background: var(--warn-wash);
+  /* Neutral fill (U2): amber mixed into a panel reads beige in light and olive in dark. */
+  background: var(--raised);
 }
 
 .state-page-keeps {

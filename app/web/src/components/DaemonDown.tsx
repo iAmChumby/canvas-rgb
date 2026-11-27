@@ -27,7 +27,6 @@ export function DaemonDown({
       lead="canvas-rgb draws the lights on 127.0.0.1:9430. It may still be starting, or it may have stopped."
       keeps={[
         "canvas-rgb restarts it by itself; if it keeps stopping, save diagnostics and report it.",
-        "The fans stay under BIOS control.",
       ]}
       onRetry={onRetry}
       lastTryAt={lastTryAt}

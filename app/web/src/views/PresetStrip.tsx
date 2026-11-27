@@ -36,7 +36,7 @@ const DIFF_SHOWN = 2;
 
 /** The words of a refusal: the daemon's own sentence for a clash or a bad name, else what failed and why. */
 function explain(e: unknown, doing: Doing): string {
-  if (e instanceof ApiFailure && (e.status === 409 || e.status === 422)) return e.message;
+  if (e instanceof ApiFailure && (e.status === 409 || e.status === 422)) return errorText(e);
   // "could not save the effects: access is denied" -> "Access is denied": the verb is said once, up front.
   const bare = errorText(e).replace(/^could not [a-z ]+: /i, "");
   const reason = bare.charAt(0).toUpperCase() + bare.slice(1);

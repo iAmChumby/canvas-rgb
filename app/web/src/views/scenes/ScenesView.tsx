@@ -540,7 +540,7 @@ export function ScenesView() {
           error={
             <ErrorPanel
               title="The scenes could not be read"
-              summary="canvas-rgb could not read the scenes. The lights are unaffected."
+              summary="canvas-rgb could not read the scenes. Try the read again."
               message={scenesError}
               onRetry={() => void retryScenes()}
               busy={retrying}

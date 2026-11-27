@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 pub use canvas_diag::bundle::{output_path, Bundle, BundleError, CONFIG_FILES};
 
 /// Writes a bundle to `out` with the scrubber built from this process's environment.
-pub fn write_bundle(out: &Path) -> Result<PathBuf, BundleError> {
-    let result = Bundle::new().write(out, &canvas_diag::scrub::Scrubber::from_env())?;
+pub fn write_bundle(_out: &Path) -> Result<PathBuf, BundleError> {
+    // The destination is fixed in canvas-diag (P2); the CLI's legacy argument is ignored.
+    let result = Bundle::new().write(&canvas_diag::scrub::Scrubber::from_env())?;
     Ok(PathBuf::from(
         result.path.ok_or_else(|| BundleError::Io(std::io::Error::other("no bundle path")))?,
     ))

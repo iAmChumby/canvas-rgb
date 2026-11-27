@@ -45,13 +45,11 @@ pub fn diag_bundle_list() -> Result<DiagBundle, String> {
 
 /// Writes a diagnostics bundle and answers with where it went. No daemon, no network.
 #[tauri::command]
-pub fn diag_bundle_save(path: Option<String>) -> Result<DiagBundle, String> {
-    let target = path
-        .filter(|p| !p.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| canvas_diag::paths::home().join("diagnostics"));
+pub fn diag_bundle_save() -> Result<DiagBundle, String> {
+    // No destination argument: the zip always goes to the app's diagnostics folder and never
+    // overwrites an existing file (P2).
     let scrubber = canvas_diag::scrub::Scrubber::from_env();
-    canvas_diag::bundle::Bundle::new().write(&target, &scrubber).map_err(scrub_error)
+    canvas_diag::bundle::Bundle::new().write(&scrubber).map_err(scrub_error)
 }
 
 /// Reveals the saved zip in Explorer, with the file selected.

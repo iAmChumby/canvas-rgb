@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 // The builder's overlays (#257 phase 4), moved out of StackBuilder.tsx: the name prompt, the two
 // effect popovers, the drag ghost with its hint, and the live region. Their markup and classes
@@ -56,9 +57,9 @@ export function NameStackDialog({
           onEscape={onEscape}
         />
         {namingError && (
-          <p className="error-line" id="stack-name-error" role="alert">
+          <ErrorLine id="stack-name-error" role="alert">
             {namingError}
-          </p>
+          </ErrorLine>
         )}
         <div className="rd-picker-foot">
           <Button variant="ghost" onClick={onCancel}>

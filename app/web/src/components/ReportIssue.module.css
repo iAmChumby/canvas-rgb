@@ -6,6 +6,7 @@
   color: var(--ink); font: 14px/1.5 "JetBrains Mono", ui-monospace, monospace;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+.exact { margin: 0; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .keys { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .warn { margin: 0; color: var(--warn); }
 .learn { color: var(--mute); }

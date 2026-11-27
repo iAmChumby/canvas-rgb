@@ -1,19 +1,15 @@
-// Class guard for #576/#575 (in the style of `toastGuard.test.ts`): an error the editor shows has
-// one anatomy. `messageOf` is the `ErrorState` component's helper, so a view must take its text
-// through `errorText` and render it with `ErrorState` or its compact `ErrorLine`. A bare dynamic
-// `<p className="error-line">` is the old hand-rolled shape this change removes.
-//
-// The scan reads source as text, so a copy of the old pattern cannot land. `ERROR_GUARD_ROOT`
-// points it at another copy of `src`, which is how the failure on the tree before this fix is
-// shown.
+// Class guard for #576/#575 (P9, in the style of toastGuard.test.ts): error text reaches a page
+// only through `ErrorState`/`ErrorLine` in components/ErrorState.tsx. The scan reads source as
+// text, so a copy of the old pattern cannot land. `ERROR_GUARD_ROOT` points it at another copy of
+// `src`, which is how the failures on the tree before this fix are shown.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const ROOT = process.env.ERROR_GUARD_ROOT ?? resolve(process.cwd(), "src");
+const ALLOWED = "components/ErrorState.tsx";
 
-/** Only the views: that is the surface the migration covers. */
 function sources(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -28,67 +24,65 @@ function sources(dir: string): string[] {
   return out.sort();
 }
 
-function views(): string[] {
-  return sources(join(ROOT, "views"));
+/** P9 widens the guard from views to components as well. */
+function guarded(): string[] {
+  return [...sources(join(ROOT, "views")), ...sources(join(ROOT, "components"))];
 }
 
 function nameOf(file: string): string {
   return relative(ROOT, file).split(sep).join("/");
 }
 
-/** A call to the old helper, including an import from the errors module. */
+/** The raw helper call: views and components take text through `errorText` instead. */
 export function rawMessageOf(source: string): boolean {
   return /\bmessageOf\s*\(/.test(source);
 }
 
-/** A hand-written error paragraph with a value interpolated into it. */
-export function bareErrorLine(source: string): string[] {
+/** A hand-written error element, a plain `.message` read, `String(e)`, or a bare JSX error. */
+export function violations(source: string): string[] {
   const found: string[] = [];
-  const pattern = /<p\s+className="error-line[^"]*"[^>]*>\{[^<]*\}<\/p>/g;
-  for (const match of source.matchAll(pattern)) found.push(match[0].replace(/\s+/g, " "));
+  if (rawMessageOf(source)) found.push("messageOf(");
+  for (const match of source.matchAll(/<(?:p|span)\s+className=(?:"[^"]*error-line|`[^`]*error-line)/g)) {
+    found.push(match[0].replace(/\s+/g, " "));
+  }
+  for (const match of source.matchAll(/\b(?:e|err|error)\s*\.\s*message\b/g)) found.push(match[0]);
+  for (const match of source.matchAll(/\bString\s*\(\s*(?:e|err|error)\s*\)/g)) found.push(match[0]);
+  for (const match of source.matchAll(/<(?:p|span|div)[^>]*>\{(?:e|err|error)\}<\/(?:p|span|div)>/g)) {
+    found.push(match[0].replace(/\s+/g, " "));
+  }
   return found;
 }
 
-describe("every error has one anatomy (#576)", () => {
-  it("finds the views", () => {
-    expect(views().length).toBeGreaterThan(30);
+describe("every error has one anatomy (#576, P9)", () => {
+  it("finds the views and components", () => {
+    expect(guarded().length).toBeGreaterThan(80);
   });
 
-  it("keeps messageOf inside ErrorState", () => {
+  it("keeps messageOf and raw error text inside ErrorState", () => {
     const offenders: string[] = [];
-    for (const file of views()) {
-      if (rawMessageOf(readFileSync(file, "utf8"))) offenders.push(nameOf(file));
+    for (const file of guarded()) {
+      const name = nameOf(file);
+      if (name === ALLOWED) continue;
+      for (const hit of violations(readFileSync(file, "utf8"))) offenders.push(`${name}: ${hit}`);
     }
-    expect(
-      offenders,
-      "A view takes error text through errorText and renders it with ErrorState/ErrorLine",
-    ).toEqual([]);
-  });
-
-  it("never writes a bare dynamic error paragraph", () => {
-    const offenders: string[] = [];
-    for (const file of views()) {
-      for (const line of bareErrorLine(readFileSync(file, "utf8"))) {
-        offenders.push(`${nameOf(file)}: ${line}`);
-      }
-    }
-    expect(offenders, "The compact line is ErrorLine from components/ErrorState.tsx").toEqual([]);
+    expect(offenders, "Error text reaches the page only through ErrorState/ErrorLine").toEqual([]);
   });
 
   describe("the matcher", () => {
-    it("catches the old helper call", () => {
-      expect(rawMessageOf("setErr(messageOf(e));")).toBe(true);
-      expect(rawMessageOf("import { ApiFailure, messageOf } from \"@/lib/errors\";")).toBe(false);
-      expect(rawMessageOf("setErr(errorText(e));")).toBe(false);
+    it("catches three planted violations", () => {
+      expect(violations("setErr(messageOf(e));")).toContain("messageOf(");
+      expect(violations("<p className=\"error-line\">{err}</p>").length).toBeGreaterThan(0);
+      expect(violations("return { state: 'refused', message: e.message };")).toContain("e.message");
+      expect(violations("const text = String(error);")).toContain("String(error)");
+      expect(violations("<div className=\"load-note\">{error}</div>").length).toBeGreaterThan(0);
     });
 
-    it("catches a dynamic error paragraph and leaves the component alone", () => {
-      expect(bareErrorLine("{err && <p className=\"error-line\">{err}</p>}")).toHaveLength(1);
-      expect(
-        bareErrorLine("<p className=\"error-line\" style={{ marginTop: 8 }}>{err}</p>"),
-      ).toHaveLength(1);
-      expect(bareErrorLine("<p className=\"error-line\">This effect is gone.</p>")).toEqual([]);
-      expect(bareErrorLine("<ErrorLine>{err}</ErrorLine>")).toEqual([]);
+    it("leaves the anatomy and its callers alone", () => {
+      expect(violations("import { errorText } from \"@/lib/errors\";")).toEqual([]);
+      expect(violations("setErr(errorText(e));")).toEqual([]);
+      expect(violations("<ErrorLine>{err}</ErrorLine>")).toEqual([]);
+      expect(violations("<ErrorState error={e} onRetry={load} />")).toEqual([]);
+      expect(violations("patternRefusal.message")).toEqual([]);
     });
   });
 });

@@ -18,6 +18,55 @@ pub const PROFILE_TOKEN: &str = "<profile>";
 pub const USER_TOKEN: &str = "<user>";
 /// What replaces the machine name.
 pub const MACHINE_TOKEN: &str = "<machine>";
+/// What replaces a device id in error text the person reads.
+pub const DEVICE_TOKEN: &str = "the device";
+
+/// Adapter prefixes a `DeviceId` may carry, shared by the bundle's alias pass and the error
+/// scrubber. `<prefix>:<rest>` is a device fingerprint, never a sentence or a URL.
+pub const ADAPTER_PREFIXES: &[&str] = &[
+    "openrgb", "ring", "chione", "royuan", "attack-shark-x6", "8bitdo-ultimate-2", "8bitdo", "hid", "usb",
+];
+
+/// Replaces every device-shaped token in text a person may read. Used on error bodies (P6) and
+/// on the same text the editor copies or puts in a report URL. The rest of the token is dropped
+/// whole, so a serial or a USB location cannot survive as a prefix or a suffix.
+pub fn scrub_device_ids(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        let mut matched = None;
+        for prefix in ADAPTER_PREFIXES {
+            let prefix_bytes = prefix.as_bytes();
+            if bytes[at..].starts_with(prefix_bytes)
+                && bytes.get(at + prefix_bytes.len()) == Some(&b':')
+                && (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
+            {
+                let start = at + prefix_bytes.len() + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric()
+                        || matches!(bytes[end], b'#' | b'&' | b'_' | b'.' | b'\\' | b'-'))
+                {
+                    end += 1;
+                }
+                if end > start + 1 {
+                    matched = Some(end);
+                    break;
+                }
+            }
+        }
+        if let Some(end) = matched {
+            out.push_str(DEVICE_TOKEN);
+            at = end;
+        } else {
+            let ch = text[at..].chars().next().unwrap();
+            out.push(ch);
+            at += ch.len_utf8();
+        }
+    }
+    out
+}
 
 /// One replacement. Paths match as prefixes; bare names need whole-token boundaries.
 #[derive(Debug, Clone)]
@@ -306,5 +355,81 @@ mod tests {
         let input = concat!("C:\\", "Use", "rs\\Alice\nalice-pc");
         assert_eq!(Scrubber::default().scrub(input), input);
         assert_eq!(Scrubber::default().scrub_count(input), (input.to_string(), 0));
+    }
+
+    // The nine original scrubber tests, restored in the move (P8).
+    #[test]
+    fn a_device_name_in_free_text_is_scrubbed_too() {
+        let out = fake().scrub(concat!("ALICE-PC keyboard (C:/", "Use", "rs/ALICE~1/device)"));
+        assert_eq!(out, "<machine> keyboard (<profile>/device)");
+    }
+
+    #[test]
+    fn case_and_slash_variants_do_not_need_a_matching_case() {
+        let out = fake().scrub(concat!("c:/", "USERS/alice on alice-pc"));
+        assert!(!out.to_ascii_lowercase().contains("alice"), "{out}");
+        assert!(!out.to_ascii_lowercase().contains("alice-pc"), "{out}");
+    }
+
+    #[test]
+    fn a_short_name_with_a_space_is_scrubbed() {
+        let scrubber = Scrubber::new(
+            Some(concat!("C:\\", "Use", "rs\\Luke Smith").into()),
+            Some("Luke Smith".into()),
+            None,
+        );
+        let out = scrubber.scrub(concat!("in C:\\", "Use", "rs\\LUKESM~1\\notes"));
+        assert!(!out.contains("LUKESM"), "the real 8.3 name survived: {out}");
+        assert!(out.contains(PROFILE_TOKEN), "{out}");
+    }
+
+    #[test]
+    fn the_real_short_path_is_used_exactly_when_windows_gives_one() {
+        let scrubber = Scrubber::with_short(
+            Some(concat!("C:\\", "Use", "rs\\Luke Smith").into()),
+            None,
+            None,
+            Some(concat!("C:\\", "Use", "rs\\LUKESM~2").into()),
+        );
+        let out = scrubber.scrub(concat!(
+            "at C:/", "Use", "RS/LUKESM~2/notes and C:\\", "Use", "rs\\LUKESM~1\\old"
+        ));
+        assert!(!out.contains("LUKESM~2"), "{out}");
+        assert!(out.contains(PROFILE_TOKEN), "{out}");
+        assert!(out.contains("LUKESM~1"), "{out}");
+    }
+
+    #[test]
+    fn the_fallback_follows_the_windows_naming_rule() {
+        assert_eq!(short_form("Luke Smith"), "LUKESM~1");
+        assert_eq!(short_form("John.Doe"), "JOHNDO~1");
+        assert_eq!(short_form("Ed"), "ED~1");
+    }
+
+    #[test]
+    fn a_domain_suffixed_profile_folder_leaves_no_suffix_behind() {
+        let scrubber = Scrubber::new(
+            Some(concat!("C:\\", "Use", "rs\\Luke.SMITH").to_string()),
+            Some("Luke".to_string()),
+            None,
+        );
+        let out = scrubber.scrub("Luke.SMITH pad, and Luke alone");
+        assert_eq!(out, "<user> pad, and <user> alone");
+    }
+
+    #[test]
+    fn bare_names_only_match_whole_names() {
+        let scrubber = Scrubber::new(None, Some("Ed".into()), Some("PC".into()));
+        let out = scrubber.scrub("collected PCIe Ed PC");
+        assert_eq!(out, "collected PCIe <user> <machine>");
+        let with_path = Scrubber::new(Some(concat!("C:\\", "Use", "rs\\Ed").into()), None, None);
+        assert!(with_path.scrub(concat!("C:\\", "Use", "rs\\Ed\\notes")).contains(PROFILE_TOKEN));
+    }
+
+    #[test]
+    fn a_device_id_in_error_text_becomes_the_device() {
+        let out = scrub_device_ids("the device openrgb:SERIAL-42 refused, and hid:VID_1234 too");
+        assert_eq!(out, "the device the device refused, and the device too");
+        assert!(!out.contains("SERIAL-42") && !out.contains("VID_1234"), "{out}");
     }
 }

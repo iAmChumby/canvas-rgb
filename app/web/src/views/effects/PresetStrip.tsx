@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 // The stack's presets (#257 phase 4): the chips under the picked layer, moved out of
 // StackBuilder.tsx unchanged. A preset writes the merged values into the draft in one step;
@@ -67,9 +68,9 @@ export function PresetStrip({
         </Chip>
       </div>
       {presetProblem && (
-        <p className="error-line" role="alert">
+        <ErrorLine role="alert">
           {presetProblem}
-        </p>
+        </ErrorLine>
       )}
       {presetName !== null && (
         <div className="preset-save">

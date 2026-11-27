@@ -95,10 +95,11 @@ export async function diagBundleList(): Promise<DiagBundle> {
 }
 
 /** Writes the zip and returns where it went. */
-export async function diagBundleSave(path?: string): Promise<DiagBundle> {
+export async function diagBundleSave(): Promise<DiagBundle> {
   const host = tauriHost();
   if (!host) throw new Error("Save diagnostics is available in the tray app only.");
-  return (await host.core.invoke(CMD_DIAG_SAVE, path ? { path } : undefined)) as DiagBundle;
+  // No destination argument: the tray writes to the one fixed folder (P2).
+  return (await host.core.invoke(CMD_DIAG_SAVE)) as DiagBundle;
 }
 
 /** Reveals the saved zip in Explorer with the file selected. */

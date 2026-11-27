@@ -39,6 +39,18 @@ pub fn machine_log_dir() -> PathBuf {
     machine_dir().join("logs")
 }
 
+/// The one folder diagnostics zips are written to: `%LOCALAPPDATA%\canvas-rgb\diagnostics`.
+/// A caller never chooses the destination (P2).
+pub fn diagnostics_dir() -> PathBuf {
+    match std::env::var_os(HOME_ENV) {
+        Some(v) if !v.is_empty() => PathBuf::from(v).join("diagnostics"),
+        _ => canvas_proto::consts::user_log_dir()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("diagnostics"),
+    }
+}
+
 /// A file-name-safe UTC stamp, `YYYYMMDD-HHMMSS`. Moved from the daemon's `storage` module.
 pub fn timestamp() -> String {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);

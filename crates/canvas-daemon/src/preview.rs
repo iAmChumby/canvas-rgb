@@ -722,6 +722,10 @@ fn reports(
             } else {
                 (StackLayerState::Ok, None)
             };
+            // The stack-preview answer is a 200 body, which the error layer never sees: scrub
+            // its layer reasons here with the same helper (P7).
+            let scrubber = app.scrubber.lock().unwrap_or_else(|e| e.into_inner());
+            let error = error.map(|text| crate::api::scrub_errors::scrub_error_text(&scrubber, &text));
             StackPreviewLayer { id: layer.id.clone(), status, error }
         })
         .collect()

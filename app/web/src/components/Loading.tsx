@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import type { ReactNode } from "react";
 import { CaretRight } from "@phosphor-icons/react";
@@ -103,10 +104,12 @@ export function ErrorPanel({
   busy?: boolean;
 }) {
   return (
-    <Panel title={title}>
-      <p className="error-line" role="alert">
+    <Panel>
+      {/* An error title is a sentence, not the uppercase mono panel label (U9). */}
+      <h2 className="err-panel-title">{title}</h2>
+      <ErrorLine>
         {summary}
-      </p>
+      </ErrorLine>
       {message ? <Details>{message}</Details> : null}
       {onRetry && (
         <div className="load-note-action">
@@ -169,7 +172,7 @@ export function LoadFrame({
           <div className="load-shape" aria-hidden="true">
             {shape}
           </div>
-          {state === "error" && <div className="load-note">{error}</div>}
+          {state === "error" && <ErrorLine className="load-note">{error}</ErrorLine>}
           {state === "empty" && <div className="load-note">{empty}</div>}
           {/* The region stands while loading; its words come with the placeholder, so a load that
               ends inside the delay is never announced. */}

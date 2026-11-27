@@ -183,10 +183,16 @@ describe("one frame in every state", () => {
     const { container, rerender } = render(frame("error"));
     const frameEl = root(container);
     // The note is a child of the frame, next to the shape, not a replacement for it.
-    expect(Array.from(frameEl.children).map((c) => c.className)).toEqual(["load-shape", "load-note"]);
+    expect(Array.from(frameEl.children).map((c) => c.className.split(" "))).toEqual([
+      ["load-shape"],
+      expect.arrayContaining(["load-note"]),
+    ]);
     expect(container.querySelector(".load-note")?.textContent).toContain("the daemon said no");
     rerender(frame("empty"));
-    expect(Array.from(root(container).children).map((c) => c.className)).toEqual(["load-shape", "load-note"]);
+    expect(Array.from(root(container).children).map((c) => c.className.split(" "))).toEqual([
+      ["load-shape"],
+      expect.arrayContaining(["load-note"]),
+    ]);
     expect(container.querySelector(".load-note")?.textContent).toContain("Nothing here");
   });
 

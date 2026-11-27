@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -42,6 +43,13 @@ export function StandingNotices() {
   const noScene = status !== null && !status.active_scene && !onScenes;
   // Help & About draws the safe-start notice beside its hero, so the hero never moves (#577).
   const safe = (status?.safe_start?.active ?? false) && !pathname.startsWith("/help");
+  // #576 item 4: the fan service being away is a standing notice in the page's own flow, not a
+  // floating card that covers the controls underneath it (U4). The Fans page says it in its card.
+  const serviceDown =
+    !pathname.endsWith("/fans/") &&
+    status !== null &&
+    status.service_down_ms !== null &&
+    status.service_down_ms >= SERVICE_BANNER_MS;
 
   const dismissPanel = async () => {
     setErr(null);
@@ -66,10 +74,18 @@ export function StandingNotices() {
     });
   };
 
-  if (!safe && !conflict && !noScene && !status?.show_zone_panel) return null;
+  if (!safe && !conflict && !noScene && !status?.show_zone_panel && !serviceDown) return null;
 
   return (
     <div className="banners-flow">
+      {serviceDown && status && (
+        <Banner tone="down" icon={<WarningOctagon size={20} weight="fill" />} title="Fan control is unavailable">
+          canvas-rgb has not heard from the fan service for{" "}
+          {status.service_down_ms === null ? "a while" : fmtSeconds(status.service_down_ms)}. Nothing here has
+          confirmed what the fans are doing now.
+          <ServiceBannerKeys />
+        </Banner>
+      )}
       {safe && <SafeStartBanner />}
       {conflict && (
         <Banner
@@ -113,7 +129,7 @@ export function StandingNotices() {
         >
           Tell the app what is plugged into each ARGB header, so effects fill what you actually have. A
           header with nothing on it can be marked empty and stops asking.
-          {err && <span className="error-line"> {err}</span>}
+          {err && <ErrorLine>{err}</ErrorLine>}
         </Banner>
       )}
     </div>
@@ -121,20 +137,14 @@ export function StandingNotices() {
 }
 
 /**
- * The transient notice that floats over the page: the fan service has been away for a while. It
- * floats because it is not standing: it appears and goes on its own, and a page must not move
- * for it.
+ * The transient notices that float over the page: a release offered and an install that failed.
+ * They wait for a key. The fan service notice stands in the page flow (StandingNotices), so it
+ * never covers the controls underneath it.
  */
 export function GlobalBanners() {
   const pathname = usePathname();
   const router = useRouter();
-  const status = useSnap((s) => s.status);
   const update = useSnap((s) => s.update);
-
-  // The Fans page says this in its own card; the banner would say it twice.
-  const onFans = pathname.endsWith("/fans/");
-  const serviceDown =
-    !onFans && status !== null && status.service_down_ms !== null && status.service_down_ms >= SERVICE_BANNER_MS;
 
   // A release is waiting: the banner offers it until the person says Later (hidden until the next
   // automatic check) or Skip this version. The Updates page has the key itself, so it says it once.
@@ -225,18 +235,6 @@ export function GlobalBanners() {
               </Button>
               {tauriHost() === null && <span className="mute upd-note">Tray app only</span>}
             </div>
-          </Banner>
-        )}
-        {serviceDown && status && (
-          <Banner
-            tone="down"
-            icon={<WarningOctagon size={20} weight="fill" />}
-            title="Fan control is unavailable"
-          >
-            canvas-rgb has not heard from the fan service for{" "}
-            {status.service_down_ms === null ? "a while" : fmtSeconds(status.service_down_ms)}. The lights are
-            unaffected.
-            <ServiceBannerKeys />
           </Banner>
         )}
       </div>
@@ -386,9 +384,9 @@ export function SafeStartBanner({ onHelp = false }: { onHelp?: boolean }) {
         </div>
       )}
       {error && (
-        <p className="error-line safe-error" role="alert">
+        <ErrorLine className="safe-error" role="alert">
           {error}
-        </p>
+        </ErrorLine>
       )}
     </Banner>
   );

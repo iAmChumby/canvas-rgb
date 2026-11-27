@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use canvas_proto::api::{DiagBundle, DiagFile};
 
-use crate::scrub::Scrubber;
+use crate::scrub::{self, Scrubber};
 use crate::service_logs::{self, LogFs, RealLogFs};
 
 /// The files the bundle contains, relative to the user directory. The token is not among them.
@@ -27,19 +27,14 @@ pub const CONFIG_FILES: &[&str] = &[
     "fans.last.toml",
 ];
 
-/// Adapter prefixes a `DeviceId` may carry. A string with one of these before the colon is a
-/// device id; its mapping is fixed for the whole bundle so a serial never appears anywhere.
-const ADAPTER_PREFIXES: &[&str] = &[
-    "openrgb", "ring", "chione", "royuan", "attack-shark-x6", "8bitdo-ultimate-2", "8bitdo", "hid", "usb",
-];
-
-/// The output path of a bundle written to a directory, stamped with the UTC time.
+/// The next free bundle path in the one fixed folder. A clash adds `-2`, `-3`, ...; an existing
+/// file is never opened for writing (P2).
 pub fn output_path(dir: &Path) -> PathBuf {
-    if dir.is_dir() {
-        dir.join(format!("canvas-rgb-diag-{}.zip", crate::paths::timestamp()))
-    } else {
-        dir.to_path_buf()
-    }
+    // A process-local counter makes two saves in the same second different before either is
+    // opened, so create-new cannot race between parallel callers (P2).
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join(format!("canvas-rgb-diag-{}-{n}.zip", crate::paths::timestamp()))
 }
 
 /// One piece of a bundle while it is being made. `bytes` are the original on-disk bytes; the
@@ -47,6 +42,14 @@ pub fn output_path(dir: &Path) -> PathBuf {
 struct Source {
     name: String,
     bytes: Vec<u8>,
+}
+
+/// Everything the bundle will contain, plus the one service-log decision. A file that is not
+/// text is left out and named in the file list with the reason (P5).
+struct Sources {
+    files: Vec<Source>,
+    notices: Vec<DiagFile>,
+    service_logs: Option<String>,
 }
 
 /// The bundle maker. `new` uses the live paths; tests supply their own directories and a fake
@@ -79,14 +82,22 @@ impl Bundle {
         Self { home, logs, machine_logs, fs }
     }
 
-    /// Reads every source once. The service logs come back as an explicit reason when refused;
-    /// nothing under the machine tree is ever written.
-    fn sources(&self) -> Vec<Source> {
-        let mut out = Vec::new();
+    /// Reads every source once. The service logs are opened and checked exactly once; the reason
+    /// for a refusal is kept beside the sources so `GET` and `POST` always agree (P3).
+    fn sources(&self) -> Sources {
+        let mut files = Vec::new();
+        let mut notices = Vec::new();
         for name in CONFIG_FILES {
             let path = self.home.join(name);
             if let Ok(bytes) = std::fs::read(&path) {
-                out.push(Source { name: format!("config/{name}"), bytes });
+                if std::str::from_utf8(&bytes).is_ok() {
+                    files.push(Source { name: format!("config/{name}"), bytes });
+                } else {
+                    notices.push(DiagFile {
+                        name: format!("config/{name} (not included: not a text file)"),
+                        bytes: 0,
+                    });
+                }
             }
         }
         if let Ok(entries) = std::fs::read_dir(&self.logs) {
@@ -96,55 +107,60 @@ impl Bundle {
                     if let (Some(name), Ok(bytes)) =
                         (path.file_name().and_then(|n| n.to_str()), std::fs::read(&path))
                     {
-                        out.push(Source { name: format!("logs/{name}"), bytes });
+                        if std::str::from_utf8(&bytes).is_ok() {
+                            files.push(Source { name: format!("logs/{name}"), bytes });
+                        } else {
+                            notices.push(DiagFile {
+                                name: format!("logs/{name} (not included: not a text file)"),
+                                bytes: 0,
+                            });
+                        }
                     }
                 }
             }
         }
-        if let Ok(logs) = service_logs::collect(self.fs.as_ref(), &self.machine_logs) {
-            for (name, bytes) in logs {
-                out.push(Source { name, bytes });
+        let service_logs = match service_logs::collect(self.fs.as_ref(), &self.machine_logs) {
+            Ok(logs) => {
+                for (name, bytes) in logs {
+                    files.push(Source { name, bytes });
+                }
+                None
             }
-        }
-        out
-    }
-
-    /// Why the service logs are not in this bundle, or `None` when they are.
-    fn service_logs_reason(&self) -> Option<String> {
-        service_logs::refusal(self.fs.as_ref(), &self.machine_logs)
+            Err(reason) => Some(reason),
+        };
+        Sources { files, notices, service_logs }
     }
 
     /// `GET`: the list of files with their on-disk sizes, before anything is written.
     pub fn list(&self) -> DiagBundle {
-        let files = self
-            .sources()
+        let sources = self.sources();
+        let files = sources
+            .notices
             .into_iter()
-            .map(|s| DiagFile { name: s.name, bytes: s.bytes.len() as u64 })
+            .chain(sources.files.into_iter().map(|s| DiagFile {
+                name: s.name,
+                bytes: s.bytes.len() as u64,
+            }))
             .collect();
-        DiagBundle { path: None, files, replaced: 0, service_logs: self.service_logs_reason() }
+        DiagBundle { path: None, files, replaced: 0, service_logs: sources.service_logs }
     }
 
-    /// `POST`: scrubs every text file, aliases every device id consistently, writes the zip and
-    /// answers with the result. The alias mapping is built from all files at once, so the same
-    /// serial in a config file and a log line gets the same alias.
-    pub fn write(&self, out: &Path, scrubber: &Scrubber) -> Result<DiagBundle, BundleError> {
-        let out = output_path(out);
-        if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+    /// `POST`: writes the zip into the one fixed folder, never over an existing file (P2). Every
+    /// text file is scrubbed and every device id gets one alias per bundle.
+    pub fn write(&self, scrubber: &Scrubber) -> Result<DiagBundle, BundleError> {
+        let dir = crate::paths::diagnostics_dir();
+        std::fs::create_dir_all(&dir)?;
+        let out = output_path(&dir);
         let sources = self.sources();
-        let texts: Vec<String> = sources
-            .iter()
-            .map(|s| String::from_utf8_lossy(&s.bytes).into_owned())
-            .collect();
+        let texts: Vec<String> = sources.files.iter().map(|s| String::from_utf8_lossy(&s.bytes).into_owned()).collect();
         let aliases = aliases_for(&texts);
         let options: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        let file = std::fs::File::create(&out)?;
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&out)?;
         let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
-        let mut files = Vec::new();
+        let mut files = sources.notices;
         let mut replaced = 0u32;
-        for (source, text) in sources.iter().zip(texts.iter()) {
+        for (source, text) in sources.files.iter().zip(texts.iter()) {
             let (scrubbed, n) = scrubber.scrub_count(text);
             replaced = replaced.saturating_add(n);
             let (scrubbed, n) = apply_aliases(&scrubbed, &aliases);
@@ -158,7 +174,7 @@ impl Bundle {
             path: Some(out.to_string_lossy().into_owned()),
             files,
             replaced,
-            service_logs: self.service_logs_reason(),
+            service_logs: sources.service_logs,
         })
     }
 }
@@ -190,7 +206,11 @@ fn aliases_for(texts: &[String]) -> Vec<(String, String)> {
             }
         }
     }
-    found
+    let mut sorted: Vec<String> = found.into_iter().collect();
+    // Longest first: `openrgb:AB` must not eat the start of `openrgb:ABC` (P4). Ties are
+    // lexicographic so one bundle always assigns the same aliases.
+    sorted.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    sorted
         .into_iter()
         .enumerate()
         .map(|(i, id)| (id, format!("device-{}", i + 1)))
@@ -228,7 +248,7 @@ fn looks_like_device_id(text: &str) -> bool {
     let Some((prefix, rest)) = text.split_once(':') else {
         return false;
     };
-    ADAPTER_PREFIXES.contains(&prefix) && rest.len() >= 2 && !rest.contains(' ') && !rest.contains('/')
+    scrub::ADAPTER_PREFIXES.contains(&prefix) && rest.len() >= 2 && !rest.contains(' ') && !rest.contains('/')
 }
 
 /// The location strings Windows and OpenRGB print for a USB device.
@@ -281,22 +301,34 @@ mod tests {
         fn files(&self, _p: &Path) -> Result<Vec<PathBuf>, String> {
             Ok(vec![PathBuf::from("svc.log")])
         }
-        fn read(&self, _p: &Path) -> Result<Vec<u8>, String> {
+        fn open_checked(&self, _p: &Path) -> Result<Vec<u8>, String> {
             self.reads.set(self.reads.get() + 1);
             // A fake serial and a fake USB location in the service log.
             Ok(b"controller openrgb:SERIAL-42 at HID#VID_1234 location".to_vec())
         }
     }
 
+    /// One fake home for this test binary; setting the override once keeps parallel tests from
+    /// racing on the environment and keeps every write off the real user folder.
+    fn home() -> &'static PathBuf {
+        static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "canvas-diag-bundle-{}-{}",
+                std::process::id(),
+                crate::paths::timestamp()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var(crate::paths::HOME_ENV, &dir);
+            dir
+        })
+    }
+
     fn tree() -> (PathBuf, PathBuf, FakeMachine) {
-        let root = std::env::temp_dir().join(format!(
-            "canvas-diag-bundle-{}-{}",
-            std::process::id(),
-            crate::paths::timestamp()
-        ));
+        let root = home().clone();
         let home = root.join("home");
         let logs = root.join("logs");
-        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&logs).unwrap();
         // A fake profile path in a config file: it must not survive into the zip.
@@ -325,8 +357,7 @@ mod tests {
         let (home, logs, machine) = tree();
         let machine_logs = PathBuf::from("machine/logs");
         let bundle = Bundle::with_dirs(home.clone(), logs, machine_logs, Box::new(machine));
-        let out = home.join("out");
-        let result = bundle.write(&out, &scrubber()).unwrap();
+        let result = bundle.write(&scrubber()).unwrap();
         let zip = std::fs::read(result.path.clone().unwrap()).unwrap();
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
         let mut texts = Vec::new();
@@ -344,7 +375,73 @@ mod tests {
         let aliases: Vec<_> = joined.matches("device-").collect();
         assert!(aliases.len() >= 2, "one alias per device: {joined}");
         assert!(joined.contains("device-1"), "{joined}");
-        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    #[test]
+    fn the_zip_goes_to_the_fixed_folder_and_never_overwrites() {
+        let (home, logs, machine) = tree();
+        let bundle = Bundle::with_dirs(home.clone(), logs, PathBuf::from("machine/logs"), Box::new(machine));
+        let first = bundle.write(&scrubber()).unwrap();
+        let first_path = PathBuf::from(first.path.unwrap());
+        assert_eq!(first_path.parent().unwrap(), crate::paths::diagnostics_dir());
+        // An existing file stays byte-for-byte; the next save gets a new name.
+        std::fs::write(&first_path, b"keep me").unwrap();
+        let second = bundle.write(&scrubber()).unwrap();
+        let second_path = PathBuf::from(second.path.unwrap());
+        assert_ne!(first_path, second_path);
+        assert_eq!(std::fs::read(&first_path).unwrap(), b"keep me");
+        assert!(second_path.exists());
+    }
+
+    #[test]
+    fn a_config_file_is_never_a_zip_destination() {
+        // A caller cannot pass a path any more: the writer has no path argument and always uses
+        // the fixed folder. The config file beside it stays byte-for-byte.
+        let (home, logs, machine) = tree();
+        let config = home.join("config.toml");
+        let before = std::fs::read(&config).unwrap();
+        let bundle = Bundle::with_dirs(home.clone(), logs, PathBuf::from("machine/logs"), Box::new(machine));
+        let answer = bundle.write(&scrubber()).unwrap();
+        let path = PathBuf::from(answer.path.unwrap());
+        assert_ne!(path, config);
+        assert_eq!(std::fs::read(&config).unwrap(), before);
+    }
+
+    #[test]
+    fn aliases_replace_the_longest_device_id_first() {
+        let text = "openrgb:AB and openrgb:ABC and openrgb:ABCD".to_string();
+        let aliases = aliases_for(&[text.clone()]);
+        let (out, _) = apply_aliases(&text, &aliases);
+        assert!(!out.contains("AB") && !out.contains("ABC") && !out.contains("ABCD"), "{out}");
+        // A short id eating the start of a longer one leaves `device-1C`: no alias may have a
+        // serial-like tail.
+        let bytes = out.as_bytes();
+        for i in 0..out.len().saturating_sub(8) {
+            if out[i..].starts_with("device-")
+                && bytes.get(i + 7).is_some_and(u8::is_ascii_digit)
+                && bytes.get(i + 8).is_some_and(u8::is_ascii_alphanumeric)
+            {
+                panic!("a partial device alias survived: {out}");
+            }
+        }
+        let names: Vec<_> = aliases.iter().map(|(_, a)| a.as_str()).collect();
+        assert_eq!(names.len(), 3, "{aliases:?}");
+    }
+
+    #[test]
+    fn a_binary_file_is_left_out_and_said_to_be() {
+        let (home, logs, machine) = tree();
+        std::fs::write(home.join("effects.json"), vec![0xff, 0xfe, 0x00, 0x01]).unwrap();
+        let bundle = Bundle::with_dirs(home.clone(), logs, PathBuf::from("machine/logs"), Box::new(machine));
+        let answer = bundle.list();
+        assert!(answer.files.iter().any(|f| f.name.contains("not included: not a text file")), "{answer:?}");
+        let result = bundle.write(&scrubber()).unwrap();
+        let zip = std::fs::read(result.path.unwrap()).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+        let names: Vec<_> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
+        assert!(!names.iter().any(|n| n == "config/effects.json"), "{names:?}");
     }
 
     #[test]

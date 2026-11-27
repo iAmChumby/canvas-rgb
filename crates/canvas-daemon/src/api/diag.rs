@@ -11,35 +11,18 @@ use std::sync::Arc;
 use crate::api::{ApiFailure, ApiResult};
 use crate::state::App;
 
-/// Where a bundle written through the API goes unless the caller names a folder.
-fn default_bundle_dir() -> std::path::PathBuf {
-    crate::paths::home().join("diagnostics")
-}
-
 /// `GET /api/v1/diag/bundle`: the file list and sizes before anything is saved (#575).
 pub async fn bundle_list(State(_app): State<Arc<App>>) -> ApiResult<Json<DiagBundle>> {
     Ok(Json(canvas_diag::bundle::Bundle::new().list()))
 }
 
-/// The optional body of `POST /api/v1/diag/bundle`: an output folder under the user's own tree.
-#[derive(Debug, Default, Deserialize)]
-pub struct BundleWriteRequest {
-    pub path: Option<String>,
-}
-
-/// `POST /api/v1/diag/bundle`: writes the scrubbed, aliased zip and answers with its path.
-pub async fn bundle_write(
-    State(app): State<Arc<App>>,
-    body: Option<Json<BundleWriteRequest>>,
-) -> ApiResult<Json<DiagBundle>> {
-    let target = body
-        .and_then(|Json(body)| body.path)
-        .filter(|p| !p.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(default_bundle_dir);
+/// `POST /api/v1/diag/bundle`: writes the scrubbed, aliased zip to the app's one diagnostics
+/// folder and answers with its path. The handler takes no body at all (P2): a caller cannot name
+/// a destination, so a typo cannot write over a config file. An accidental body is ignored.
+pub async fn bundle_write(State(app): State<Arc<App>>) -> ApiResult<Json<DiagBundle>> {
     let scrubber = app.scrubber.lock().unwrap_or_else(|e| e.into_inner());
     let result = canvas_diag::bundle::Bundle::new()
-        .write(&target, &scrubber)
+        .write(&scrubber)
         .map_err(|e| ApiFailure::internal(format!("the diagnostics bundle could not be written: {e}")))?;
     Ok(Json(result))
 }

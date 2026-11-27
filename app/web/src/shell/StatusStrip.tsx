@@ -115,9 +115,12 @@ export function StatusStrip({
     : statusFault === "engine"
       ? "Engine down"
       : offline
-        ? "Offline"
+        ? phone
+          ? ""
+          : "Offline"
         : "Connecting";
-  const swatchLabel = nowName === "—" ? "Nothing is running" : nowName;
+  // The red dot already says the daemon is away on a phone; keep the words for a screen reader.
+  const swatchLabel = nowName === "—" ? "Nothing is running" : nowName || (offline ? "Offline: the daemon is not answering" : "");
   // Each link and what it is doing: the panel shows them all, one after another.
   const linkList = links(status, statusFault);
 

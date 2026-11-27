@@ -257,9 +257,9 @@ function WhiteBalanceSection({
       <div className="rd-wb-rows" aria-busy={known || readFailed ? undefined : true}>
         {readFailed && (
           <div className="rd-wb-failed">
-            <span className="error-line" role="alert">
+            <ErrorLine role="alert">
               The white balance could not be read. {error}
-            </span>
+            </ErrorLine>
             <Button size="sm" onClick={onRetry}>
               Try again
             </Button>
@@ -419,7 +419,7 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
           onChange={turn}
         />
       </span>
-      {error && <span className="error-line rd-light-error">{error}</span>}
+      {error && <ErrorLine className="rd-light-error">{error}</ErrorLine>}
     </div>
   );
 }
@@ -586,7 +586,7 @@ export function DevicesView() {
         error={
           <ErrorPanel
             title="The devices could not be read"
-            summary="canvas-rgb could not read the devices. The lights are unaffected."
+            summary="canvas-rgb could not read the devices. Try the read again."
             message={devicesError}
             onRetry={() => void retryDevices()}
           />

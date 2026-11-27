@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 // The builder's library (#257 phase 2): what you can place. A rail at 1180 px and wider, a tray
 // under the stage at 721-1179, and a tab on a phone. Two tabs — Effects and Masks — a search, and
@@ -133,9 +134,9 @@ export function Library({
         </div>
       </div>
       {problem && (
-        <p className="error-line rd-library-problem" role="alert">
+        <ErrorLine className="rd-library-problem" role="alert">
           {problem}
-        </p>
+        </ErrorLine>
       )}
     </div>
   );

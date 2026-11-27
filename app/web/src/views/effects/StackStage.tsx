@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 // The builder's stage panel (#257 phase 4): the picture, its tools, the foot that starts a draft
 // or says what the preview is doing. Moved out of StackBuilder.tsx unchanged.
@@ -202,9 +203,9 @@ export function StackStage({
         </div>
       )}
       {draftState === "restore-error" && draftError && (
-        <p className="error-line" role="alert">
+        <ErrorLine role="alert">
           {draftError}
-        </p>
+        </ErrorLine>
       )}
     </Panel>
   );

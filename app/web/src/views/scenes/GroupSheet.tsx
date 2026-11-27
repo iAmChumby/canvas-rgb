@@ -23,6 +23,7 @@ import { Popover } from "@/components/Popover";
 import { Segmented, type SegOption } from "@/components/Segmented";
 import { Slider } from "@/components/Slider";
 import { useFocusTrap } from "@/components/useFocusTrap";
+import { errorText } from "@/lib/errors";
 import { api } from "@/lib/endpoints";
 import { fillDefaults } from "@/lib/presetMatch";
 import { effectNameOf } from "@/lib/status";
@@ -605,7 +606,7 @@ function Presets({
       setName("");
       onSaved();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "The preset could not be saved.");
+      setError(e instanceof Error ? errorText(e) : "The preset could not be saved.");
     } finally {
       setBusy(false);
     }

@@ -1532,7 +1532,7 @@ export function useScene(): UseScene {
       } catch (e) {
         // The daemon's own refusal (422) is shown on the row, in its own words.
         if (e instanceof ApiFailure && e.status === 422) {
-          return { state: "refused", message: e.message };
+          return { state: "refused", message: errorText(e) };
         }
         // Another window saved first: the scenes are read again, so a retry asks with the
         // revision the daemon has now.

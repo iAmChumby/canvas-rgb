@@ -18,6 +18,7 @@ import { useRouter } from "next/navigation";
 import { BLACK_HEX, hsvToHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
 import { errorText } from "@/lib/errors";
+import { ErrorLine } from "@/components/ErrorState";
 import { refreshPatterns } from "@/lib/store";
 import { PATTERN_GUARD, PatternEditor } from "@/views/patterns/PatternEditor";
 import type { Arrangement } from "@/proto/Arrangement";
@@ -84,7 +85,7 @@ export function PatternEditorPage() {
     await refreshPatterns();
   }, []);
 
-  if (error !== null) return <p className={s.pageLine}>{error}</p>;
+  if (error !== null) return <ErrorLine className={s.pageLine}>{error}</ErrorLine>;
   if (pattern === null) return <p className={s.pageLine}>Opening the pattern…</p>;
   return (
     <PatternEditor

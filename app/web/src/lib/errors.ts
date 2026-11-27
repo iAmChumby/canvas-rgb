@@ -55,10 +55,21 @@ export function daemonFault(e: unknown): DaemonFault {
  * The text of an error, in one place. A daemon message is already scrubbed at the API edge;
  * a plain `Error` is a local detail, never the text of the prefilled report (#576 R6).
  */
+/** The device-id shapes the daemon and the bundle use (P6), mirrored in Rust. */
+const ADAPTER_PREFIXES = [
+  "openrgb", "ring", "chione", "royuan", "attack-shark-x6", "8bitdo-ultimate-2", "8bitdo", "hid", "usb",
+];
+const DEVICE_ID = new RegExp(`\\b(?:${ADAPTER_PREFIXES.join("|")}):[A-Za-z0-9#&_.\\\\-]{2,}`, "g");
+
+/** Replaces every device fingerprint in text the editor copies or puts in a URL (P6). */
+export function scrubDeviceIds(text: string): string {
+  return text.replace(DEVICE_ID, "the device");
+}
+
 export function messageOf(e: unknown): string {
-  if (e instanceof ApiFailure) return e.message;
-  if (e instanceof Error) return e.message;
-  return "unknown error";
+  const message = e instanceof ApiFailure || e instanceof Error ? e.message : "unknown error";
+  // The daemon scrubs at the edge, but a tray or local message can still carry a device id.
+  return scrubDeviceIds(message);
 }
 
 /**

@@ -1239,33 +1239,21 @@
       "pathParams": [],
       "descriptions": {
         "GET": "Lists the files and sizes a diagnostics zip would hold, before anything is written. Every file is scrubbed and every device id is given a per-bundle alias when the zip is written; `service_logs` says why the machine-wide logs are not included. Nothing is saved by this request.",
-        "POST": "Writes the diagnostics zip to the given folder, or to the app's diagnostics folder when the body is empty, and answers with its path, the file list, how many names were replaced and why the service logs were included or not. The API token is never in the zip, and the machine-wide log folder is only read: never written, deleted or adopted."
+        "POST": "Writes the diagnostics zip to the app's one diagnostics folder and answers with its path, the file list, how many names and device ids were replaced and why the service logs were included or not. A destination cannot be chosen in the body: an existing zip is never overwritten. The API token is never in the zip, and the machine-wide log folder is only read: never written, deleted or adopted."
       },
       "examples": {
         "GET": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X GET -H \"Authorization: Bearer $TOKEN\" \"http://127.0.0.1:9430/api/v1/diag/bundle\"",
-        "POST": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X POST -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"path\":\"D:\\\\canvas-rgb-diag\"}' \"http://127.0.0.1:9430/api/v1/diag/bundle\""
+        "POST": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X POST -H \"Authorization: Bearer $TOKEN\" \"http://127.0.0.1:9430/api/v1/diag/bundle\""
       },
       "requestType": {
         "GET": "none",
-        "POST": "BundleWriteRequest"
+        "POST": "none"
       },
       "responseType": {
         "GET": "DiagBundle",
         "POST": "DiagBundle"
       },
-      "requestShape": {
-        "POST": {
-          "label": "BundleWriteRequest",
-          "fields": [
-            {
-              "name": "path",
-              "type": "string",
-              "meaning": "A folder under the person's own tree to write the zip into. Leave it out for the app's diagnostics folder.",
-              "optional": true
-            }
-          ]
-        }
-      },
+      "requestShape": {},
       "responseShape": {
         "GET": {
           "label": "DiagBundle",
@@ -6036,16 +6024,6 @@
           "type": "string or null",
           "optional": true,
           "meaning": "Why the service logs are not included, when they are not (a refused folder, a reparse point, a read error). `null` when they are included"
-        }
-      ]
-    },
-    "BundleWriteRequest": {
-      "fields": [
-        {
-          "name": "path",
-          "type": "string",
-          "optional": true,
-          "meaning": "A folder under the person's own tree to write the zip into. Leave it out for the app's diagnostics folder."
         }
       ]
     },

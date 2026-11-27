@@ -17,10 +17,12 @@ thiserror.workspace = true
 # `Win32_Storage_FileSystem` supplies `GetShortPathNameW` (the real 8.3 profile path) and
 # the reparse-point check on the machine log folder. `Win32_Security` and its
 # `Win32_Security_Authorization` submodule supply the owner check; `Win32_Foundation`
-# supplies `LocalFree`. All are features of the existing `windows` dependency, not new crates.
+# supplies `LocalFree`, and `Win32_System_IO` supplies `ReadFile`. All are features of the
+# existing `windows` dependency, not new crates.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
 ] }

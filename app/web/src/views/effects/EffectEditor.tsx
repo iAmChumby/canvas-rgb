@@ -342,10 +342,10 @@ export function EffectEditor({
 
   const codeErrors = useMemo(
     () =>
-      (preview?.errors ?? []).map((error) => ({
-        message: error.message,
-        line: error.line === undefined ? undefined : sourceLineOf(source, error.line),
-        column: error.column,
+      (preview?.errors ?? []).map((issue) => ({
+        message: issue.message,
+        line: issue.line === undefined ? undefined : sourceLineOf(source, issue.line),
+        column: issue.column,
       })),
     [preview, source],
   );
@@ -705,18 +705,18 @@ export function EffectEditor({
       </div>
       {errors.length > 0 && (
         <ul className="eff-errors" aria-label="Errors in the effect">
-          {errors.map((error, i) => (
-            <li key={`${error.message}-${i}`}>
+          {errors.map((issue, i) => (
+            <li key={`${issue.message}-${i}`}>
               <button
                 type="button"
                 className="eff-error-row"
                 onClick={() => focusError(codeErrors[i]?.line, i)}
               >
                 <Warning size={14} aria-hidden="true" />
-                <span className="fig eff-error-line">
+                <ErrorLine className="fig">
                   {codeErrors[i]?.line !== undefined ? `line ${codeErrors[i]?.line}` : "error"}
-                </span>
-                <span className="eff-error-text">{error.message}</span>
+                </ErrorLine>
+                <ErrorLine className="eff-error-text">{issue.message}</ErrorLine>
               </button>
             </li>
           ))}
@@ -809,9 +809,9 @@ export function EffectEditor({
         </p>
       )}
       {draftState === "restore-error" && draftError && (
-        <p className="error-line" role="alert">
+        <ErrorLine role="alert">
           {draftError}
-        </p>
+        </ErrorLine>
       )}
 
       <div className="eff-edit-main" data-code={showCode && !narrow ? "true" : "false"}>
@@ -908,14 +908,14 @@ export function EffectEditor({
               )}
             </div>
             {draftState === "off" && draftError && (
-              <p className="error-line" role="alert">
+              <ErrorLine role="alert">
                 {draftError}
-              </p>
+              </ErrorLine>
             )}
             {saveError && (
-              <p className="error-line" role="alert">
+              <ErrorLine role="alert">
                 {saveError}
-              </p>
+              </ErrorLine>
             )}
             {clash && (
               <div className="import-note" data-tone="ask" role="alert">

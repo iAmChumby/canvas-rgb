@@ -94,7 +94,11 @@ export function StatePage({
           {/* One line of timing. The heading already says what is wrong, and the daemon's own
               words are on their own line, so neither is repeated here. */}
           <span className="state-page-detail" aria-live="polite">
-            {lastTryAt ? `tried ${ago} s ago · next in ${next} s` : "not tried yet"}
+            {lastTryAt
+              ? next === 0
+                ? `tried ${ago} s ago · Retrying now`
+                : `tried ${ago} s ago · next in ${next} s`
+              : "not tried yet"}
           </span>
         </div>
         {keys ? <div className="state-page-keys">{keys}</div> : null}

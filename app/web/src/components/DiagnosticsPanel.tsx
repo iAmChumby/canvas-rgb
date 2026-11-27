@@ -1,13 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { ArrowClockwise, Check, Copy, FolderOpen, DownloadSimple } from "@phosphor-icons/react";
+import { Check, Copy, FolderOpen, DownloadSimple } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { ErrorState } from "@/components/ErrorState";
 import { Panel } from "@/components/Panel";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { diagBundleList, diagBundleSave, revealDiagBundle, tauriHost } from "@/lib/host";
-import { errorText } from "@/lib/errors";
 import type { DiagBundle } from "@/proto/DiagBundle";
 import s from "./DiagnosticsPanel.module.css";
 
@@ -55,10 +54,7 @@ export function DiagnosticsPanel({ compact = false }: { compact?: boolean }) {
         <ErrorState message="Save diagnostics is available in the tray app only." />
       ) : error !== null ? (
         <>
-          <ErrorState error={error} detail={errorText(error)} onRetry={load} logsEnabled={false} />
-          <Button size="sm" icon={<ArrowClockwise size={15} />} onClick={() => { setError(null); load(); }}>
-            Try again
-          </Button>
+          <ErrorState error={error} onRetry={load} logsEnabled={false} />
         </>
       ) : (
         <>
@@ -72,7 +68,7 @@ export function DiagnosticsPanel({ compact = false }: { compact?: boolean }) {
                   </li>
                 ))}
                 {list === null ? <li className={s.waiting} aria-busy="true"><InlineSkeleton width="24ch" /></li> : null}
-                {list?.service_logs ? <li className={s.reason}>Service logs: {list.service_logs}</li> : null}
+                {serviceLine(list?.service_logs) ? <li className={s.reason}>{serviceLine(list?.service_logs)}</li> : null}
               </ul>
               <Button id="diag-save" icon={<DownloadSimple size={16} />} busy={busy} onClick={() => void save()}>
                 Save diagnostics
@@ -82,12 +78,12 @@ export function DiagnosticsPanel({ compact = false }: { compact?: boolean }) {
             <>
               <p className={s.saved}>
                 <Check size={15} weight="bold" aria-hidden="true" />
-                Saved. {saved.replaced} name{saved.replaced === 1 ? "" : "s"} replaced.
+                Saved. {saved.replaced} name{saved.replaced === 1 ? "" : "s"} and device ids replaced.
               </p>
               <p className={`fig ${s.path}`} title={saved.path ?? undefined}>
                 {saved.path ?? "Saved"}
               </p>
-              {saved.service_logs ? <p className={s.reason}>Service logs: {saved.service_logs}</p> : null}
+              {serviceLine(saved.service_logs) ? <p className={s.reason}>{serviceLine(saved.service_logs)}</p> : null}
               <div className={s.keys}>
                 <Button
                   size="sm"
@@ -118,6 +114,12 @@ export function DiagnosticsPanel({ compact = false }: { compact?: boolean }) {
   );
 
   return compact ? body : <Panel title="Save diagnostics">{body}</Panel>;
+}
+
+/** The daemon's refusal already begins with "Service logs": never print the label twice (U12). */
+function serviceLine(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  return reason.startsWith("Service logs:") ? reason : `Service logs: ${reason}`;
 }
 
 function formatBytes(bytes: number): string {

@@ -23,9 +23,9 @@ export function EngineDown({
   return (
     <StatePage
       icon={<Pulse size={26} />}
-      title="canvas-rgb is up, but its render engine is not answering"
-      lead="canvas-rgb is running and answering requests. It says:"
-      keeps={["The fans stay under BIOS control."]}
+      title="canvas-rgb is up, but rendering is stopped"
+      lead="canvas-rgb answered the status request. Its own words:"
+      keeps={[]}
       message={message}
       onRetry={onRetry}
       lastTryAt={lastTryAt}

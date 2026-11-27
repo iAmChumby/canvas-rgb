@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 // The builder's layer stack (#257 phase 4): the rows, their grips, masks and eye keys, moved out
 // of StackBuilder.tsx unchanged. The list is drawn top first; the draft is bottom first.
@@ -172,9 +173,9 @@ export function LayerList({
                       onEscape={onRenameEscape}
                     />
                     {renameProblem && (
-                      <p className="error-line" id="layer-name-error" role="alert">
+                      <ErrorLine id="layer-name-error" role="alert">
                         {renameProblem}
-                      </p>
+                      </ErrorLine>
                     )}
                   </div>
                 ) : (

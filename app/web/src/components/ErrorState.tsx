@@ -129,7 +129,7 @@ export function KeyRow({
 export function ErrorLine({
   children,
   id,
-  role = "alert",
+  role,
   title,
   style,
   className,

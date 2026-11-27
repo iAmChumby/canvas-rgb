@@ -47,7 +47,7 @@
 
 .line {
   margin: 0;
-  color: var(--down);
+  color: var(--error-ink);
   font-size: 14px;
 }
 

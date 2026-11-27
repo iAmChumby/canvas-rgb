@@ -1015,9 +1015,20 @@ html[data-motion="reduced"] *::after {
   width: 72px;
 }
 
+.err-panel-title {
+  color: var(--ink);
+  font-family: var(--fu);
+  font-size: var(--t16);
+  font-weight: 600;
+  margin-bottom: var(--s2);
+  text-transform: none;
+}
+
 .error-line {
-  color: var(--down);
+  color: var(--error-ink);
   font-size: var(--t14);
+  font-family: var(--fu);
+  text-transform: none;
 }
 
 /* ---------- buttons, icon buttons, segmented, toggle, chips ---------- */
@@ -10579,9 +10590,10 @@ button.chip:hover {
   font-family: var(--fm);
   font-size: var(--t14);
   line-height: 1.4;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* GO TO addresses are full URLs: wrap them instead of cutting them (U11). The title carries
+     the whole address as well, but a reader should not have to hover to see it. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .help-key-arrow {

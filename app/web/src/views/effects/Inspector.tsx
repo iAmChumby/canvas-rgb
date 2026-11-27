@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 // The picked layer's inspector (#257 phase 4): its effect and blend, its area, the effect's own
 // controls, and its mask, moved out of StackBuilder.tsx unchanged. The phone's Tune sheet renders
@@ -212,7 +213,7 @@ export function Inspector({
       <InspectorSection title="Properties">
         {schemas[layer.effect] === null || statuses[layer.id]?.status === "missing_effect" ? (
           <div className="rd-gone">
-            <p className="error-line">This effect is gone. Choose another.</p>
+            <ErrorLine>This effect is gone. Choose another.</ErrorLine>
             <span ref={chooseRef}>
               <Button
                 size="sm"
@@ -308,9 +309,9 @@ export function Inspector({
                   onChange={onMaskEffect}
                 />
                 {maskProblem && (
-                  <p className="error-line" role="alert">
+                  <ErrorLine role="alert">
                     {maskProblem}
-                  </p>
+                  </ErrorLine>
                 )}
               </div>
               <div className="layer-field wide">
@@ -358,7 +359,7 @@ export function Inspector({
               </div>
             </div>
             {schemas[mask.effect] === null ? (
-              <p className="error-line">This mask effect is gone. Choose another, or remove the mask.</p>
+              <ErrorLine>This mask effect is gone. Choose another, or remove the mask.</ErrorLine>
             ) : schemas[mask.effect] === undefined ? (
               <LoadFrame
                 state="loading"
@@ -404,9 +405,9 @@ export function Inspector({
         </p>
       )}
       {layerProblem && (
-        <p className="error-line" role="alert">
+        <ErrorLine role="alert">
           {layerProblem}
-        </p>
+        </ErrorLine>
       )}
     </Panel>
   );
@@ -420,5 +421,3 @@ export function InspectorEmpty() {
     </Panel>
   );
 }
-
-

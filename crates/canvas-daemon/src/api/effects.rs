@@ -77,15 +77,18 @@ fn layer_schema(user: &UserEffects, id: &str) -> Option<PropertySchema> {
 }
 
 /// The user effect files that did not load, with why: a parse error or a load timeout.
-fn failed_effects(user: &UserEffects) -> Vec<FailedEffect> {
+fn failed_effects(user: &UserEffects, scrubber: &crate::scrub::Scrubber) -> Vec<FailedEffect> {
     user.failures()
         .into_iter()
         .map(|(path, error)| FailedEffect {
-            file: path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
-            error,
+            file: scrubber.scrub(
+                &path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            ),
+            // A 200 body never reaches the error layer: scrub it where it is built (P7).
+            error: crate::api::scrub_errors::scrub_error_text(scrubber, &error),
         })
         .collect()
 }
@@ -121,7 +124,7 @@ pub async fn list_effects(State(app): State<Arc<App>>) -> Json<EffectsResponse> 
     // running. Every group plays its own, so this is a summary and not one engine effect.
     let scene = crate::scenes::active_scene(&store.scenes);
     let active = crate::scenes::running_effect(scene).map(|(id, _)| id);
-    let failed = failed_effects(&app.user_effects);
+    let failed = failed_effects(&app.user_effects, &app.scrubber.lock().unwrap_or_else(|e| e.into_inner()));
     Json(EffectsResponse { effects, active, failed })
 }
 

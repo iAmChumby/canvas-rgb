@@ -141,8 +141,9 @@ async fn the_bundle_route_lists_then_writes() {
     assert!(listed["path"].is_null(), "GET does not write: {text}");
     assert!(listed["service_logs"].as_str().unwrap().contains("not included"), "{text}");
 
-    let target = home.join("out");
-    let write = router
+    // A caller cannot choose the destination (P2).
+    let refused = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -151,8 +152,28 @@ async fn the_bundle_route_lists_then_writes() {
                 .header("authorization", &auth)
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::to_string(&serde_json::json!({ "path": target.to_string_lossy() })).unwrap(),
+                    serde_json::to_string(&serde_json::json!({ "path": home.join("out").to_string_lossy() })).unwrap(),
                 ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The handler takes no body, so a caller-chosen path is ignored (P2).
+    let ignored: serde_json::Value = serde_json::from_str(&body(refused).await).unwrap();
+    assert_eq!(ignored["error"], serde_json::Value::Null);
+    assert_eq!(
+        std::path::PathBuf::from(ignored["path"].as_str().unwrap()).parent().unwrap(),
+        canvas_diag::paths::diagnostics_dir()
+    );
+
+    let write = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(routes::DIAG_BUNDLE)
+                .header("host", "127.0.0.1:9430")
+                .header("authorization", &auth)
+                .body(Body::empty())
                 .unwrap(),
         )
         .await
@@ -161,7 +182,8 @@ async fn the_bundle_route_lists_then_writes() {
     let text = body(write).await;
     assert_eq!(status, StatusCode::OK, "{text}");
     let written: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let path = written["path"].as_str().unwrap();
-    assert!(std::path::Path::new(path).exists(), "{path}");
+    let path = std::path::PathBuf::from(written["path"].as_str().unwrap());
+    assert!(path.exists());
+    assert_eq!(path.parent().unwrap(), canvas_diag::paths::diagnostics_dir());
     let _ = std::fs::remove_dir_all(&home);
 }

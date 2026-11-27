@@ -9,10 +9,10 @@ import type { AboutReport } from "@/proto/AboutReport";
 import s from "./ReportIssue.module.css";
 
 /**
- * Report issue (#575, item 6): the preview shows the exact text the address will carry, and the
- * address is opened only on the person's click. Copy report stays beside it for a PC with no
- * browser or network. `errorTitle` must be a scrubbed daemon or tray message, never a local
- * `Error` detail.
+ * Report issue (#575, item 6, U10): the preview shows the exact text the address will carry and
+ * every filled field, with the count of encoded characters used. The address opens only when the
+ * person clicks. Copy report stays beside it for a PC with no browser or network. `errorTitle`
+ * must be a scrubbed daemon or tray message, never a local `Error` detail (R6).
  */
 export function ReportIssue({
   report,
@@ -43,23 +43,31 @@ export function ReportIssue({
       });
   };
 
+  const filled = report ?? emptyReport();
+  const fields: Array<[string, string]> = [
+    ["version", filled.version || "not collected"],
+    ["windows", filled.windows || "not collected"],
+    ["hardware", built.droppedHardware ? "dropped to fit the address" : filled.hardware || "not collected"],
+    ["other-rgb-apps", filled.other_rgb_apps || "not collected"],
+    ["what-happened", built.whatHappened || "add your own words"],
+  ];
+
   return (
     <div className={s.body}>
       <p className={s.note}>
-        The issue opens in your browser with these fields filled. Nothing is sent until you post
-        the issue. The full report is {built.url.length}/{REPORT_URL_MAX} encoded characters.
+        The issue opens in your browser with these fields filled. Nothing is sent until you post the
+        issue. {built.url.length} of {REPORT_URL_MAX} characters used.
       </p>
       <pre className={s.preview} aria-label="Report issue preview">
-        {built.whatHappened || "(what happened: add your own words)"}
+        {fields.map(([name, value]) => `${name}: ${value}`).join("\n")}
       </pre>
-      {built.droppedHardware ? <p className={s.warn}>Hardware was dropped to fit the address. Add it by hand; the full text is on the clipboard.</p> : null}
+      <p className={s.exact}>{built.whatHappened || "(what happened: add your own words)"}</p>
+      {built.droppedHardware ? (
+        <p className={s.warn}>Hardware was dropped to fit the address. Add it by hand; Copy report has the full text.</p>
+      ) : null}
       {built.truncated ? <p className={s.warn}>What happened was truncated. Copy report has the full text.</p> : null}
       <div className={s.keys}>
-        <Button
-          icon={<ArrowSquareOut size={16} />}
-          onClick={() => void openExternal(built.url)}
-          disabled={!report}
-        >
+        <Button icon={<ArrowSquareOut size={16} />} onClick={() => void openExternal(built.url)} disabled={!report}>
           Report issue
         </Button>
         <Button variant="ghost" icon={copied ? <Check size={16} /> : <Copy size={16} />} onClick={copy}>

@@ -227,6 +227,12 @@ function serveStatic(port, dir) {
 function tauriInit({ daemonBase, token, theme, suppressChain, fault }) {
   window.__uiCaptureTheme = theme;
   window.__uiCaptureFault = fault ?? "";
+  if (fault === "clipboard") {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async () => { throw new Error("the clipboard refused the copy"); } },
+    });
+  }
   try {
     localStorage.setItem("canvas-rgb.theme", theme);
     if (suppressChain) {
@@ -264,6 +270,17 @@ function tauriInit({ daemonBase, token, theme, suppressChain, fault }) {
         if (window.__uiCaptureFault === "diag-error") {
           throw new Error("The diagnostics file list could not be read. Try again in a moment.");
         }
+        if (window.__uiCaptureFault === "service-logs-included") {
+          return {
+            path: null,
+            files: [
+              { name: "config/zones.json", bytes: 1824 },
+              { name: "service-logs/canvas-rgb-svc.2026-11-27.log", bytes: 2048 },
+            ],
+            replaced: 0,
+            service_logs: null,
+          };
+        }
         return {
           path: null,
           files: [
@@ -275,6 +292,14 @@ function tauriInit({ daemonBase, token, theme, suppressChain, fault }) {
           service_logs: "not included: the service log folder is not there",
         };
       case "diag_bundle_save":
+        if (window.__uiCaptureFault === "service-logs-included") {
+          return {
+            path: "D:\\capture\\canvas-rgb-diag.zip",
+            files: [{ name: "service-logs/canvas-rgb-svc.2026-11-27.log", bytes: 2048 }],
+            replaced: 2,
+            service_logs: null,
+          };
+        }
         return {
           path: "D:\\capture\\canvas-rgb-diag.zip",
           files: [{ name: "config/zones.json", bytes: 1824 }],
@@ -353,13 +378,15 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
     await page.route(`${daemonBase}/api/v1/status`, (route) => route.abort("failed"));
   } else if (fault) {
     await page.route(`${daemonBase}/api/v1/status`, async (route) => {
-      if (fault === "engine") {
+      if (fault === "engine" || fault === "long-message") {
         await route.fulfill({
           status: 503,
           contentType: "application/json",
           body: JSON.stringify({
             error: "service_unavailable",
-            message: "the render engine is not answering",
+            message: fault === "long-message"
+              ? "the render engine stopped after a shader in the draft at line 42 could not be compiled; the daemon kept the last good frame and refused the next one, so the preview stayed dark and the lights held their last colours while the watcher waited for the renderer to answer again"
+              : "the render engine is not answering",
             hint: "Save diagnostics and report the problem if it keeps happening.",
           }),
         });
@@ -374,6 +401,21 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
       status.service_down_ms = 14_000;
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(status) });
     });
+    if (fault === "big-report") {
+      await page.route(`${daemonBase}/api/v1/about/report`, (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            markdown: "# canvas-rgb support report\n\n- version: 0.20.0",
+            version: "0.20.0",
+            windows: "Windows 11 Pro 10.0.26100",
+            hardware: "Model-only line ".repeat(600),
+            other_rgb_apps: "none seen",
+          }),
+        }),
+      );
+    }
     if (fault === "inline") {
       await page.route(`${daemonBase}/api/v1/devices`, (route) =>
         route.fulfill({

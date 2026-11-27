@@ -1190,7 +1190,7 @@ pub fn user_words(error: &AdapterError) -> String {
         // only when it is already plain; otherwise give the same next step as the other arms.
         AdapterError::Protocol(message) => {
             if plain_sentence(message) {
-                message.clone()
+                canvas_diag::scrub::scrub_device_ids(message)
             } else {
                 "The device did not answer as expected. Check that it is connected and press Read again."
                     .to_string()

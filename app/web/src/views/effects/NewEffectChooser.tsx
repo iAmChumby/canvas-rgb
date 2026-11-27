@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 // New from code: the "Code" branch of New effect. A blank file is the second key, a copy of an
 // existing HTML effect the first. A Rust built-in has no HTML source to copy (the route answers
@@ -78,9 +79,9 @@ export function NewEffectChooser({
           </div>
         )}
         {error && (
-          <p className="error-line" role="alert">
+          <ErrorLine role="alert">
             {error}
-          </p>
+          </ErrorLine>
         )}
       </Panel>
 

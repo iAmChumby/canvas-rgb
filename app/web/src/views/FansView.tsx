@@ -188,7 +188,7 @@ export function FansView() {
               </Button>
             }
           >
-            No answer for {downFor}. The fans stay under BIOS control; the lights are unaffected.
+            No answer for {downFor}. The fans stay under BIOS control.
             <Details>{fansError}</Details>
           </EmptyState>
         </Panel>
@@ -937,9 +937,9 @@ function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
         </Button>
       )}
       {err && (
-        <span className="error-line fan-hdr-availability-error" role="alert" title={err}>
+        <ErrorLine className="fan-hdr-availability-error" role="alert" title={err}>
           {err}
-        </span>
+        </ErrorLine>
       )}
     </span>
   );
@@ -1151,9 +1151,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     <div className="fan-status" data-slot="fan-status">
       <StatusReason text={reasonText} warn={handedBack} quiet={quiet} />
       <div className="fan-status-line" data-slot="fan-status-line">
-        <span className="fan-status-error error-line" role="alert" title={err ?? undefined}>
+        <ErrorLine className="fan-status-error" role="alert" title={err ?? undefined}>
           {err ?? ""}
-        </span>
+        </ErrorLine>
         <span className="fan-status-busy mute" role="status" aria-busy={busy || undefined}>
           <WaitMark busy={busy} label="Applying" />
         </span>
@@ -1214,9 +1214,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     </span>
   );
   const hotError = hotErr && (
-    <span className="error-line" role="alert">
+    <ErrorLine role="alert">
       {hotErr}
-    </span>
+    </ErrorLine>
   );
   // Issue #297: a CPU line at or under the fixed warning threshold (60 °C) keeps the closed-loop
   // hold engaged almost all the time, so the fans run hard to hold it. The sentence states the
