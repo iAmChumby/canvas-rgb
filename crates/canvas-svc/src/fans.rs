@@ -1688,6 +1688,10 @@ impl FanController {
             });
         }
         FansStatus {
+            // #580: the build sets these from the chip open (CONSENSUS R1, R13, R17). False
+            // until then: no fan-chip note and no dismissal cleared.
+            chip_problem: None,
+            chip_checked: false,
             chip: self.chip.as_ref().map(|c| c.chip_name()),
             hardware_watchdog: HARDWARE_WATCHDOG,
             headers: out,

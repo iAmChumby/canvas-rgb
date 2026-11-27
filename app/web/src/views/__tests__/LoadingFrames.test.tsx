@@ -69,6 +69,7 @@ const status: Status = {
   conflicts: [],
   show_zone_panel: false,
   onboarding_complete: true,
+  faults: [],
 };
 
 /** The error frame: one line, a way to try again, and the raw words behind the disclosure. */

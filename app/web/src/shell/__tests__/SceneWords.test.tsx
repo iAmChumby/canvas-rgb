@@ -64,6 +64,7 @@ const status = (over: Partial<Status> = {}): Status => ({
   conflicts: [],
   show_zone_panel: false,
   onboarding_complete: true,
+  faults: [],
   ...over,
 });
 

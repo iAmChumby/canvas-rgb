@@ -1124,6 +1124,8 @@ impl App {
         drop(store);
         let down = self.service_down_ms.load(Ordering::SeqCst);
         Some(Status {
+            // #580: the build fills the hardware notes.
+            faults: Vec::new(),
             version: self.version.clone(),
             power,
             brightness,

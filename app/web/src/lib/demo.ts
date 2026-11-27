@@ -846,6 +846,8 @@ function fansStatus(): FansStatus {
   });
   return {
     chip: "NCT6687D-R @ 0xA20",
+    chip_checked: true,
+    chip_problem: null,
     hardware_watchdog: null,
     headers,
     temps: temperatures,
@@ -898,6 +900,7 @@ function statusNow(): Status {
     conflicts: conflictClearsMs() > 0 && elapsed * 1000 > conflictClearsMs() ? [] : s.conflicts,
     show_zone_panel: s.zonePanel,
     onboarding_complete: s.onboardingComplete,
+    faults: [],
   });
 }
 

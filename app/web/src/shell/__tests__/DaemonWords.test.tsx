@@ -38,6 +38,7 @@ const status: Status = {
   conflicts: [],
   show_zone_panel: false,
   onboarding_complete: true,
+  faults: [],
 };
 
 describe("the words on the page", () => {

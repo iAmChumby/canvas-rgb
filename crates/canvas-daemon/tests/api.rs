@@ -1024,6 +1024,8 @@ use canvas_proto::fans::{hot_limit_status, HotKind, HotLimits};
 /// A fan status with a rated 7800X3D (89 C) and an 88 C GPU fallback behind it.
 fn fans_with_hot() -> canvas_proto::fans::FansStatus {
     let mut status = canvas_proto::fans::FansStatus {
+        chip_problem: None,
+        chip_checked: true,
         chip: Some("NCT6687D-R @ 0xA20".into()),
         hardware_watchdog: None,
         headers: Vec::new(),
@@ -2455,6 +2457,8 @@ async fn put_config(router: &axum::Router, body: &DisplayConfig) -> axum::respon
 /// Fan status with temperatures and fan headers.
 fn fans(temps: Vec<(TempSource, f32)>, headers: Vec<(&str, u32)>) -> FansStatus {
     FansStatus {
+        chip_problem: None,
+        chip_checked: true,
         chip: Some("NCT6687D-R @ 0xA20".into()),
         hardware_watchdog: None,
         headers: headers
