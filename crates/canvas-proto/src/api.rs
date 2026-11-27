@@ -168,6 +168,9 @@ pub mod routes {
     pub const UPDATE_INSTALL: &str = "/api/v1/update/install";
     /// Diagnostics: current colors as the adapter reads them back from the hardware.
     pub const DIAG_READBACK: &str = "/api/v1/diag/readback";
+    /// Diagnostics zip (#575): `GET` lists the files it would hold, `POST` writes the scrubbed zip
+    /// and answers [`DiagBundle`]. Token.
+    pub const DIAG_BUNDLE: &str = "/api/v1/diag/bundle";
     /// WebSocket. Binary messages: `u16 LE width, u16 LE height, width*height*3 RGB bytes`,
     /// at most [`crate::consts::PREVIEW_MAX_FPS`]. Without a query it streams the running
     /// effect; `?stack=1` streams the preview engine ([`STACK_PREVIEW`]) instead.
@@ -269,6 +272,42 @@ pub struct ApiError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub column: Option<u32>,
+    /// The next step, in plain words (#576): what the person can do about it. `message` says what
+    /// happened. Both are scrubbed before they leave the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hint: Option<String>,
+}
+
+/// One file the diagnostics zip holds, or would hold (#575).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiagFile {
+    /// The path inside the zip, e.g. `logs/canvas-rgbd.2026-11-27.log` or `config/zones.json`.
+    pub name: String,
+    /// Its size on disk before scrubbing.
+    #[ts(type = "number")]
+    pub bytes: u64,
+}
+
+/// `GET` and `POST /api/v1/diag/bundle` (#575). `GET` lists what the zip would hold, before the
+/// person saves it; `POST` writes the scrubbed zip and answers with where it went.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiagBundle {
+    /// Where the zip was written. `None` for the `GET` preview.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub path: Option<String>,
+    pub files: Vec<DiagFile>,
+    /// How many names, paths and device ids the scrub replaced. 0 for the `GET` preview.
+    #[serde(default)]
+    pub replaced: u32,
+    /// Why the service logs are not included, when they are not (a refused folder, a reparse
+    /// point, a read error). `None` when they are included.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub service_logs: Option<String>,
 }
 
 pub mod error_codes {

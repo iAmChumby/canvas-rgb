@@ -249,6 +249,8 @@ impl axum::response::IntoResponse for ApiFailure {
             message: self.message,
             line: self.line,
             column: self.column,
+            // #576: the build fills the next step.
+            hint: None,
         };
         let mut response = (self.status, axum::Json(body)).into_response();
         if let Some(seconds) = self.retry_after {
