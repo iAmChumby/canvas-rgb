@@ -62,4 +62,21 @@ describe("npm notice platform filtering", () => {
     expect(planWith(LINUX).excluded.find((e) => e.name === WIN).reason).toBe(reason);
     expect(reason).toContain("platform-native package");
   });
+
+  it("stops on a platform-gated package outside the known build-only families", () => {
+    // A runtime package that declares os/cpu would otherwise be dropped silently and ship
+    // without its notice.
+    const gated = { ...lock, packages: { ...lock.packages, "node_modules/some-runtime-native": { os: ["win32"] } } };
+    expect(() =>
+      buildNotices({
+        components: [component("react", "19.3.1")],
+        lock: gated,
+        manifest: { dependencies: {} },
+        accepted: new Set(["MIT"]),
+        generatedAt: "2026-11-26T00:00:00.000Z",
+        readPackage: () => ({ license: "MIT" }),
+        readLicense: () => ({ file: "LICENSE", text: "MIT TEST TEXT" }),
+      }),
+    ).toThrow(/some-runtime-native is platform-gated/);
+  });
 });

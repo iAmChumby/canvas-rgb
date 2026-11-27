@@ -49,6 +49,14 @@ function licenceOf(component, pkg) {
  * package.json (and is the only place that can fail for a package npm did not
  * install); `readLicense(rel, name, version)` returns { file, text }.
  */
+/**
+ * The platform-binary families the static export is known not to ship. A gated package outside
+ * them stops the run: it may be a runtime package that declares `os`/`cpu`, and dropping it
+ * silently would ship it without its notice. Add a family here only after checking it never
+ * reaches app/web/out.
+ */
+export const knownPlatformFamilies = [/^@img\/sharp-/, /^@next\/swc-/];
+
 export function buildNotices({ components = [], lock = {}, manifest = {}, readPackage, readLicense, accepted, generatedAt }) {
   if (!readPackage || !readLicense || !accepted) throw new Error("buildNotices needs readers and an accepted-licence set");
   const excluded = new Map(buildOnly);
@@ -58,7 +66,12 @@ export function buildNotices({ components = [], lock = {}, manifest = {}, readPa
   for (const [rel, meta] of Object.entries(lock.packages ?? {})) {
     const reason = platformExclusion(meta);
     if (!reason) continue;
-    excluded.set(meta.name ?? rel.split("node_modules/").pop(), reason);
+    const name = meta.name ?? rel.split("node_modules/").pop();
+    // Dev-only build tools (bundler and resolver bindings) never ship, whatever their family.
+    if (!meta.dev && !knownPlatformFamilies.some((family) => family.test(name))) {
+      throw new Error(`${name} is platform-gated but not a known build-only binary family; check whether it ships, then add its family to knownPlatformFamilies`);
+    }
+    excluded.set(name, reason);
   }
   const packages = [];
   const seen = new Set();
