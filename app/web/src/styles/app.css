@@ -10358,7 +10358,7 @@ button.chip:hover {
 
 .help-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.6fr);
   gap: var(--s4);
   align-items: start;
 }
@@ -10386,12 +10386,6 @@ button.chip:hover {
 
 .help-brand .brand-mark {
   color: var(--live);
-}
-
-.help-version {
-  margin-left: auto;
-  color: var(--a1);
-  font-size: var(--t16);
 }
 
 .help-hero-note {
@@ -10438,6 +10432,21 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+.help-report-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-left: auto;
+}
+
+.help-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+  margin-top: var(--s4);
+}
+
 .receipt {
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
@@ -10446,7 +10455,8 @@ button.chip:hover {
 
 .receipt-text {
   max-height: 320px;
-  min-height: 92px;
+  /* The real report is about this tall; hold the room so nothing below moves when it arrives. */
+  min-height: 320px;
   overflow: auto;
   margin: 0;
   padding: var(--s3);
@@ -10471,8 +10481,7 @@ button.chip:hover {
   margin-top: var(--s3);
 }
 
-.help-report-note,
-.help-slot-note {
+.help-report-note {
   font-size: var(--t14);
   line-height: 1.5;
 }
@@ -10485,12 +10494,15 @@ button.chip:hover {
 .help-key {
   display: flex;
   width: 100%;
+  height: auto;
+  min-height: 64px;
   justify-content: flex-start;
   gap: var(--s3);
   padding: var(--s3) var(--s2);
-  border-radius: 0;
+  border-radius: var(--r-sm);
   border-bottom: 1px solid var(--line);
   text-align: left;
+  white-space: normal;
   transition: background var(--dur-fast) var(--ease);
 }
 
@@ -10524,10 +10536,12 @@ button.chip:hover {
   font-weight: 600;
 }
 
-.help-key-hint {
+.help-key-address {
   color: var(--mute);
+  font-family: var(--fm);
   font-size: var(--t14);
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .help-key-arrow {
@@ -10562,8 +10576,11 @@ button.chip:hover {
     align-items: center;
     padding: var(--s3) var(--s1);
   }
-
-  .receipt-text {
-    max-height: none;
+  /* The receipt keeps its 320px box here too: the long report scrolls inside it. The header
+     holds its two-row height from the first frame, so neither the count nor the Copy button
+     can push the Go-to panel when the answer lands. */
+  .help-report .panel-head {
+    min-height: 52px;
+    align-content: center;
   }
 }

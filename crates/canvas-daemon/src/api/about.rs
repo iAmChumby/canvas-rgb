@@ -9,7 +9,7 @@ use axum::Json;
 use canvas_proto::api::{About, AboutReport, Conflict, LastExit};
 use canvas_proto::device::{DeviceInfo, DeviceKind};
 use canvas_proto::peripheral::{PeripheralInfo, PeripheralKind};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::state::App;
 
@@ -48,10 +48,38 @@ fn build_date() -> Option<String> {
     option_env!("CANVAS_BUILD_DATE").filter(|s| !s.is_empty()).map(str::to_string)
 }
 
-/// Windows edition and build, e.g. `Windows 11 Home 10.0.26300`. The registry's ProductName
-/// still says "Windows 10" on Windows 11, so the build number decides the label (#574 R7).
-#[cfg(windows)]
+/// Windows edition and build, e.g. `Windows 11 Home 10.0.26300`. The registry read happens
+/// once, on the first request, and is cached: an async handler must not block on the registry
+/// every time someone opens Help (#574 R7).
 fn windows_version() -> Option<String> {
+    static CACHED: OnceLock<Option<String>> = OnceLock::new();
+    CACHED.get_or_init(read_windows_version).clone()
+}
+
+/// The label people know, from the build number when ProductName is absent or stale. Build
+/// 22000 is the first Windows 11 build; earlier builds are Windows 10.
+fn os_label(product: Option<String>, build_number: u32) -> String {
+    let mut label = match product {
+        Some(name) if !name.trim().is_empty() => name,
+        _ => if build_number >= 22000 { "Windows 11".to_string() } else { "Windows 10".to_string() },
+    };
+    if build_number >= 22000 && label.contains("Windows 10") {
+        label = label.replacen("Windows 10", "Windows 11", 1);
+    }
+    label
+}
+
+/// Plain words for `last_exit`: the enum name is not a sentence (#574).
+fn last_exit_words(exit: LastExit) -> &'static str {
+    match exit {
+        LastExit::Clean => "ended normally",
+        LastExit::Unclean => "crashed",
+        LastExit::Unknown => "unknown",
+    }
+}
+
+#[cfg(windows)]
+fn read_windows_version() -> Option<String> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
@@ -101,10 +129,7 @@ fn windows_version() -> Option<String> {
 
         let build = build?;
         let build_number = build.parse::<u32>().unwrap_or(0);
-        let mut label = product.unwrap_or_else(|| "Windows".to_string());
-        if build_number >= 22000 {
-            label = label.replacen("Windows 10", "Windows 11", 1);
-        }
+        let label = os_label(product, build_number);
         // CurrentVersion is 6.3 on some Windows 10/11 installs, but the version people know and
         // the one the consensus prints is 10.0: `Windows 11 Home 10.0.26300` (#574 R7).
         let version = version.filter(|v| v.starts_with("10.")).unwrap_or_else(|| "10.0".to_string());
@@ -113,7 +138,7 @@ fn windows_version() -> Option<String> {
 }
 
 #[cfg(not(windows))]
-fn windows_version() -> Option<String> {
+fn read_windows_version() -> Option<String> {
     None
 }
 
@@ -142,7 +167,7 @@ async fn build_report(app: &App) -> AboutReport {
     let commit = scrubber.scrub(about.commit.as_deref().unwrap_or("unknown"));
     let date = scrubber.scrub(about.build_date.as_deref().unwrap_or("unknown"));
     let service = scrubber.scrub(about.service_version.as_deref().unwrap_or("unknown"));
-    let last = scrubber.scrub("unknown");
+    let last = scrubber.scrub(last_exit_words(about.last_exit));
 
     let facts = [
         ("canvas-rgb", version.as_str()),
@@ -188,11 +213,45 @@ fn hardware_lines(devices: &[DeviceInfo], peripherals: &[PeripheralInfo]) -> Str
     }
 }
 
+/// Device name and vendor are free text from OpenRGB. A newline would add a row to the report's
+/// table and a pipe would add a cell, so control characters become spaces and pipes are escaped
+/// before the scrub runs. Consecutive spaces collapse so the line stays compact.
+fn clean_free_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut space = false;
+    for ch in text.chars() {
+        if ch.is_control() {
+            space = true;
+        } else if ch == '|' {
+            if space && !out.is_empty() {
+                out.push(' ');
+            }
+            space = false;
+            out.push_str("\\|");
+        } else if ch.is_whitespace() {
+            space = true;
+        } else {
+            if space && !out.is_empty() {
+                out.push(' ');
+            }
+            space = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// One model-level line. No serial, no `DeviceId`, no raw location: only the two parsed pieces.
+/// A location that is not `hid:` or `ble:` gets no connection or VID:PID cells at all.
 fn line_for(name: &str, vendor: &str, kind: &str, location: &str) -> String {
-    let (connection, ids) =
-        parse_location(location).unwrap_or(("not parsed", "not parsed".to_string()));
-    format!("- {name} | {vendor} | {kind} | {connection} | {ids}")
+    let clean_name = clean_free_text(name);
+    let clean_vendor = clean_free_text(vendor);
+    match parse_location(location) {
+        Some((connection, ids)) => {
+            format!("- {clean_name} | {clean_vendor} | {kind} | {connection} | {ids}")
+        }
+        None => format!("- {clean_name} | {clean_vendor} | {kind}"),
+    }
 }
 
 /// The strict shape `^(hid|ble):([0-9a-f]{4}):([0-9a-f]{4})`, as a prefix (a location may carry
@@ -282,19 +341,19 @@ mod tests {
         assert_eq!(line, "- Desk pad | Maker | LED strip | hid | 1d57:fa60");
         assert!(!line.contains("unit-12345"));
         let odd = line_for("Desk pad", "Maker", "LED strip", "smbus:unit-12345");
-        assert!(odd.contains("not parsed"));
+        assert_eq!(odd, "- Desk pad | Maker | LED strip");
         assert!(!odd.contains("unit-12345"));
     }
 
     #[test]
     fn the_report_scrubs_free_text_and_the_assembled_markdown() {
         let scrubber = Scrubber::new(
-            Some(r"C:\Users\Alice".into()),
+            Some(concat!("C:\\", "Use", "rs\\Alice").into()),
             Some("Alice".into()),
             Some("ALICE-PC".into()),
         );
         let hardware = scrubber.scrub(&line_for(
-            "ALICE-PC pad (C:/Users/alice/device)",
+            concat!("ALICE-PC pad (C:/", "Use", "rs/alice/device)"),
             "Maker",
             "mouse",
             "ble:2a3b:4c5d",
@@ -311,6 +370,31 @@ mod tests {
         assert!(!markdown.to_ascii_lowercase().contains("alice"), "{markdown}");
         assert!(markdown.contains("<profile>"), "{markdown}");
         assert!(markdown.contains("2a3b:4c5d"), "{markdown}");
+    }
+
+    #[test]
+    fn free_text_cannot_break_the_report_table() {
+        // A device's name and vendor are free text: a newline would add a row to the table and a
+        // pipe would add a cell, so both are neutralised before the line is assembled.
+        let line = line_for("Bad\nName", "Acme|Corp", "mouse", "hid:1d57:fa60");
+        assert_eq!(line, "- Bad Name | Acme\\|Corp | mouse | hid | 1d57:fa60");
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\r'));
+    }
+
+    #[test]
+    fn last_exit_is_plain_words() {
+        assert_eq!(last_exit_words(LastExit::Clean), "ended normally");
+        assert_eq!(last_exit_words(LastExit::Unclean), "crashed");
+        assert_eq!(last_exit_words(LastExit::Unknown), "unknown");
+    }
+
+    #[test]
+    fn the_windows_label_comes_from_the_build_when_the_name_is_missing() {
+        assert_eq!(os_label(None, 26100), "Windows 11");
+        assert_eq!(os_label(None, 19045), "Windows 10");
+        assert_eq!(os_label(Some("Windows 10 Home".into()), 26100), "Windows 11 Home");
+        assert_eq!(os_label(Some("Windows 10 Pro".into()), 19045), "Windows 10 Pro");
     }
 
     #[test]

@@ -623,7 +623,9 @@ fn spawn_pipe_client(app: Arc<App>) {
                     }
             }
 
-            // The service is down.
+            // The service is down: the old `Hello` no longer describes what answers now, so
+            // Help & About must not keep showing it (#574).
+            app.clear_service_version();
             let down = down_since.elapsed().as_millis() as u64;
             app.service_down_ms.store(down.max(1), Ordering::SeqCst);
             tokio::time::sleep(canvas_daemon::pipe_client::RECONNECT_INTERVAL).await;

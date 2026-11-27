@@ -797,6 +797,11 @@ impl App {
         *self.service_version.lock().unwrap_or_else(|e| e.into_inner()) = Some(version);
     }
 
+    /// Forgets the last `Hello`: a disconnected service has no version to show (#574).
+    pub fn clear_service_version(&self) {
+        *self.service_version.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     /// The service version, when the service has answered a `Hello`.
     pub fn service_version(&self) -> Option<String> {
         self.service_version.lock().unwrap_or_else(|e| e.into_inner()).clone()

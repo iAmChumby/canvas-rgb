@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Icon } from "@phosphor-icons/react";
-import { Fan, FilmSlate, GameController, Gear, Lifebuoy, Monitor, Circuitry, Sparkle } from "@phosphor-icons/react";
+import { Fan, FilmSlate, GameController, Gear, Monitor, Circuitry, Question, Sparkle } from "@phosphor-icons/react";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { useSnap } from "@/lib/store";
 import { useRailData, type RailValues } from "@/shell/RailData";
@@ -38,7 +38,7 @@ const PAGES: NavItem[] = [
 const SETTINGS: NavItem = { href: "/settings/", label: "Settings", icon: Gear };
 
 /** The help row, beside Settings: one click from any page, and in the palette for every width. */
-export const HELP: NavItem = { href: "/help/", label: "Help & About", icon: Lifebuoy };
+export const HELP: NavItem = { href: "/help/", label: "Help & About", icon: Question };
 
 /** Every page, in the order the command palette offers them. */
 export const NAV: NavItem[] = [...PAGES, SETTINGS, HELP];

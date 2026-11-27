@@ -4,19 +4,36 @@
 //! environment variable is emitted, and the daemon reports the field as absent. Failure here
 //! never fails the build.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    // A commit changes HEAD (or the packed refs) without touching this crate's sources.
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/refs");
+    // A commit changes HEAD (or the refs) without touching this crate's sources. In a linked
+    // worktree `.git` is a file, not a directory: ask git where the real git dir is. No git means
+    // no watch lines and no build failure.
+    if let Some(dir) = git(&["rev-parse", "--git-dir"]) {
+        let dir = PathBuf::from(dir);
+        let dir = if dir.is_absolute() {
+            dir
+        } else {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(dir)
+        };
+        for path in watch_paths(&dir) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 
     if let Some(commit) = git(&["rev-parse", "--short", "HEAD"]) {
         println!("cargo:rustc-env=CANVAS_BUILD_COMMIT={commit}");
     }
     println!("cargo:rustc-env=CANVAS_BUILD_DATE={}", utc_date());
+}
+
+/// The three files that change when a commit lands: HEAD, the refs tree and the packed refs.
+fn watch_paths(git_dir: &Path) -> Vec<PathBuf> {
+    vec![git_dir.join("HEAD"), git_dir.join("refs"), git_dir.join("packed-refs")]
 }
 
 /// Runs git quietly, returning trimmed stdout only on success.
@@ -52,6 +69,15 @@ fn utc_date() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_worktree_git_dir_watches_head_refs_and_packed_refs() {
+        let dir = PathBuf::from("repo").join(".git").join("worktrees").join("feature");
+        assert_eq!(
+            watch_paths(&dir),
+            vec![dir.join("HEAD"), dir.join("refs"), dir.join("packed-refs")]
+        );
+    }
 
     #[test]
     fn the_date_has_the_shape_a_reader_sees() {

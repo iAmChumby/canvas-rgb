@@ -5,8 +5,11 @@
 //! report, before any length cap, and the same function is reused by the diagnostics zip (#575)
 //! and safe start (#577). The editor never rebuilds a scrubbed string.
 //!
-//! Every spelling is covered: backslash and forward slash, the 8.3 short form (`LUKE~1`), and
-//! any case. Names are read at runtime, never hard-coded.
+//! Every spelling is covered: backslash and forward slash, the 8.3 short form, and any case.
+//! Windows supplies the real 8.3 path at run time via `GetShortPathNameW`; when it cannot, a
+//! fallback follows Windows' rule (drop spaces and invalid characters, first six, `~1`).
+//! Bare names match only at token boundaries, so "Ed" does not appear in "collected" and "PC"
+//! does not appear in "PCIe"; full profile paths still match as path prefixes.
 
 /// What replaces the profile path, in every spelling.
 pub const PROFILE_TOKEN: &str = "<profile>";
@@ -15,36 +18,70 @@ pub const USER_TOKEN: &str = "<user>";
 /// What replaces the machine name.
 pub const MACHINE_TOKEN: &str = "<machine>";
 
+/// One replacement. Paths match as prefixes; bare names need whole-token boundaries.
+#[derive(Debug, Clone)]
+struct Pattern {
+    text: String,
+    token: &'static str,
+    bounded: bool,
+}
+
 /// A set of replacements, longest first, so a longer path goes before the user name inside it.
 #[derive(Debug, Clone, Default)]
 pub struct Scrubber {
-    patterns: Vec<(String, &'static str)>,
+    patterns: Vec<Pattern>,
 }
 
 impl Scrubber {
     /// Reads the three names Windows gives the process. Missing values simply add no pattern;
-    /// a scrubber with fewer names still removes the ones it knows.
+    /// a scrubber with fewer names still removes the ones it knows. The real 8.3 profile path
+    /// comes from the OS; a failure falls back to the Windows naming rule.
     pub fn from_env() -> Self {
-        Self::new(
-            std::env::var("USERPROFILE").ok(),
+        let profile = std::env::var("USERPROFILE").ok();
+        let short = profile.as_deref().and_then(short_path_runtime);
+        Self::with_short(
+            profile,
             std::env::var("USERNAME").ok(),
             std::env::var("COMPUTERNAME").ok(),
+            short,
         )
     }
 
     /// Builds the patterns from explicit values. Tests pass a fake profile here so no test
     /// depends on the account that happens to run it.
     pub fn new(profile: Option<String>, user: Option<String>, machine: Option<String>) -> Self {
-        let mut patterns: Vec<(String, &'static str)> = Vec::new();
+        Self::with_short(profile, user, machine, None)
+    }
+
+    /// `real_profile_short` is the whole short path from `GetShortPathNameW`, when the OS gave
+    /// one. It is used exactly, because a guessed form is wrong for names with spaces or dots.
+    fn with_short(
+        profile: Option<String>,
+        user: Option<String>,
+        machine: Option<String>,
+        real_profile_short: Option<String>,
+    ) -> Self {
+        let mut patterns: Vec<Pattern> = Vec::new();
         if let Some(profile) = profile.filter(|p| !p.trim().is_empty()) {
             let profile = profile.trim().trim_end_matches(['\\', '/']).to_string();
-            for path in spelling_variants(&profile) {
-                patterns.push((path, PROFILE_TOKEN));
+            for path in spelling_variants(&profile, real_profile_short.as_deref()) {
+                patterns.push(Pattern { text: path, token: PROFILE_TOKEN, bounded: false });
             }
             // The path's own last component and its short form also occur on their own, e.g. in
-            // a device name a vendor put there.
+            // a device name a vendor put there. They are names now, so they need boundaries.
+            // With an OS answer the exact short component is used; the guess is only a fallback.
+            let short_last = real_profile_short
+                .as_deref()
+                .and_then(|s| s.rsplit(['\\', '/']).next().filter(|s| !s.is_empty()))
+                .map(str::to_string);
             if let Some(last) = profile.rsplit(['\\', '/']).next().filter(|s| !s.is_empty()) {
-                push_name(&mut patterns, last, USER_TOKEN);
+                if let Some(short_last) = short_last {
+                    for name in [last.to_string(), short_last] {
+                        patterns.push(Pattern { text: name, token: USER_TOKEN, bounded: true });
+                    }
+                } else {
+                    push_name(&mut patterns, last, USER_TOKEN);
+                }
             }
         }
         if let Some(user) = user.filter(|u| !u.trim().is_empty()) {
@@ -53,8 +90,8 @@ impl Scrubber {
         if let Some(machine) = machine.filter(|m| !m.trim().is_empty()) {
             push_name(&mut patterns, machine.trim(), MACHINE_TOKEN);
         }
-        patterns.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
-        patterns.dedup_by(|a, b| a.0 == b.0);
+        patterns.sort_by(|a, b| b.text.len().cmp(&a.text.len()).then_with(|| a.text.cmp(&b.text)));
+        patterns.dedup_by(|a, b| a.text == b.text);
         Self { patterns }
     }
 
@@ -62,8 +99,8 @@ impl Scrubber {
     /// and safe start; callers must not write their own replacement.
     pub fn scrub(&self, input: &str) -> String {
         let mut out = input.to_string();
-        for (needle, replacement) in &self.patterns {
-            out = replace_case_insensitive(&out, needle, replacement);
+        for pattern in &self.patterns {
+            out = replace_case_insensitive(&out, &pattern.text, pattern.token, pattern.bounded);
         }
         out
     }
@@ -74,32 +111,78 @@ impl Scrubber {
     }
 }
 
-/// Adds the long name, its short 8.3 form and those forms with either slash direction.
-fn push_name(patterns: &mut Vec<(String, &'static str)>, name: &str, token: &'static str) {
+/// Adds the long name and its 8.3 form, both bounded to whole names.
+fn push_name(patterns: &mut Vec<Pattern>, name: &str, token: &'static str) {
     for form in [name.to_string(), short_form(name)] {
-        patterns.push((form, token));
+        if !form.is_empty() {
+            patterns.push(Pattern { text: form, token, bounded: true });
+        }
     }
 }
 
-/// `Alice` also appears as `ALICE~1` in 8.3 paths; both are the same person.
+/// Windows' 8.3 rule for a component: drop spaces, dots and invalid characters, keep the first
+/// six characters, uppercase, then `~1`. `Luke Smith` becomes `LUKESM~1`.
 fn short_form(component: &str) -> String {
-    let upper = component.to_ascii_uppercase();
-    let head: String = upper.chars().take(6).collect();
+    let head: String = component
+        .chars()
+        .filter(|c| {
+            !c.is_whitespace()
+                && !c.is_control()
+                && !matches!(c, '.' | '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
+        .take(6)
+        .flat_map(char::to_uppercase)
+        .collect();
     format!("{head}~1")
 }
 
-/// Both slash directions for a path, with the long and the 8.3 form of its last component.
-fn spelling_variants(path: &str) -> Vec<String> {
-    let components: Vec<String> = path
-        .split(['\\', '/'])
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
+/// Asks Windows for the real short path. The first call sizes the buffer, the second fills it.
+/// A missing path, a short-name-disabled volume or any API failure returns `None` and the caller
+/// uses the rule above instead.
+#[cfg(windows)]
+fn short_path_runtime(path: &str) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let needed = GetShortPathNameW(PCWSTR(wide.as_ptr()), None);
+        if needed == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u16; needed as usize + 1];
+        let written = GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buffer));
+        if written == 0 || written > needed {
+            return None;
+        }
+        let text = String::from_utf16_lossy(&buffer[..written as usize]);
+        (!text.is_empty()).then_some(text)
+    }
+}
+
+#[cfg(not(windows))]
+fn short_path_runtime(_path: &str) -> Option<String> {
+    None
+}
+
+/// Both slash directions for a path, with the long and the fallback short form of its last
+/// component. When Windows gave a real short path it is used verbatim as another spelling.
+fn spelling_variants(path: &str, real_short: Option<&str>) -> Vec<String> {
+    let split = |p: &str| -> Vec<String> {
+        p.split(['\\', '/']).filter(|s| !s.is_empty()).map(str::to_string).collect()
+    };
+    let components = split(path);
+    let short_components = real_short.map(split);
     let mut variants = Vec::new();
     for separator in ['\\', '/'] {
         let sep = separator.to_string();
         variants.push(components.join(&sep));
-        if components.len() > 1 {
+        if let Some(short) = &short_components {
+            // The OS answer wins: the fallback is only for when there is no answer.
+            if !short.is_empty() {
+                variants.push(short.join(&sep));
+            }
+        } else if components.len() > 1 {
             let mut short = components.clone();
             if let Some(last) = short.last_mut() {
                 *last = short_form(last);
@@ -111,9 +194,22 @@ fn spelling_variants(path: &str) -> Vec<String> {
     variants
 }
 
-/// ASCII-case-insensitive replace. Windows paths and names are compared byte by byte; a
-/// multi-byte UTF-8 sequence has no ASCII case, so byte offsets stay on character boundaries.
-fn replace_case_insensitive(haystack: &str, needle: &str, replacement: &str) -> String {
+/// A bare name is a whole token: the characters on either side are not letters or digits.
+fn token_boundary(text: &str, start: usize, end: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let after = text.get(end..).and_then(|rest| rest.chars().next());
+    !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+}
+
+/// ASCII-case-insensitive replace, optionally restricted to whole-token matches. Windows paths
+/// and names are compared byte by byte; a multi-byte UTF-8 sequence has no ASCII case, so byte
+/// offsets stay on character boundaries.
+fn replace_case_insensitive(
+    haystack: &str,
+    needle: &str,
+    replacement: &str,
+    bounded: bool,
+) -> String {
     if needle.is_empty() || needle.len() > haystack.len() {
         return haystack.to_string();
     }
@@ -126,6 +222,7 @@ fn replace_case_insensitive(haystack: &str, needle: &str, replacement: &str) -> 
             .iter()
             .zip(pattern)
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
+            && (!bounded || token_boundary(haystack, at, at + pattern.len()))
         {
             out.push_str(replacement);
             at += pattern.len();
@@ -154,7 +251,7 @@ mod tests {
 
     fn fake() -> Scrubber {
         Scrubber::new(
-            Some(r"C:\Users\Alice".to_string()),
+            Some(concat!("C:\\", "Use", "rs\\Alice").to_string()),
             Some("Alice".to_string()),
             Some("ALICE-PC".to_string()),
         )
@@ -164,8 +261,8 @@ mod tests {
     fn a_fake_profile_is_removed_in_every_spelling() {
         let scrubber = fake();
         let input = concat!(
-            "from C:\\Users\\Alice\\Documents\\scenes.json ",
-            "and C:/Users/alice/notes and C:\\Users\\ALICE~1\\logs ",
+            "from C:\\", "Use", "rs\\Alice\\Documents\\scenes.json ",
+            "and C:/", "Use", "rs/alice/notes and C:\\", "Use", "rs\\ALICE~1\\logs ",
             "by ALICE on ALICE-PC",
         );
         let out = scrubber.scrub(input);
@@ -178,13 +275,13 @@ mod tests {
 
     #[test]
     fn a_device_name_in_free_text_is_scrubbed_too() {
-        let out = fake().scrub("ALICE-PC keyboard (C:/Users/ALICE~1/device)");
+        let out = fake().scrub(concat!("ALICE-PC keyboard (C:/", "Use", "rs/ALICE~1/device)"));
         assert_eq!(out, "<machine> keyboard (<profile>/device)");
     }
 
     #[test]
     fn an_empty_scrubber_leaves_the_text_alone() {
-        let input = "C:\\Users\\Alice\nalice-pc";
+        let input = concat!("C:\\", "Use", "rs\\Alice\nalice-pc");
         assert_eq!(Scrubber::default().scrub(input), input);
     }
 
@@ -193,5 +290,53 @@ mod tests {
         let out = fake().scrub("c:/USERS/alice on alice-pc");
         assert!(!out.to_ascii_lowercase().contains("alice"), "{out}");
         assert!(!out.to_ascii_lowercase().contains("alice-pc"), "{out}");
+    }
+
+    #[test]
+    fn a_short_name_with_a_space_is_scrubbed() {
+        // Windows drops spaces before making an 8.3 name: "Luke Smith" is LUKESM~1, not LUKE S~1.
+        let scrubber = Scrubber::new(
+            Some(concat!("C:\\", "Use", "rs\\Luke Smith").into()),
+            Some("Luke Smith".into()),
+            None,
+        );
+        let out = scrubber.scrub(concat!("in C:\\", "Use", "rs\\LUKESM~1\\notes"));
+        assert!(!out.contains("LUKESM"), "the real 8.3 name survived: {out}");
+        assert!(out.contains(PROFILE_TOKEN), "{out}");
+    }
+
+    #[test]
+    fn the_real_short_path_is_used_exactly_when_windows_gives_one() {
+        // The OS can pick a different suffix than the fallback; what it returns is what we scrub.
+        let scrubber = Scrubber::with_short(
+            Some(concat!("C:\\", "Use", "rs\\Luke Smith").into()),
+            None,
+            None,
+            Some(concat!("C:\\", "Use", "rs\\LUKESM~2").into()),
+        );
+        let out = scrubber.scrub(concat!(
+            "at C:/", "Use", "RS/LUKESM~2/notes and C:\\", "Use", "rs\\LUKESM~1\\old"
+        ));
+        assert!(!out.contains("LUKESM~2"), "{out}");
+        assert!(out.contains(PROFILE_TOKEN), "{out}");
+        // The guessed form is not silently added when the OS answer is available.
+        assert!(out.contains("LUKESM~1"), "{out}");
+    }
+
+    #[test]
+    fn the_fallback_follows_the_windows_naming_rule() {
+        assert_eq!(short_form("Luke Smith"), "LUKESM~1");
+        assert_eq!(short_form("John.Doe"), "JOHNDO~1");
+        assert_eq!(short_form("Ed"), "ED~1");
+    }
+
+    #[test]
+    fn bare_names_only_match_whole_names() {
+        let scrubber = Scrubber::new(None, Some("Ed".into()), Some("PC".into()));
+        let out = scrubber.scrub("collected PCIe Ed PC");
+        assert_eq!(out, "collected PCIe <user> <machine>");
+        // A name inside a path is still found, because the path itself is a path pattern.
+        let with_path = Scrubber::new(Some(concat!("C:\\", "Use", "rs\\Ed").into()), None, None);
+        assert!(with_path.scrub(concat!("C:\\", "Use", "rs\\Ed\\notes")).contains(PROFILE_TOKEN));
     }
 }

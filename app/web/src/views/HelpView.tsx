@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  ArrowClockwise,
   ArrowSquareOut,
   BookOpen,
   Check,
@@ -25,6 +26,7 @@ import { settingsStatus } from "@/lib/updateWords";
 import { PageTitle } from "@/shell/PageHeader";
 import type { About } from "@/proto/About";
 import type { AboutReport } from "@/proto/AboutReport";
+import type { LastExit } from "@/proto/LastExit";
 
 const SITE_DOCS = "https://iamchumby.github.io/canvas-rgb/docs/";
 const SOURCE = "https://github.com/iAmChumby/canvas-rgb";
@@ -35,6 +37,18 @@ const CREDITS = "https://github.com/iAmChumby/canvas-rgb/blob/main/docs/thanks.m
 /** A value the daemon did not send reads as unknown; no row is hidden and nothing is invented. */
 function shown(value: string | null | undefined): string {
   return value ?? "unknown";
+}
+
+/** The enum's wire text is not a sentence (#574). */
+function lastExitWords(exit: LastExit | null | undefined): string {
+  if (exit === "clean") return "ended normally";
+  if (exit === "unclean") return "crashed";
+  return "unknown";
+}
+
+/** An address outside the app is opened by the OS, never fetched by the editor. */
+function openAway(href: string): void {
+  void openExternal(href).catch(() => notify("The link could not be opened in your browser.", "warn"));
 }
 
 function IdentityRow({ label, children }: { label: string; children: ReactNode }) {
@@ -60,26 +74,31 @@ export function HelpView() {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const textRef = useRef<string | null>(null);
+  const live = useRef(true);
   const update = useSnap((s) => s.update);
   const status = update ? settingsStatus(update) : null;
 
-  // Once per visit: neither the status poll nor a re-render asks again.
-  useEffect(() => {
-    let live = true;
+  // Once per visit: neither the status poll nor a re-render asks again. Retry asks on purpose.
+  const load = useCallback(() => {
     void Promise.all([api.about(), api.aboutReport()])
       .then(([a, r]) => {
-        if (!live) return;
+        if (!live.current) return;
         textRef.current = r.markdown;
         setAbout(a);
         setReport(r);
       })
       .catch(() => {
-        if (live) setFailed(true);
+        if (live.current) setFailed(true);
       });
-    return () => {
-      live = false;
-    };
   }, []);
+
+  useEffect(() => {
+    live.current = true;
+    load();
+    return () => {
+      live.current = false;
+    };
+  }, [load]);
 
   const receipt = report?.markdown ?? "";
 
@@ -106,34 +125,45 @@ export function HelpView() {
               <div className="help-brand">
                 <BrandMark size={26} />
                 <Wordmark />
-                <span className="fig help-version">{shown(about?.version)}</span>
               </div>
-              <p className="help-hero-note">
-                An app that keeps the lights in one place. The facts below come from the daemon that
-                is running now.
-              </p>
-              <div className="help-facts">
-                <IdentityRow label="Version">{about ? shown(about.version) : undefined}</IdentityRow>
-                <IdentityRow label="Commit">{about ? shown(about.commit) : undefined}</IdentityRow>
-                <IdentityRow label="Built">{about ? shown(about.build_date) : undefined}</IdentityRow>
-                <IdentityRow label="Windows">{about ? shown(about.os) : undefined}</IdentityRow>
-                <IdentityRow label="Service">{about ? shown(about.service_version) : undefined}</IdentityRow>
-                <IdentityRow label="Last run">
-                  {about ? shown(about.last_exit) : undefined}
-                </IdentityRow>
-                <div className="help-fact">
-                  <span className="help-fact-label">Updates</span>
-                  <span className="help-fact-value" aria-busy={update === null || undefined}>
-                    {status ? (
-                      <StateDot tone={status.tone}>{status.text}</StateDot>
-                    ) : (
-                      <InlineSkeleton width="12ch" />
-                    )}
-                  </span>
+              <p className="help-hero-note">Facts from the daemon running on this PC.</p>
+              {failed ? (
+                <div className="help-error">
+                  <p className="error-line">Identity and the system report could not be read.</p>
+                  <Button
+                    icon={<ArrowClockwise size={16} />}
+                    onClick={() => {
+                      setFailed(false);
+                      load();
+                    }}
+                  >
+                    Retry
+                  </Button>
                 </div>
-              </div>
+              ) : (
+                <div className="help-facts">
+                  <IdentityRow label="Version">{about ? shown(about.version) : undefined}</IdentityRow>
+                  <IdentityRow label="Commit">{about ? shown(about.commit) : undefined}</IdentityRow>
+                  <IdentityRow label="Built">{about ? shown(about.build_date) : undefined}</IdentityRow>
+                  <IdentityRow label="Windows">{about ? shown(about.os) : undefined}</IdentityRow>
+                  <IdentityRow label="Service">{about ? shown(about.service_version) : undefined}</IdentityRow>
+                  <IdentityRow label="Last run">
+                    {about ? lastExitWords(about.last_exit) : undefined}
+                  </IdentityRow>
+                  <div className="help-fact">
+                    <span className="help-fact-label">Updates</span>
+                    <span className="help-fact-value" aria-busy={update === null || undefined}>
+                      {status ? (
+                        <StateDot tone={status.tone}>{status.text}</StateDot>
+                      ) : (
+                        <InlineSkeleton width="12ch" />
+                      )}
+                    </span>
+                  </div>
+                </div>
+              )}
               <div className="help-hero-link">
-                <ButtonLink href="/updates/" size="sm" variant="ghost">
+                <ButtonLink href="/updates/" size="sm" icon={<ArrowSquareOut size={14} />}>
                   Release notes for this version
                 </ButtonLink>
               </div>
@@ -143,24 +173,27 @@ export function HelpView() {
               title="System report"
               className="help-report"
               actions={
-                <span className="fig help-count" aria-live="polite" aria-busy={report === null || undefined}>
-                  {report ? `${receipt.length} characters` : <InlineSkeleton width="10ch" />}
-                </span>
+                <div className="help-report-head">
+                  <span className="fig help-count" aria-live="polite" aria-busy={report === null || undefined}>
+                    {report ? `${receipt.length} characters` : <InlineSkeleton width="10ch" />}
+                  </span>
+                  <Button
+                    icon={copied ? <Check size={16} /> : <Copy size={16} />}
+                    onClick={() => void copy()}
+                    disabled={!receipt}
+                    size="sm"
+                  >
+                    {copied ? "Copied" : "Copy"}
+                  </Button>
+                </div>
               }
             >
               {failed ? (
                 <p className="error-line">The report could not be read. Nothing was copied.</p>
               ) : (
                 <>
-                  <Receipt text={receipt} label="System report" />
+                  <Receipt text={receipt} label="System report" loading={report === null} />
                   <div className="help-report-actions">
-                    <Button
-                      icon={copied ? <Check size={16} /> : <Copy size={16} />}
-                      onClick={() => void copy()}
-                      disabled={!receipt}
-                    >
-                      {copied ? "Copied" : "Copy"}
-                    </Button>
                     <span className="mute help-report-note">
                       This is the exact text that goes to the clipboard.
                     </span>
@@ -174,20 +207,40 @@ export function HelpView() {
           <div className="help-side">
             <Panel title="Go to">
               <div className="help-keys">
-                <KeyRow icon={BookOpen} label="Docs" hint="Guides and the API reference" href={SITE_DOCS} />
-                <KeyRow icon={GithubLogo} label="Source" hint="The repository on GitHub" href={SOURCE} />
-                <KeyRow href="/updates/" icon={ClockCounterClockwise} label="Release notes" hint="What changed in each version" />
-                <KeyRow icon={ShieldCheck} label="Privacy" hint="What the app collects" href={PRIVACY} />
-                <KeyRow icon={Star} label="Credits" hint="The people and projects behind it" href={CREDITS} />
+                <KeyRow
+                  icon={BookOpen}
+                  label="Docs"
+                  address="iamchumby.github.io"
+                  href={SITE_DOCS}
+                  external
+                  onOpen={() => openAway(SITE_DOCS)}
+                />
+                <KeyRow
+                  icon={GithubLogo}
+                  label="Source"
+                  address="github.com/iAmChumby/canvas-rgb"
+                  href={SOURCE}
+                  external
+                  onOpen={() => openAway(SOURCE)}
+                />
+                <KeyRow href="/updates/" icon={ClockCounterClockwise} label="Release notes" address="/updates" />
+                <KeyRow
+                  icon={ShieldCheck}
+                  label="Privacy"
+                  address="github.com/iAmChumby/canvas-rgb/docs/privacy.md"
+                  href={PRIVACY}
+                  external
+                  onOpen={() => openAway(PRIVACY)}
+                />
+                <KeyRow
+                  icon={Star}
+                  label="Credits"
+                  address="github.com/iAmChumby/canvas-rgb/docs/thanks.md"
+                  href={CREDITS}
+                  external
+                  onOpen={() => openAway(CREDITS)}
+                />
               </div>
-            </Panel>
-
-            {/* #575 adds Save diagnostics and Report issue here; #577 adds Safe start. No control
-                belongs in this slot yet, so the page names the coming tools without a button. */}
-            <Panel title="Support tools">
-              <p className="mute help-slot-note">
-                Diagnostics, issue reporting and safe start are added in later versions.
-              </p>
             </Panel>
           </div>
         </div>
@@ -196,45 +249,37 @@ export function HelpView() {
   );
 }
 
-/** One key: an icon, a name, one line of plain context, and the address it opens. */
+/** One key: an icon, its name, the address it opens, and the arrow that says it leaves. */
 function KeyRow({
   icon: Glyph,
   label,
-  hint,
+  address,
   href,
+  external = false,
+  onOpen,
 }: {
   icon: Icon;
   label: string;
-  hint: string;
+  address: string;
   href: string;
+  external?: boolean;
+  onOpen?: () => void;
 }) {
-  const content = (
-    <>
+  return (
+    <ButtonLink
+      href={href}
+      variant="ghost"
+      className="help-key"
+      label={label}
+      external={external}
+      onClick={onOpen}
+    >
       <Glyph size={18} className="help-key-icon" aria-hidden="true" />
       <span className="help-key-text">
         <span className="help-key-label">{label}</span>
-        <span className="help-key-hint">{hint}</span>
+        <span className="help-key-address fig">{address}</span>
       </span>
       <ArrowSquareOut size={14} className="help-key-arrow" aria-hidden="true" />
-    </>
-  );
-  if (href.startsWith("/")) {
-    return (
-      <ButtonLink href={href} variant="ghost" className="help-key" label={label}>
-        {content}
-      </ButtonLink>
-    );
-  }
-  return (
-    <a
-      className="btn btn-ghost help-key"
-      href={href}
-      onClick={(e) => {
-        e.preventDefault();
-        void openExternal(href).catch(() => notify("The link could not be opened in your browser.", "warn"));
-      }}
-    >
-      {content}
-    </a>
+    </ButtonLink>
   );
 }

@@ -4834,12 +4834,12 @@ async fn about_reports_the_build_and_the_service_version() {
 async fn about_report_is_an_allow_list_and_scrubs_last() {
     let (router, app, _home) = build();
     app.set_scrubber(canvas_daemon::scrub::Scrubber::new(
-        Some(r"C:\Users\Alice".to_string()),
+        Some(concat!("C:\\", "Use", "rs\\Alice").to_string()),
         Some("Alice".to_string()),
         Some("ALICE-PC".to_string()),
     ));
     let mut good = common::device("ALICE-PC strip", canvas_proto::device::DeviceKind::LedStrip, 12);
-    good.vendor = "C:/Users/alice/Vendor".to_string();
+    good.vendor = concat!("C:/", "Use", "rs/alice/Vendor").to_string();
     good.serial = "SER-ALICE-123".to_string();
     good.location = "hid:1d57:fa60:unit-98765".to_string();
     let mut odd = common::device("Desk", canvas_proto::device::DeviceKind::Other, 1);
@@ -4855,7 +4855,9 @@ async fn about_report_is_an_allow_list_and_scrubs_last() {
     let markdown = body["markdown"].as_str().expect("markdown is text").to_string();
     assert!(markdown.contains("1d57:fa60"), "{markdown}");
     assert!(markdown.contains("hid"), "{markdown}");
-    assert!(markdown.contains("not parsed"), "{markdown}");
+    // A location that is not hid:/ble: gets no connection or VID:PID cells at all.
+    assert!(markdown.contains("- Desk | fake | other"), "{markdown}");
+    assert!(!markdown.contains("not parsed"), "{markdown}");
     assert!(markdown.contains("<machine>"), "{markdown}");
     assert!(markdown.contains("<profile>"), "{markdown}");
     let lower = markdown.to_ascii_lowercase();

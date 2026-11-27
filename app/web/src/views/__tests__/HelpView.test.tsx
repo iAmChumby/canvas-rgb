@@ -1,5 +1,8 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { openExternal } from "@/lib/host";
 import { NAV } from "@/shell/Rail";
 import { HelpView } from "@/views/HelpView";
 import { patchSnap } from "@/lib/store";
@@ -47,7 +50,12 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/help/",
 }));
 vi.mock("next/link", () => ({
-  default: ({ href, children }: { href: string; children?: React.ReactNode }) => <a href={href}>{children}</a>,
+  default: ({ href, children, className, prefetch: _prefetch, ...rest }: {
+    href: string; children?: React.ReactNode; className?: string; prefetch?: boolean;
+  }) => {
+    void _prefetch;
+    return <a href={href} className={className} {...rest}>{children}</a>;
+  },
 }));
 
 vi.mock("@/lib/host", async (importOriginal) => ({
@@ -70,8 +78,9 @@ function update(): UpdateState {
 
 beforeEach(() => {
   writeText.mockClear();
-  api.about.mockResolvedValue(about);
-  api.aboutReport.mockResolvedValue(report);
+  vi.mocked(openExternal).mockClear();
+  api.about.mockReset().mockResolvedValue(about);
+  api.aboutReport.mockReset().mockResolvedValue(report);
   patchSnap({ update: null });
   Object.defineProperty(navigator, "clipboard", {
     value: { writeText },
@@ -120,5 +129,72 @@ describe("the Help & About page", () => {
   it("is a navigation door at every width", () => {
     const help = NAV.find((item) => item.href === "/help/");
     expect(help?.label).toBe("Help & About");
+  });
+
+  it("gives every Go-to row its address and leaves room for two lines", async () => {
+    render(<HelpView />);
+    await screen.findByTestId("receipt-text");
+    const keys = Array.from(document.querySelectorAll(".help-key"));
+    expect(keys).toHaveLength(5);
+    for (const key of keys) {
+      expect(key.querySelector(".help-key-address")?.textContent).toBeTruthy();
+      expect(key.querySelector(".help-key-hint")).toBeNull();
+    }
+    const cssPath = ["src/styles/app.css", "app/web/src/styles/app.css"]
+      .map((p) => resolve(process.cwd(), p))
+      .find((p) => existsSync(p));
+    expect(cssPath).toBeDefined();
+    const css = readFileSync(cssPath!, "utf8");
+    const rule = css.match(/\.help-key\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(rule).toMatch(/height:\s*auto/);
+    expect(rule).toMatch(/white-space:\s*normal/);
+    expect(rule).not.toMatch(/border-radius:\s*0/);
+  });
+
+  it("opens external keys through the host control layer", async () => {
+    render(<HelpView />);
+    await screen.findByTestId("receipt-text");
+    fireEvent.click(screen.getByRole("link", { name: "Docs" }));
+    await waitFor(() =>
+      expect(openExternal).toHaveBeenCalledWith("https://iamchumby.github.io/canvas-rgb/docs/"),
+    );
+  });
+
+  it("puts Copy in the report header beside the character count", async () => {
+    render(<HelpView />);
+    await screen.findByTestId("receipt-text");
+    const copy = screen.getByRole("button", { name: "Copy" });
+    const head = copy.closest(".panel-head");
+    expect(head).not.toBeNull();
+    expect(head?.querySelector(".help-count")).not.toBeNull();
+    expect(head?.querySelector(".receipt")).toBeNull();
+    const notes = screen.getByRole("link", { name: "Release notes for this version" });
+    expect(notes.className).toContain("btn");
+    expect(notes.querySelector("svg")).not.toBeNull();
+  });
+
+  it("shows plain words for the last run", async () => {
+    api.about.mockResolvedValueOnce({ ...about, last_exit: "clean" });
+    render(<HelpView />);
+    await screen.findByText("ended normally");
+    cleanup();
+    api.about.mockResolvedValueOnce({ ...about, last_exit: "unclean" });
+    render(<HelpView />);
+    await screen.findByText("crashed");
+  });
+
+  it("replaces skeletons with an error and a Retry when the fetch fails", async () => {
+    api.about.mockRejectedValueOnce(new Error("down"));
+    api.aboutReport.mockRejectedValueOnce(new Error("down"));
+    render(<HelpView />);
+    expect(await screen.findByText("Identity and the system report could not be read.")).toBeTruthy();
+    expect(screen.queryByTestId("receipt-text")).toBeNull();
+    expect(screen.queryAllByText("unknown")).toHaveLength(0);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("receipt-text").textContent).toBe(report.markdown),
+    );
   });
 });
