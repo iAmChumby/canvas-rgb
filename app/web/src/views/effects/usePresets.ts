@@ -6,7 +6,7 @@
 import { useMemo, useState } from "react";
 import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { applyMergedProps, mergedProps } from "@/views/effects/stackDraft";
 import type { Preset } from "@/proto/Preset";
 import type { PropertySchema } from "@/proto/PropertySchema";
@@ -59,7 +59,7 @@ export function usePresets({
       setPresets((current) => ({ ...current, user: answer.user_presets }));
       setPresetName(null);
     } catch (e) {
-      notify(messageOf(e), "down");
+      notify(errorText(e), "down");
     }
   };
 

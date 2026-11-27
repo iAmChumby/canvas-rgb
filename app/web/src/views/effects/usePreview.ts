@@ -6,7 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { ApiFailure, errorText } from "@/lib/errors";
 import { onStackPreviewFeed } from "@/lib/stackPreview";
 import type { StackSession } from "@/views/effects/stackDraft";
 import type { LoadState } from "@/components/Loading";
@@ -92,7 +92,7 @@ export function usePreview({
         previewRetry.current = setTimeout(() => void sendPreview(true), wait);
         return;
       }
-      setPreviewError(messageOf(e));
+      setPreviewError(errorText(e));
     }
   }
 

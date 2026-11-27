@@ -14,12 +14,14 @@ import {
 } from "@phosphor-icons/react";
 import { Button, ButtonLink } from "@/components/Button";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
+import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
+import { ReportIssue } from "@/components/ReportIssue";
 import { notify } from "@/components/Notify";
 import { Panel, StateDot } from "@/components/Panel";
 import { Receipt } from "@/components/Receipt";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { openExternal } from "@/lib/host";
 import { useSnap } from "@/lib/store";
 import { settingsStatus } from "@/lib/updateWords";
@@ -90,7 +92,7 @@ export function HelpView() {
       await api.setSafeStart(mode);
       // The service restarts the daemon in the chosen mode. The next status poll shows it.
     } catch (e) {
-      notify(messageOf(e), "warn");
+      notify(errorText(e), "warn");
     } finally {
       setModeBusy(false);
     }
@@ -229,6 +231,14 @@ export function HelpView() {
                   {copyFailed && <p className="error-line">The clipboard refused the copy.</p>}
                 </>
               )}
+            </Panel>
+
+            {/* One key in one place: the list before saving, the path and reveal after. */}
+            <div id="diag-panel">
+              <DiagnosticsPanel />
+            </div>
+            <Panel title="Report issue">
+              <ReportIssue report={report} />
             </Panel>
           </div>
 

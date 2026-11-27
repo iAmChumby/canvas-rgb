@@ -16,6 +16,7 @@ path = "src/bin/cli.rs"
 
 [dependencies]
 canvas-proto.workspace = true
+canvas-diag.workspace = true
 canvas-core.workspace = true
 canvas-effects.workspace = true
 canvas-html.workspace = true

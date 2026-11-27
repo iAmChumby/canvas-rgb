@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import {
@@ -28,7 +29,7 @@ import { Slider } from "@/components/Slider";
 import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { refreshLights, retryDevices, useSnap } from "@/lib/store";
 import type { LightPatch } from "@/proto/LightPatch";
 import type { LightView } from "@/proto/LightView";
@@ -289,7 +290,7 @@ function WhiteBalanceSection({
           </div>
         ))}
       </div>
-      {error && !readFailed && <p className="error-line">{error}</p>}
+      {error && !readFailed && <ErrorLine>{error}</ErrorLine>}
     </div>
   );
 }
@@ -313,7 +314,7 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
       await api.lights.patch(light.id, body);
       await refreshLights();
     } catch (e) {
-      setError(messageOf(e));
+      setError(errorText(e));
       throw e;
     } finally {
       setBusy(false);
@@ -458,7 +459,7 @@ export function DevicesView() {
         if (wbRead.current === n) setWhiteBalances(wb);
       })
       .catch((e: unknown) => {
-        if (wbRead.current === n) setWbError(messageOf(e));
+        if (wbRead.current === n) setWbError(errorText(e));
       });
   }, []);
   // "Try again" after a failed read: the error goes, the read is asked for again.
@@ -497,7 +498,7 @@ export function DevicesView() {
         delete next[deviceId];
         return next;
       });
-      setWbError(messageOf(e));
+      setWbError(errorText(e));
     }
   };
 
@@ -511,7 +512,7 @@ export function DevicesView() {
       });
       setWbError(null);
     } catch (e) {
-      setWbError(messageOf(e));
+      setWbError(errorText(e));
     }
   };
 
@@ -782,4 +783,3 @@ export function DevicesView() {
     </div>
   );
 }
-

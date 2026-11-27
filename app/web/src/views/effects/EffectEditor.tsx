@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 // The Effects inspector in edit mode (issue #2, D2.2 to D2.5): the source of an `html:` effect
 // beside the daemon's live preview of it, with Save through the import route, a draft on the
@@ -24,7 +25,7 @@ import { Panel, StateDot } from "@/components/Panel";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { EffectCode } from "@/views/effects/EffectCode";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { ApiFailure, errorText } from "@/lib/errors";
 import { cancelNavigation, continueNavigation, setNavigationGuard } from "@/lib/navigationGuard";
 import { matchingPreset } from "@/lib/presetMatch";
 import { sourceLineOf } from "@/lib/effectSource";
@@ -279,7 +280,7 @@ export function EffectEditor({
         return;
       }
       setPreviewState("error");
-      setPreviewError(messageOf(e));
+      setPreviewError(errorText(e));
     }
   }, []);
 
@@ -379,7 +380,7 @@ export function EffectEditor({
     } catch (e) {
       if (!mounted.current || !draftOn.current) return;
       // One missed beat is survivable: the lease has three. The banner counts what is left.
-      setDraftError(messageOf(e));
+      setDraftError(errorText(e));
       setDraftState("expiring");
       scheduleBeat(heartbeatMs.current);
     }
@@ -407,7 +408,7 @@ export function EffectEditor({
     } catch (e) {
       if (!mounted.current) return;
       setDraftState("off");
-      setDraftError(messageOf(e));
+      setDraftError(errorText(e));
     }
   };
 
@@ -433,7 +434,7 @@ export function EffectEditor({
     } catch (e) {
       if (!mounted.current) return;
       setDraftState("restore-error");
-      setDraftError(messageOf(e));
+      setDraftError(errorText(e));
     }
   };
 
@@ -529,7 +530,7 @@ export function EffectEditor({
         })
         .catch((e: unknown) => {
           if (!mounted.current) return;
-          setDraftError(messageOf(e));
+          setDraftError(errorText(e));
           setDraftState("expiring");
         });
     }
@@ -581,7 +582,7 @@ export function EffectEditor({
         setClash(wanted);
         return;
       }
-      setSaveError(messageOf(e));
+      setSaveError(errorText(e));
       setClash(null);
       return;
     }
@@ -590,7 +591,7 @@ export function EffectEditor({
       await api.activateEffect(savedId, { props: {}, preset: null });
       await refreshAll();
     } catch (e) {
-      startError = messageOf(e);
+      startError = errorText(e);
       setSaveError(`Saved, but it did not start: ${startError}`);
       // The saved file did not start, so the draft it would have replaced is stopped too: the
       // lights go back to what they were before it, and the screen says what happened. A stop
@@ -602,7 +603,7 @@ export function EffectEditor({
         } catch (stopError) {
           draftOn.current = true;
           setDraftState("restore-error");
-          setDraftError(messageOf(stopError));
+          setDraftError(errorText(stopError));
           pendingSaved.current = { id: savedId, name: savedName, startError };
           setSaving(false);
           setClash(null);
@@ -721,7 +722,7 @@ export function EffectEditor({
           ))}
         </ul>
       )}
-      {previewError && <p className="error-line eff-preview-error">{previewError}</p>}
+      {previewError && <ErrorLine className="eff-preview-error">{previewError}</ErrorLine>}
     </div>
   );
 

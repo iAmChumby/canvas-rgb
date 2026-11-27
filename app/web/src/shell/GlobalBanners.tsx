@@ -3,12 +3,12 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { ArrowCircleUp, FolderOpen, WarningCircle, FilmSlate, Lightning, Warning, WarningOctagon } from "@phosphor-icons/react";
+import { ArrowCircleUp, Copy, FolderOpen, WarningCircle, FilmSlate, Lightning, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
+import { ReportIssue } from "@/components/ReportIssue";
 import { Button, ButtonLink } from "@/components/Button";
-import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
-import { canUpdate, openLogsFolder, tauriHost, updateInstall, updateLater, updateSkip } from "@/lib/host";
+import { canUpdate, openLogsFolder, openServiceLogsFolder, tauriHost, updateInstall, updateLater, updateSkip } from "@/lib/host";
 import { sendUpdate } from "@/lib/updateActions";
 import { installFailedSentence, isInstalling, isSkipped } from "@/lib/updateWords";
 import { messageOf } from "@/lib/errors";
@@ -18,6 +18,7 @@ import { patchSnap, useSnap } from "@/lib/store";
 import { UpdatedToast } from "@/shell/UpdatedToast";
 import { requestChainSetup } from "@/views/chain/request";
 import type { SafeStart } from "@/proto/SafeStart";
+import type { AboutReport } from "@/proto/AboutReport";
 
 /** The service banner appears after this many ms without the fan service (G4). */
 const SERVICE_BANNER_MS = 10_000;
@@ -235,9 +236,64 @@ export function GlobalBanners() {
             canvas-rgb has not heard from the fan service for{" "}
             {status.service_down_ms === null ? "a while" : fmtSeconds(status.service_down_ms)}. The lights are
             unaffected.
+            <ServiceBannerKeys />
           </Banner>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The service banner's keys (#576 item 4): the daemon answers here, so its report is available.
+ * Opening the service log folder is a fixed-path tray command that never writes to the machine
+ * tree; if it is refused the row says so and names the folder to open by hand.
+ */
+function ServiceBannerKeys() {
+  const [report, setReport] = useState<AboutReport | null>(null);
+  const [showReport, setShowReport] = useState(false);
+  const [refused, setRefused] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const copy = () => {
+    const text = `Fan control has been unavailable for a while. Windows: ${report?.windows ?? "unknown"}`;
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => setCopied(true))
+      .catch(() => setRefused("The clipboard refused the copy."));
+  };
+
+  const reportKey = () => {
+    setShowReport(true);
+    if (!report) {
+      void api.aboutReport().then(setReport).catch((e: unknown) => setRefused(messageOf(e)));
+    }
+  };
+
+  return (
+    <div className="upd-banner-acts">
+      <Button size="sm" variant="ghost" icon={<Copy size={15} />} onClick={copy}>
+        {copied ? "Copied details" : "Copy details"}
+      </Button>
+      <Button size="sm" variant="ghost" onClick={reportKey}>
+        Report issue
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        icon={<FolderOpen size={15} />}
+        disabled={tauriHost() === null}
+        onClick={() =>
+          void openServiceLogsFolder().catch(() =>
+            setRefused("The service log folder could not be opened. Open %ProgramData%\\canvas-rgb\\logs by hand."),
+          )
+        }
+      >
+        Open service logs
+      </Button>
+      {tauriHost() === null ? <span className="mute upd-note">Tray app only</span> : null}
+      {refused ? <span className="mute upd-note">{refused}</span> : null}
+      {showReport ? <ReportIssue report={report} compact /> : null}
     </div>
   );
 }

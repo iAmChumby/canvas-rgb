@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import { Fragment, useMemo, useState } from "react";
 import { ArrowClockwise, FloppyDisk, ThermometerSimple, WarningOctagon } from "@phosphor-icons/react";
@@ -13,7 +14,7 @@ import { Select } from "@/components/Select";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Toggle } from "@/components/Toggle";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { refreshDisplays, retryDisplays, useSnap } from "@/lib/store";
 import type { DisplayConfig } from "@/proto/DisplayConfig";
 import type { DisplaySource } from "@/proto/DisplaySource";
@@ -234,7 +235,7 @@ function DisplayCard({
       await api.putDisplay(row.info.id, draft);
       await refreshDisplays();
     } catch (e) {
-      setError(messageOf(e));
+      setError(errorText(e));
     } finally {
       setDoing(null);
     }
@@ -247,7 +248,7 @@ function DisplayCard({
       await api.deleteDisplay(row.info.id);
       await refreshDisplays();
     } catch (e) {
-      setError(messageOf(e));
+      setError(errorText(e));
     } finally {
       setDoing(null);
     }
@@ -396,7 +397,7 @@ function DisplayCard({
             </span>
           </Field>
 
-          {error && <p className="error-line">{error}</p>}
+          {error && <ErrorLine>{error}</ErrorLine>}
         </div>
       </div>
     </Panel>

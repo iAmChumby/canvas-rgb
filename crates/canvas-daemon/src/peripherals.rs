@@ -1185,7 +1185,17 @@ pub fn no_longer_there(name: &str) -> String {
 /// the log, where the caller puts it.
 pub fn user_words(error: &AdapterError) -> String {
     match error {
-        AdapterError::Protocol(message) => message.clone(),
+        // A `Protocol` error used to be printed verbatim. An adapter's refusal may be written
+        // for a person, but a link failure carries raw technical text (#572). Keep the sentence
+        // only when it is already plain; otherwise give the same next step as the other arms.
+        AdapterError::Protocol(message) => {
+            if plain_sentence(message) {
+                message.clone()
+            } else {
+                "The device did not answer as expected. Check that it is connected and press Read again."
+                    .to_string()
+            }
+        }
         AdapterError::Unsupported(message) => (*message).to_string(),
         AdapterError::NotConnected => "The device is not connected. Check that it is switched on and \
             plugged in or paired, then press Read again."
@@ -1200,6 +1210,16 @@ pub fn user_words(error: &AdapterError) -> String {
             })
         }
     }
+}
+
+/// True when a `Protocol` message is already a sentence a person can act on. A technical line
+/// (`protocol:`, hex bytes, ids) goes only to the log; the caller gets the plain next step.
+fn plain_sentence(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if lower.starts_with("protocol:") || lower.starts_with("io:") {
+        return false;
+    }
+    message.contains(' ') && message.ends_with(['.', '?', '!'])
 }
 
 /// True when the error means the device is gone or the link failed, not that the request was

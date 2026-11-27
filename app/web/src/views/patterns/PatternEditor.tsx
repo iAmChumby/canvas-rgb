@@ -29,7 +29,7 @@ import { ShapePicker, type Shape } from "@/components/ShapePicker";
 import { useFocusTrap } from "@/components/useFocusTrap";
 import { BLACK_HEX, parseHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { cancelNavigation, continueNavigation, hasPendingNavigation } from "@/lib/navigationGuard";
 import { motionOffNow } from "@/lib/motion";
 import { kindWords } from "@/lib/patternFit";
@@ -177,7 +177,7 @@ export function PatternEditor({
         setProblem(null);
       } catch (error) {
         if (!alive.current) return;
-        setProblem(messageOf(error));
+        setProblem(errorText(error));
       }
     },
     [epoch],
@@ -214,7 +214,7 @@ export function PatternEditor({
       await refreshLights();
     } catch (error) {
       // The note row is gone with the editor: no state update after the unmount (#491).
-      if (alive.current) setShapeProblem(messageOf(error));
+      if (alive.current) setShapeProblem(errorText(error));
       throw error;
     }
   }, []);
@@ -346,7 +346,7 @@ export function PatternEditor({
       await refreshLights();
       identifyFirst(led);
     } catch (error) {
-      setShapeProblem(messageOf(error));
+      setShapeProblem(errorText(error));
     }
   };
   const setReversed = async (next: boolean) => {
@@ -359,7 +359,7 @@ export function PatternEditor({
       );
       await refreshLights();
     } catch (error) {
-      setShapeProblem(messageOf(error));
+      setShapeProblem(errorText(error));
     }
   };
 
@@ -422,7 +422,7 @@ export function PatternEditor({
     } catch (error) {
       // The save failed, so the editor is not leaving after all.
       pendingLeave.current = false;
-      setSaveProblem(messageOf(error));
+      setSaveProblem(errorText(error));
     }
     setSaving(false);
     if (landed) then?.();

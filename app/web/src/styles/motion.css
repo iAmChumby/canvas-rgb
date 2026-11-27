@@ -331,6 +331,16 @@
   margin-top: var(--s2);
 }
 
+/* #576: the recovery keys on a full-page state. One row at 1440, wrapping at phone width. */
+.state-page-keys { margin-top: var(--s3); }
+.recovery-keys { display: flex; flex-direction: column; gap: var(--s3); }
+.recovery-keys-row { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.recovery-refused { margin: 0; color: var(--warn); font-size: var(--t14); }
+.recovery-panel {
+  padding: var(--s3); border: 1px solid var(--line-2); border-radius: 8px;
+  background: var(--panel); font-size: var(--t14); color: var(--dim);
+}
+
 .state-page-detail,
 .state-detail {
   color: var(--mute);

@@ -19,6 +19,7 @@ pub mod peripherals;
 pub mod preview;
 pub mod safe_start;
 pub mod scenes;
+pub mod scrub_errors;
 pub mod settings;
 pub mod stack_preview;
 pub mod stacks;
@@ -157,14 +158,21 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::QUIT, post(status::quit))
         .route(routes::UPDATE_INSTALL, post(update::install))
         .route(routes::DIAG_READBACK, get(diag::readback))
+        .route(routes::DIAG_BUNDLE, get(diag::bundle_list).post(diag::bundle_write))
         .route("/api/v1/diag/fail-sensor", post(diag::fail_sensor))
         .route(routes::PREVIEW, get(preview::preview))
         .route(routes::PREVIEW_LIGHTS, get(preview::preview_lights))
         .route(routes::PREVIEW_GROUP, get(preview::preview_group));
 
+    // Added last, so the scrub layer runs outermost: it sees the guard's refusals as well as
+    // the routes' own errors and axum's plain-text extractor rejections.
     api.layer(axum::middleware::from_fn_with_state(
         app.clone(),
         crate::auth::guard,
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        app.clone(),
+        scrub_errors::scrub_errors,
     ))
     .with_state(app)
 }
@@ -249,8 +257,8 @@ impl axum::response::IntoResponse for ApiFailure {
             message: self.message,
             line: self.line,
             column: self.column,
-            // #576: the build fills the next step.
-            hint: None,
+            // #576: the next step, in plain words. The response layer scrubs it with the message.
+            hint: Some(scrub_errors::hint_for(self.code).to_string()),
         };
         let mut response = (self.status, axum::Json(body)).into_response();
         if let Some(seconds) = self.retry_after {

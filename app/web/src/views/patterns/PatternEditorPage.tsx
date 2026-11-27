@@ -17,7 +17,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BLACK_HEX, hsvToHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { refreshPatterns } from "@/lib/store";
 import { PATTERN_GUARD, PatternEditor } from "@/views/patterns/PatternEditor";
 import type { Arrangement } from "@/proto/Arrangement";
@@ -64,7 +64,7 @@ export function PatternEditorPage() {
         setPattern(loaded);
         if (query.get("note") === "1") setNote(NO_DEVICE);
       } catch (e) {
-        if (!cancelled) setError(messageOf(e));
+        if (!cancelled) setError(errorText(e));
       }
     })();
     return () => {

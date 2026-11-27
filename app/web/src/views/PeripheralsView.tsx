@@ -37,7 +37,7 @@ import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { notify } from "@/components/Notify";
 import { UnreadValue } from "@/components/UnreadValue";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { POLL_MS, usePoll } from "@/lib/usePoll";
 import {
   choiceWord,
@@ -396,7 +396,7 @@ export function PeripheralsView() {
     } catch (e) {
       if (n !== detailRequest.current) return;
       setLoaded(null);
-      setDetailError(messageOf(e));
+      setDetailError(errorText(e));
       setChangeSaved(landed);
     } finally {
       if (forceRead) rereading.current = false;
@@ -434,7 +434,7 @@ export function PeripheralsView() {
         setSaveErrors((prev) => keepLive(prev, live));
       })
       .catch((e: unknown) => {
-        if (!stop && !background) setListError(messageOf(e));
+        if (!stop && !background) setListError(errorText(e));
       })
       .finally(() => {
         if (!stop) setListBusy(false);
@@ -487,7 +487,7 @@ export function PeripheralsView() {
         if (stop || n !== detailRequest.current) return;
         setReloadingId(null);
         setLoaded(null);
-        setDetailError(messageOf(e));
+        setDetailError(errorText(e));
         setChangeSaved(false);
       });
     return () => {
@@ -578,7 +578,7 @@ export function PeripheralsView() {
     } catch (e) {
       // The change itself failed: nothing was changed.
       noteFailure(detail.info.id, true);
-      setDeviceSaveError(detail.info.id, messageOf(e));
+      setDeviceSaveError(detail.info.id, errorText(e));
       setSaving(false);
       return;
     }
@@ -614,7 +614,7 @@ export function PeripheralsView() {
     } catch (e) {
       // The change itself failed: nothing was changed.
       noteFailure(detail.info.id, false);
-      setDeviceSaveError(detail.info.id, messageOf(e));
+      setDeviceSaveError(detail.info.id, errorText(e));
       return;
     }
     // The access is saved. The read that follows only refreshes the page.

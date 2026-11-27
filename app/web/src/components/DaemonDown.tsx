@@ -2,12 +2,14 @@
 
 import { CloudSlash } from "@phosphor-icons/react";
 import { StatePage } from "@/components/StatePage";
+import { RecoveryKeys } from "@/components/RecoveryKeys";
 
 /**
  * The state the whole editor shows when it cannot reach canvas-rgb.
  *
- * It says what is wrong in one line, what keeps working in two, and offers a retry that
- * says it is retrying.
+ * The service relaunches a crashed daemon by itself (#576 R8), so the page says that in one line
+ * and offers the recovery keys. It makes no claim about the lights' last frame: the editor cannot
+ * read that state with the daemon down, so it does not guess.
  */
 export function DaemonDown({
   onRetry,
@@ -15,9 +17,7 @@ export function DaemonDown({
   nextTryInMs,
 }: {
   onRetry: () => Promise<void>;
-  /** When the daemon was last tried, 0 when it has not been tried yet. */
   lastTryAt?: number;
-  /** How long until the next try, in milliseconds. */
   nextTryInMs?: number;
 }) {
   return (
@@ -25,10 +25,19 @@ export function DaemonDown({
       icon={<CloudSlash size={26} />}
       title="canvas-rgb is not answering"
       lead="canvas-rgb draws the lights on 127.0.0.1:9430. It may still be starting, or it may have stopped."
-      keeps={["The lights keep the frame they had.", "The fans stay under BIOS control."]}
+      keeps={[
+        "canvas-rgb restarts it by itself; if it keeps stopping, save diagnostics and report it.",
+        "The fans stay under BIOS control.",
+      ]}
       onRetry={onRetry}
       lastTryAt={lastTryAt}
       nextTryInMs={nextTryInMs}
+      keys={
+        <RecoveryKeys
+          title="canvas-rgb is not answering"
+          detail="The daemon did not answer. It may be stopping or restarting."
+        />
+      }
     />
   );
 }

@@ -127,6 +127,8 @@ const DESCRIPTIONS = {
   "ONBOARDING_COMPLETE:POST": "Records that first-run onboarding has finished.",
   "DISMISS_ZONE_PANEL:POST": "Dismisses the first-run prompt to size the ARGB headers.",
   "DIAG_READBACK:GET": "Reads the colours the hardware reports back from the devices.",
+  "DIAG_BUNDLE:GET": "Lists the files and sizes a diagnostics zip would hold, before anything is written. Every file is scrubbed and every device id is given a per-bundle alias when the zip is written; `service_logs` says why the machine-wide logs are not included. Nothing is saved by this request.",
+  "DIAG_BUNDLE:POST": "Writes the diagnostics zip to the given folder, or to the app's diagnostics folder when the body is empty, and answers with its path, the file list, how many names were replaced and why the service logs were included or not. The API token is never in the zip, and the machine-wide log folder is only read: never written, deleted or adopted.",
   "DIAG_FAIL_SENSOR:POST": "Makes a temperature source report a failure, for a safety test. The source is `cpu`, `gpu` or `board:<name>`; any other value answers 422.",
 };
 
@@ -204,6 +206,7 @@ const TITLES = {
   "/api/v1/onboarding/complete": "Complete onboarding",
   "/api/v1/first-run/dismiss-zone-panel": "Dismiss zone panel",
   "/api/v1/diag/readback": "Readback",
+  "/api/v1/diag/bundle": "Diagnostics bundle",
   "/api/v1/diag/fail-sensor": "Fail sensor",
 };
 
@@ -549,6 +552,8 @@ const EXAMPLE_BODIES = {
   },
   "STACK:PUT": { id: "stack:example", layers: [] },
   "STACK_PREVIEW:PUT": { stack: { id: "stack:example", layers: [] }, epoch: "a1b2c3d4e5f60718", seq: 1 },
+  // An optional folder under the caller's own tree; omit the key for the app's default folder.
+  "DIAG_BUNDLE:POST": { path: "D:\\canvas-rgb-diag" },
   // The route insists on an absolute path. This one names no user folder: a reader pastes it
   // after downloading a build to the same drive. The signature is a placeholder of the right
   // shape (non-empty text under 4096 bytes); the service checks the real signature again.
@@ -708,6 +713,8 @@ const FIELD_MEANINGS = {
   "DeviceInfo.vendor": "The device's manufacturer.",
   "DeviceInfo.zones": "The zones the device has.",
   "DevicesResponse.devices": "The devices the daemon knows, with their zones.",
+  "DiagBundle.files": "The files in the zip, with their names inside it and their sizes before scrubbing. The GET answer lists them without writing anything.",
+  "BundleWriteRequest.path": "A folder under the person's own tree to write the zip into. Leave it out for the app's diagnostics folder.",
   "DisplayConfig.blink_above": "The value at or above which the display blinks; null leaves it steady.",
   "DisplayConfig.decimals": "How many digits follow the decimal point.",
   "DisplayConfig.device": "The display the config belongs to.",

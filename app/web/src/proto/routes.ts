@@ -70,6 +70,8 @@ export const routes = {
   configImport: "/api/v1/config/import",
   quit: "/api/v1/quit",
   diagReadback: "/api/v1/diag/readback",
+  // #575: GET lists the files a diagnostics zip would hold; POST writes it.
+  diagBundle: "/api/v1/diag/bundle",
   // WebSocket; binary frames: u16 LE width, u16 LE height, width*height*3 RGB bytes.
   // Browsers cannot set headers on a WebSocket: pass the token as `?token=`.
   preview: "/api/v1/preview",

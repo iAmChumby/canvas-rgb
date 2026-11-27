@@ -22,6 +22,7 @@ export function StatePage({
   onRetry,
   lastTryAt,
   nextTryInMs,
+  keys,
 }: {
   /** The mark at the top of the page. */
   icon: ReactNode;
@@ -38,6 +39,8 @@ export function StatePage({
   lastTryAt?: number;
   /** How long until the next try, in milliseconds. */
   nextTryInMs?: number;
+  /** The recovery keys: logs, diagnostics, report, details. Reserved room, no layout shift. */
+  keys?: ReactNode;
 }) {
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -94,6 +97,7 @@ export function StatePage({
             {lastTryAt ? `tried ${ago} s ago · next in ${next} s` : "not tried yet"}
           </span>
         </div>
+        {keys ? <div className="state-page-keys">{keys}</div> : null}
       </div>
     </div>
   );

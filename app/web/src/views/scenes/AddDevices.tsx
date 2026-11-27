@@ -14,7 +14,7 @@ import { Trash } from "@phosphor-icons/react";
 import { api } from "@/lib/endpoints";
 import { Button, IconButton } from "@/components/Button";
 import { notify } from "@/components/Notify";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { driven } from "@/lib/drive";
 import { refreshLights, refreshScenes } from "@/lib/store";
 import { shownWords } from "@/views/chain/limits";
@@ -105,7 +105,7 @@ export function AddDevices({ groupId, lights, use, onClose, onPicked, onEmptied 
       notify(text);
       setConfirming(null);
     } catch (e) {
-      notify(`The light could not be removed: ${messageOf(e)}`, "down");
+      notify(`The light could not be removed: ${errorText(e)}`, "down");
     } finally {
       setRemoving(null);
     }

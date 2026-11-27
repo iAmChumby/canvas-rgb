@@ -18,7 +18,7 @@ import { useMediaQuery } from "@/components/MediaQuery";
 import { NameField } from "@/components/NameField";
 import { Panel } from "@/components/Panel";
 import { Popover } from "@/components/Popover";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { ApiFailure, errorText } from "@/lib/errors";
 import { diffProps, nameTaken } from "@/lib/presetMatch";
 import type { RunningPreset } from "@/lib/runningPreset";
 import type { Preset } from "@/proto/Preset";
@@ -38,7 +38,7 @@ const DIFF_SHOWN = 2;
 function explain(e: unknown, doing: Doing): string {
   if (e instanceof ApiFailure && (e.status === 409 || e.status === 422)) return e.message;
   // "could not save the effects: access is denied" -> "Access is denied": the verb is said once, up front.
-  const bare = messageOf(e).replace(/^could not [a-z ]+: /i, "");
+  const bare = errorText(e).replace(/^could not [a-z ]+: /i, "");
   const reason = bare.charAt(0).toUpperCase() + bare.slice(1);
   const failed: Record<Doing, string> = {
     apply: "Not applied",

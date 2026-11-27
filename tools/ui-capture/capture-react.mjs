@@ -224,8 +224,9 @@ function serveStatic(port, dir) {
 // The __TAURI__ stand-in: shaped exactly like app/web/src/lib/host.ts
 // (TauriGlobal { core.invoke, event.listen }). Commands from
 // app/web/src/proto/tauri.ts that host.ts invokes.
-function tauriInit({ daemonBase, token, theme, suppressChain }) {
+function tauriInit({ daemonBase, token, theme, suppressChain, fault }) {
   window.__uiCaptureTheme = theme;
+  window.__uiCaptureFault = fault ?? "";
   try {
     localStorage.setItem("canvas-rgb.theme", theme);
     if (suppressChain) {
@@ -254,7 +255,34 @@ function tauriInit({ daemonBase, token, theme, suppressChain }) {
       case "get_api_config":
         return { base_url: daemonBase, token };
       case "open_logs_folder":
+      case "open_service_logs_folder":
+      case "reveal_diag_bundle":
         return undefined;
+      // #575: the tray's diagnostics commands work with the daemon down. The stand-in answers
+      // with fakes, so the Help page's list and saved states can both be captured.
+      case "diag_bundle_list":
+        if (window.__uiCaptureFault === "diag-error") {
+          throw new Error("The diagnostics file list could not be read. Try again in a moment.");
+        }
+        return {
+          path: null,
+          files: [
+            { name: "config/zones.json", bytes: 1824 },
+            { name: "config/config.toml", bytes: 612 },
+            { name: "logs/canvas-rgbd.2026-11-27.log", bytes: 8192 },
+          ],
+          replaced: 0,
+          service_logs: "not included: the service log folder is not there",
+        };
+      case "diag_bundle_save":
+        return {
+          path: "D:\\capture\\canvas-rgb-diag.zip",
+          files: [{ name: "config/zones.json", bytes: 1824 }],
+          replaced: 3,
+          service_logs: "not included: the service log folder is not there",
+        };
+      case "report_prefill":
+        return { version: "0.20.0", windows: "Windows 11 Pro 10.0.26100" };
       case "update_state":
         return { ...updateState };
       case "update_check_now":
@@ -315,12 +343,58 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
   page.on("console", onConsole);
   page.on("response", onResponse);
   page.on("requestfailed", onRequestFailed);
+  // UI_CAPTURE_FAULT drives the recovery surfaces without touching real services:
+  //   down     - the daemon cannot be reached at all (DaemonDown)
+  //   engine   - status answers 503, the render engine is down (EngineDown)
+  //   service  - status reports the fan service away (the standing banner and its keys)
+  //   inline   - one route answers a scrubbed error (the inline ErrorState anatomy)
+  const fault = process.env.UI_CAPTURE_FAULT ?? "";
+  if (fault === "down") {
+    await page.route(`${daemonBase}/api/v1/status`, (route) => route.abort("failed"));
+  } else if (fault) {
+    await page.route(`${daemonBase}/api/v1/status`, async (route) => {
+      if (fault === "engine") {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "service_unavailable",
+            message: "the render engine is not answering",
+            hint: "Save diagnostics and report the problem if it keeps happening.",
+          }),
+        });
+        return;
+      }
+      const response = await route.fetch();
+      if (fault !== "service") {
+        await route.fulfill({ response });
+        return;
+      }
+      const status = await response.json();
+      status.service_down_ms = 14_000;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(status) });
+    });
+    if (fault === "inline") {
+      await page.route(`${daemonBase}/api/v1/devices`, (route) =>
+        route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "service_unavailable",
+            message: "The fan service is not answering.",
+            hint: "The fans stay on BIOS control. Try again in a moment.",
+          }),
+        }),
+      );
+    }
+  }
   // The theme lives in localStorage before load (like the existing scripts)
   // and the __TAURI__ stand-in is injected on every navigation.
   await page.addInitScript(tauriInit, {
     daemonBase,
     token,
     theme,
+    fault,
     suppressChain: Boolean(process.env.UI_CAPTURE_SUPPRESS_CHAIN_SETUP),
   });
   const url = base + view.path;
@@ -412,15 +486,18 @@ async function main() {
     await new Promise((r) => server.close(r));
   }
   const unexplainedConsole = (s) =>
-    s.consoleErrors.filter(
+    faultsOn ? 0 : s.consoleErrors.filter(
       (m) => !(s.slowThumbnails.length > 0 && /status of 503 \(Service Unavailable\)/.test(m)),
     ).length;
+  // A deliberate fault is the surface under test: its 503 and its refused status request are
+  // expected, so they are reported in the JSON but do not fail the run.
+  const faultsOn = Boolean(process.env.UI_CAPTURE_FAULT);
   const failed = shots.filter(
     (s) =>
       s.pageErrors.length > 0 ||
-      s.apiFailures.length > 0 ||
-      s.requestFailures.length > 0 ||
-      s.notLoaded.length > 0 ||
+      (!faultsOn && s.apiFailures.length > 0) ||
+      (!faultsOn && s.requestFailures.length > 0) ||
+      (!faultsOn && s.notLoaded.length > 0) ||
       unexplainedConsole(s) > 0,
   );
   const report = {

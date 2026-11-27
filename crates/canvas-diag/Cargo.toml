@@ -1,0 +1,26 @@
+[package]
+name = "canvas-diag"
+description = "One scrubber and one diagnostics-bundle writer, shared by the daemon and the tray."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+canvas-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip = { version = "9", default-features = false, features = ["deflate", "time"] }
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# `Win32_Storage_FileSystem` supplies `GetShortPathNameW` (the real 8.3 profile path) and
+# the reparse-point check on the machine log folder. `Win32_Security` and its
+# `Win32_Security_Authorization` submodule supply the owner check; `Win32_Foundation`
+# supplies `LocalFree`. All are features of the existing `windows` dependency, not new crates.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+] }

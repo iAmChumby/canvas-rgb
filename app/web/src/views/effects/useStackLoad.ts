@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { LoadState } from "@/components/Loading";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import type { Preset } from "@/proto/Preset";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { Stack } from "@/proto/Stack";
@@ -103,7 +103,7 @@ export function useStackLoad({
       })
       .catch((e: unknown) => {
         if (!mountedRef.current) return;
-        setLoadError(messageOf(e));
+        setLoadError(errorText(e));
         setPhase("error");
       });
   }, [initialName, isNew, loadDetails, loadPresets, mountedRef, areaDraggingRef, pick, resetDraft]);

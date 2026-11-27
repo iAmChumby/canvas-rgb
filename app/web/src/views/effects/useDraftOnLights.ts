@@ -6,7 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import type { StackSession } from "@/views/effects/stackDraft";
 import type { DraftStatus } from "@/proto/DraftStatus";
 import type { Stack } from "@/proto/Stack";
@@ -61,7 +61,7 @@ export function useDraftOnLights({
       setDraftError(null);
     } catch (e) {
       if (!mounted.current || !draftOn.current) return;
-      setDraftError(messageOf(e));
+      setDraftError(errorText(e));
       setDraftState("expiring");
     }
   }
@@ -99,7 +99,7 @@ export function useDraftOnLights({
     } catch (e) {
       if (!mounted.current) return;
       setDraftState("off");
-      setDraftError(messageOf(e));
+      setDraftError(errorText(e));
     }
   };
 
@@ -121,7 +121,7 @@ export function useDraftOnLights({
     } catch (e) {
       if (!mounted.current) return;
       setDraftState("restore-error");
-      setDraftError(messageOf(e));
+      setDraftError(errorText(e));
     }
   };
 

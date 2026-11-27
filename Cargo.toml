@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/canvas-proto",
+    "crates/canvas-diag",
     "crates/canvas-client",
     "crates/canvas-core",
     "crates/canvas-effects",
@@ -21,6 +22,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 canvas-proto = { path = "crates/canvas-proto" }
+canvas-diag = { path = "crates/canvas-diag" }
 canvas-client = { path = "crates/canvas-client" }
 canvas-core = { path = "crates/canvas-core" }
 canvas-effects = { path = "crates/canvas-effects" }

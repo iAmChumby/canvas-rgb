@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useState } from "react";
 import { Button, ButtonLink } from "@/components/Button";
@@ -6,7 +7,7 @@ import { Field, StateDot } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Toggle } from "@/components/Toggle";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import {
   canUpdate,
   getTrayPrefs,
@@ -56,7 +57,7 @@ export function UpdatesPanel() {
     setErr(null);
     void setUpdateChannel(experimental ? "experimental" : "stable")
       .then(setPrefs)
-      .catch((e: unknown) => setErr(messageOf(e)));
+      .catch((e: unknown) => setErr(errorText(e)));
   };
 
   // The editor the tray opens (#202). Only an experimental build has the choice: the running
@@ -66,7 +67,7 @@ export function UpdatesPanel() {
     setErr(null);
     void setEditor(editor)
       .then(setPrefs)
-      .catch((e: unknown) => setErr(messageOf(e)));
+      .catch((e: unknown) => setErr(errorText(e)));
   };
 
   const status = u ? settingsStatus(u) : null;
@@ -135,7 +136,7 @@ export function UpdatesPanel() {
         )}
       </div>
       {!acts && <p className="mute upd-note">Tray app only</p>}
-      {err && <p className="error-line">{err}</p>}
+      {err && <ErrorLine>{err}</ErrorLine>}
     </>
   );
 }

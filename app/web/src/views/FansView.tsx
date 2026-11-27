@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, WarningCircle, X } from "@phosphor-icons/react";
@@ -25,7 +26,7 @@ import { FanBulkBar } from "@/views/FanBulk";
 import { TACH_ONLY_WHY, UNAVAILABLE_WHY, UNREAD_DUTY_WHY, canDrive, isHandedBack, isUnavailable, noDutyWhy, plainLabel } from "@/lib/fanBulk";
 import { api } from "@/lib/endpoints";
 import { writeFanMode } from "@/lib/fanWrites";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { getSnap, refreshFans, retryFans as retryFansNow, useSnap } from "@/lib/store";
 import { baseFloor, CPU_IDLE_LIMIT_C, cpuLimitInIdleRange, hotRuleShortText, hotRuleText } from "@/lib/fan-rules";
 import { clamp, fmtSeconds } from "@/lib/format";
@@ -647,7 +648,7 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
       // on the keys, the copy is in the list and the deleted one is gone from it.
       if (done) notify(done);
     } catch (e) {
-      setErr(messageOf(e));
+      setErr(errorText(e));
     }
   };
 
@@ -766,7 +767,7 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
                 </div>
               ))
           )}
-          {err && <p className="error-line">{err}</p>}
+          {err && <ErrorLine>{err}</ErrorLine>}
         </div>
       </Popover>
     </PageActions>
@@ -892,7 +893,7 @@ function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
       await api.putFanHeaderAvailability(header.id, { available });
       await refreshFans();
     } catch (e) {
-      setErr(messageOf(e));
+      setErr(errorText(e));
     } finally {
       setSent(null);
     }
@@ -1030,7 +1031,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     setWriting((n) => n + 1);
     try {
       await writeFanMode(header.id, next, (e) => {
-        setErr(messageOf(e));
+        setErr(errorText(e));
         // A refused write: the draft goes back to whatever the service says.
         setSentKey(null);
         setAdopted(null);
@@ -1115,7 +1116,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       await refreshFans();
       return true;
     } catch (e) {
-      setHotErr(messageOf(e));
+      setHotErr(errorText(e));
       return false;
     } finally {
       setHotSent(null);

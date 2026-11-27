@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -42,7 +43,7 @@ import { PlayOn } from "@/views/effects/PlayOn";
 import { useStackParam } from "@/lib/stackRoute";
 import { BLANK_EFFECT, blankFileName, copyFileName, titleOf, withTitle } from "@/views/effects/blankEffect";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { ApiFailure, errorText } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
 import { getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
 import { PageActions, PageTitle } from "@/shell/PageHeader";
@@ -176,7 +177,7 @@ export function EffectsView() {
   // next attempt at the same write, or an edit of that effect, does (#156).
   const [writeError, setWriteErrorState] = useState<{ id: string | null; message: string } | null>(null);
   const failWrite = useCallback(
-    (id: string | null, e: unknown) => setWriteErrorState({ id, message: messageOf(e) }),
+    (id: string | null, e: unknown) => setWriteErrorState({ id, message: errorText(e) }),
     [],
   );
   const clearWrite = useCallback(
@@ -310,7 +311,7 @@ export function EffectsView() {
         setReadError(null);
       })
       .catch((e: unknown) => {
-        if (!stop) setReadError(messageOf(e));
+        if (!stop) setReadError(errorText(e));
       });
     return () => {
       stop = true;
@@ -494,7 +495,7 @@ export function EffectsView() {
     };
     notify(`Deleted ${name}`, "info", {
       label: "Undo",
-      onClick: () => void putBack().catch((e: unknown) => notify(messageOf(e), "down")),
+      onClick: () => void putBack().catch((e: unknown) => notify(errorText(e), "down")),
     }, { lifeMs: UNDO_MS });
   };
 
@@ -534,7 +535,7 @@ export function EffectsView() {
         setImportError(null);
       } else {
         setReplaceWith(null);
-        setImportError(messageOf(e));
+        setImportError(errorText(e));
       }
     } finally {
       setImporting(false);
@@ -615,7 +616,7 @@ export function EffectsView() {
       )
       .catch((e: unknown) => {
         setEditBusy(null);
-        setEditError(messageOf(e));
+        setEditError(errorText(e));
       });
   };
 
@@ -667,7 +668,7 @@ export function EffectsView() {
       })
       .catch((e: unknown) => {
         setNewBusy(null);
-        setNewError(messageOf(e));
+        setNewError(errorText(e));
       });
   };
 
@@ -819,7 +820,7 @@ export function EffectsView() {
       setPicked(null);
       await refreshAll();
     } catch (e) {
-      if (e instanceof ApiFailure && e.status === 409) setPatternRefusal({ id, message: messageOf(e) });
+      if (e instanceof ApiFailure && e.status === 409) setPatternRefusal({ id, message: errorText(e) });
       else failWrite(null, e);
     } finally {
       setPatternDeleting(false);
@@ -1266,7 +1267,7 @@ export function EffectsView() {
               <p className="mute eff-starting-values">Starting values. A group keeps its own.</p>
             )}
             {(shownWriteError ?? readError) && (
-              <p className="error-line" style={{ marginTop: 8 }}>{shownWriteError ?? readError}</p>
+              <ErrorLine style={{ marginTop: 8 }}>{shownWriteError ?? readError}</ErrorLine>
             )}
           </Panel>
         </>

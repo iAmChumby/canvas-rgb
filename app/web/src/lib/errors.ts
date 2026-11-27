@@ -8,13 +8,19 @@ export class ApiFailure extends Error {
    * say how long to wait carry one (the effect preview while both render slots are busy).
    */
   readonly retryAfterMs?: number;
+  /**
+   * The next step in plain words (#576). The daemon scrubs `message` and `hint` together; a
+   * local error has no hint until the caller supplies one.
+   */
+  readonly hint?: string;
 
-  constructor(status: number, code: string, message: string, retryAfterMs?: number) {
+  constructor(status: number, code: string, message: string, retryAfterMs?: number, hint?: string) {
     super(message);
     this.name = "ApiFailure";
     this.status = status;
     this.code = code;
     this.retryAfterMs = retryAfterMs;
+    this.hint = hint;
   }
 }
 
@@ -45,8 +51,31 @@ export function daemonFault(e: unknown): DaemonFault {
   return "down";
 }
 
+/**
+ * The text of an error, in one place. A daemon message is already scrubbed at the API edge;
+ * a plain `Error` is a local detail, never the text of the prefilled report (#576 R6).
+ */
 export function messageOf(e: unknown): string {
   if (e instanceof ApiFailure) return e.message;
   if (e instanceof Error) return e.message;
   return "unknown error";
+}
+
+/**
+ * The next step a failure carries, if any. `ErrorState` is the only component that reads it.
+ */
+export function hintOf(e: unknown): string | null {
+  return e instanceof ApiFailure && e.hint ? e.hint : null;
+}
+
+/**
+ * The name views use for a piece of error text. The anatomy guard (`test/errorAnatomyGuard.test.ts`)
+ * keeps `messageOf` inside `ErrorState`; views take their strings through this alias and render
+ * them with `ErrorState` or its compact `ErrorLine`, never as a bare paragraph.
+ */
+export const errorText = messageOf;
+
+/** True when the error came from the daemon or a scrubbed tray command, safe for the report. */
+export function isScrubbedMessage(e: unknown): boolean {
+  return e instanceof ApiFailure;
 }

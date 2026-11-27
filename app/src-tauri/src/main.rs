@@ -47,6 +47,11 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_api_config,
             commands::open_logs_folder,
+            commands::open_service_logs_folder,
+            commands::diag_bundle_list,
+            commands::diag_bundle_save,
+            commands::reveal_diag_bundle,
+            commands::report_prefill,
             commands::set_editor,
             update::update_state,
             update::update_check_now,

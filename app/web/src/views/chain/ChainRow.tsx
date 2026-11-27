@@ -24,7 +24,7 @@ import { StateDot } from "@/components/Panel";
 import { Segmented, type SegOption } from "@/components/Segmented";
 import { Toggle } from "@/components/Toggle";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { refreshChains, refreshLights } from "@/lib/store";
 import type { ChainPartKind } from "@/proto/ChainPartKind";
 import type { ChainView } from "@/proto/ChainView";
@@ -70,7 +70,7 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
       await Promise.all([refreshLights(), refreshChains()]);
       return true;
     } catch (e) {
-      setError(messageOf(e));
+      setError(errorText(e));
       return false;
     } finally {
       setBusy(false);

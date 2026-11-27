@@ -1,4 +1,5 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight } from "@phosphor-icons/react";
@@ -7,7 +8,7 @@ import { Panel, StateDot } from "@/components/Panel";
 import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { UpdatesShape } from "@/components/LoadShapes";
 import { canUpdate, openLogsFolder, tauriHost, updateCheckNow, updateDismissUpdated, updateInstall, updateSkip } from "@/lib/host";
-import { messageOf } from "@/lib/errors";
+import { errorText } from "@/lib/errors";
 import { refreshUpdate, useSnap } from "@/lib/store";
 import { sendUpdate } from "@/lib/updateActions";
 import {
@@ -67,7 +68,7 @@ function UpdateKey({ u }: { u: UpdateState }) {
           />
         </div>
       </div>
-      {err && <p className="error-line">{err}</p>}
+      {err && <ErrorLine>{err}</ErrorLine>}
     </>
   );
 }
@@ -197,7 +198,7 @@ export function UpdatesView() {
                     disabled={tauriHost() === null}
                     onClick={() => {
                       setErr(null);
-                      openLogsFolder().catch((e: unknown) => setErr(messageOf(e)));
+                      openLogsFolder().catch((e: unknown) => setErr(errorText(e)));
                     }}
                   >
                     Open logs folder
@@ -207,7 +208,7 @@ export function UpdatesView() {
                   <span className="mute upd-note">Tray app only</span>
                 )}
               </div>
-              {err && <p className="error-line">{err}</p>}
+              {err && <ErrorLine>{err}</ErrorLine>}
             </Panel>
           ) : (
             <Panel title="Up to date">
@@ -227,7 +228,7 @@ export function UpdatesView() {
                   {acts ? `Last checked ${fmtChecked(u.last_check)}` : "Tray app only"}
                 </span>
               </div>
-              {err && <p className="error-line">{err}</p>}
+              {err && <ErrorLine>{err}</ErrorLine>}
             </Panel>
           )}
         </div>

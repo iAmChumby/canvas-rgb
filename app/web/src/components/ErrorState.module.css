@@ -1,0 +1,56 @@
+/* One anatomy for every error shown in the editor (#576). Tokens only; no glass, no glow. */
+
+.state {
+  min-height: 116px;
+  padding: 14px 16px;
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--down);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.lead {
+  margin: 6px 0 0;
+  color: var(--dim);
+}
+
+.detail {
+  margin: 6px 0 0;
+  color: var(--mute);
+  overflow-wrap: anywhere;
+}
+
+.keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.note {
+  margin: 8px 0 0;
+  color: var(--warn);
+}
+
+.line {
+  margin: 0;
+  color: var(--down);
+  font-size: 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .state * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

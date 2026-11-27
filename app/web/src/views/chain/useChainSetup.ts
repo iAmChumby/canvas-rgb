@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/endpoints";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { ApiFailure, errorText } from "@/lib/errors";
 import { refreshChains, refreshLights } from "@/lib/store";
 import type { ChainPartKind } from "@/proto/ChainPartKind";
 import type { ChainView } from "@/proto/ChainView";
@@ -310,7 +310,7 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
       .catch((e: unknown) => {
         if (finished.current) return;
         failure.current = "light";
-        setError(messageOf(e));
+        setError(errorText(e));
         if (e instanceof ApiFailure && e.status === 409) {
           // The daemon ended the session (its timeout, or another window): only a new one goes on.
           finished.current = true;
@@ -402,7 +402,7 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
         // for was never accepted, and repeating a write that keeps them dark is theirs to ask again.
         intentRef.current = "setup";
         setIntent("setup");
-        setError(messageOf(e));
+        setError(errorText(e));
         apply({ step: "error" }, { send: false });
         return false;
       }
@@ -410,7 +410,7 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
       // Retry, and the session stays open. "Nothing is plugged in here" was never shown a light, so
       // it goes back to the introduction; the checklist would advise about a light nobody saw.
       failure.current = "empty";
-      setError(messageOf(e));
+      setError(errorText(e));
       apply({ step: from === "starting" ? "intro" : "nothing" });
       return false;
     } finally {
@@ -450,7 +450,7 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
       apply({ step: "lit" });
     } catch (e) {
       failure.current = "start";
-      setError(messageOf(e));
+      setError(errorText(e));
       apply({ step: "error" }, { send: false });
     }
   }, [apply, device, markEmpty, zone]);
@@ -664,13 +664,13 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
         session.current = null;
         stopTrailing();
         failure.current = "stale";
-        setError(messageOf(e));
+        setError(errorText(e));
         apply({ step: "error" }, { send: false });
         return;
       }
       // The step stays, and so does the session: the daemon keeps it open for a retry.
       failure.current = "commit";
-      setError(messageOf(e));
+      setError(errorText(e));
     } finally {
       confirming.current = false;
     }

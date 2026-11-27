@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { ApiFailure, errorText } from "@/lib/errors";
 import {
   cancelNavigation,
   continueNavigation,
@@ -309,7 +309,7 @@ export function useSaveAndLeave({
         setClash(wanted);
         return;
       }
-      setSaveError(messageOf(e));
+      setSaveError(errorText(e));
       return;
     }
     // The activation ends the draft on the lights without putting the old effect back.
@@ -343,10 +343,10 @@ export function useSaveAndLeave({
       await api.activateEffect(saved.id, { props: {}, preset: null });
       await refreshAll();
     } catch (e) {
-      setStartFailure({ id: saved.id, message: messageOf(e) });
+      setStartFailure({ id: saved.id, message: errorText(e) });
       // Save and leave: the builder closes, and its banner with it, so the note says what the banner
       // would have said. It stays until it is dismissed.
-      if (then) notify(`${nameOf(saved.id)} is saved, but it did not start: ${messageOf(e)}`, "warn");
+      if (then) notify(`${nameOf(saved.id)} is saved, but it did not start: ${errorText(e)}`, "warn");
     }
     then?.();
   };
@@ -363,7 +363,7 @@ export function useSaveAndLeave({
       setStartFailure(null);
       notify(`${nameOf(failed.id)} is running`);
     } catch (e) {
-      setStartFailure({ id: failed.id, message: messageOf(e) });
+      setStartFailure({ id: failed.id, message: errorText(e) });
     } finally {
       setStarting(false);
     }
