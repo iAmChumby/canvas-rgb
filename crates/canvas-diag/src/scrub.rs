@@ -79,7 +79,7 @@ pub fn device_id_end(text: &str, at: usize) -> Option<usize> {
                 }
                 // "openrgb:ABC: timeout" and a trailing "openrgb:ABC:" are one id followed by
                 // a separator: keep the colon, including at the very end (H6).
-                if b == b':' && bytes.get(end + 1).map_or(true, u8::is_ascii_whitespace) {
+                if b == b':' && bytes.get(end + 1).is_none_or(u8::is_ascii_whitespace) {
                     break;
                 }
                 // A backslash escaping a quote in JSON is the end of the id, not part of it.
