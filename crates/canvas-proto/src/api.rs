@@ -415,6 +415,16 @@ pub struct SafeStartPut {
     pub mode: SafeStartMode,
 }
 
+/// The answer to `PUT /api/v1/safe-start`, sent before the service restarts the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SafeStartAnswer {
+    /// The mode that was asked for.
+    pub mode: SafeStartMode,
+    /// True when the daemon is about to restart in that mode; false when it was already in force.
+    pub restarting: bool,
+}
+
 /// The facts Help & About shows and copies (#574). Every field is safe to share as it is: no
 /// paths, user or machine names, serials or device ids.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

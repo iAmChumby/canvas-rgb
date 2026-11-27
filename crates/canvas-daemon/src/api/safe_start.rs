@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
 use axum::Json;
-use canvas_proto::api::{SafeStartMode, SafeStartPut};
+use canvas_proto::api::{SafeStartAnswer, SafeStartMode, SafeStartPut};
 use canvas_proto::pipe::PipeRequest;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -28,7 +28,8 @@ pub async fn put_safe_start(State(app): State<Arc<App>>, Json(body): Json<SafeSt
         SafeStartMode::Normal => PipeRequest::LeaveSafeStart,
     };
     let restarting = mode != app.start_mode();
-    let answer = serde_json::json!({ "mode": mode, "restarting": restarting }).to_string();
+    let answer = serde_json::to_string(&SafeStartAnswer { mode, restarting })
+        .expect("a two-field answer always serialises");
     // The sender lives in the body's stream: it drops when the server has taken the last byte,
     // or when the client is gone.
     let (written, wait) = tokio::sync::oneshot::channel::<()>();
