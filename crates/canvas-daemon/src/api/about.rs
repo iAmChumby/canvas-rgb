@@ -100,11 +100,14 @@ fn windows_version() -> Option<String> {
         let _ = RegCloseKey(key);
 
         let build = build?;
+        let build_number = build.parse::<u32>().unwrap_or(0);
         let mut label = product.unwrap_or_else(|| "Windows".to_string());
-        if build.parse::<u32>().unwrap_or(0) >= 22000 {
+        if build_number >= 22000 {
             label = label.replacen("Windows 10", "Windows 11", 1);
         }
-        let version = version.unwrap_or_else(|| "10.0".to_string());
+        // CurrentVersion is 6.3 on some Windows 10/11 installs, but the version people know and
+        // the one the consensus prints is 10.0: `Windows 11 Home 10.0.26300` (#574 R7).
+        let version = version.filter(|v| v.starts_with("10.")).unwrap_or_else(|| "10.0".to_string());
         Some(format!("{label} {version}.{build}"))
     }
 }
