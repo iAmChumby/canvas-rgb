@@ -95,6 +95,10 @@ pub struct ConfigFile {
     /// false, so an existing install is walked through it once.
     #[serde(default)]
     pub onboarding_complete: bool,
+    /// Issue #580: the keys of hardware notes the owner hid. A key goes when its condition is
+    /// seen healthy again. Configs saved before it existed load as empty.
+    #[serde(default)]
+    pub dismissed_faults: Vec<String>,
     pub settings: Settings,
     /// Issue #166: the audio source the audio-reactive effects read. Outside `Settings` on
     /// purpose: `PUT /settings` replaces the whole `Settings` from the editor's snapshot, and
@@ -117,6 +121,7 @@ impl Default for ConfigFile {
             first_run_done: false,
             zone_panel_dismissed: false,
             onboarding_complete: false,
+            dismissed_faults: Vec::new(),
             settings: Settings::default(),
             audio_source: crate::audio::AudioSource::FollowDefault,
             white_balance: BTreeMap::new(),

@@ -516,6 +516,11 @@ html[data-motion="reduced"] *::after {
   text-overflow: ellipsis;
 }
 
+/* A dismissed note is still active, but its count is muted rather than shouted (#580 C2). */
+.strip-mark-text[data-muted="true"] {
+  color: var(--mute);
+}
+
 /* The controls sit at the end of the row. The mark's text grows into the space beside them and
    they do not move. */
 .strip-controls {
@@ -540,6 +545,26 @@ html[data-motion="reduced"] *::after {
 @media (max-width: 1279px) {
   .strip-mark-text {
     display: none;
+  }
+  /* #580: the words are dropped at this width, so the count sits beside the mark's icon as a
+     short number. The badge takes no extra row and the button's label carries the full words. */
+  .strip-mark-icon[data-count] {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .strip-mark-icon[data-count]::after {
+    content: attr(data-count);
+    font-family: var(--fm);
+    font-size: var(--t14);
+  }
+  /* #580 fix pass 2: the phone drops the words, so a hidden fault keeps its own quiet edge and a
+     muted badge instead of looking the same as an active one. */
+  .strip-mark[data-dismissed="true"] {
+    border-color: var(--mute);
+  }
+  .strip-mark[data-dismissed="true"] .strip-mark-icon[data-count]::after {
+    color: var(--mute);
   }
 }
 
@@ -659,6 +684,19 @@ html[data-motion="reduced"] *::after {
 
 .strip-details-problems li[data-tone="work"] {
   color: var(--work);
+}
+
+/* #580 C2: a hidden fault reads as hidden, and its row offers a way back without changing the
+   fault's tone. */
+.strip-details-problems li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.strip-details-problems li[data-dismissed="true"] > span {
+  color: var(--mute);
 }
 
 /* Each link and what it is doing: the three links the app has, named. */
@@ -3774,6 +3812,34 @@ button.chip:hover {
   font-weight: 600;
 }
 
+/* U7: a long product name wraps instead of being cut off in the wide layout. */
+@media (min-width: 1280px) {
+  .rd-devices .rd-dev-row,
+  .rd-devices .rd-zone {
+    height: auto;
+    min-height: 44px;
+    padding-top: var(--s1);
+    padding-bottom: var(--s1);
+  }
+  /* U7: both the device row and the zone sub-row wrap their names; `.one-line` would clip the
+     long product name and the kind/vendor/sub-line in the narrow name column. */
+  .rd-devices .rd-dev-who .one-line,
+  .rd-devices .rd-light-who .one-line {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+  /* The light row's rename button holds that same long name; it must wrap with the row. */
+  .rd-devices .rd-light-name {
+    height: auto;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+}
+
 /* The sub-line is the kind, the vendor, the adapter and the address: it gives way to the drawing
    on a narrow row, and the whole line is its tooltip. */
 .rd-devices .rd-dev-sub {
@@ -4791,6 +4857,92 @@ button.chip:hover {
 .rule-warn {
   border-color: color-mix(in srgb, var(--warn) 40%, transparent);
   background: color-mix(in srgb, var(--warn) 8%, var(--sunk));
+}
+
+/* #580: one hardware note, with the five parts in the same order on every page. The tint is the
+   existing `--tone` one, so a note on the Fans page and one on Devices share their colours. */
+.fault-note {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: var(--s2) var(--s4);
+  padding: var(--s3) var(--s4);
+  /* U5: a neutral panel fill in both themes, with the note's colour only on a clear left edge.
+     Tinting the whole fill made the light note read as a disabled input. */
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--tone);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  animation: canvas-enter var(--dur) var(--ease) both;
+}
+
+.fault-note[data-tone="warn"] { --tone: var(--warn); }
+.fault-note[data-tone="down"] { --tone: var(--down); }
+
+.fault-note-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.fault-note-icon {
+  display: inline-flex;
+  flex: none;
+  padding-top: 2px;
+  color: var(--tone);
+}
+
+.fault-note-title {
+  min-width: 0;
+  font-size: var(--t15);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+/* U3: the dismiss control belongs at the note's right edge, not at the end of the title column.
+   It leaves the grid flow, and the head reserves its width only on notes that carry one. */
+.fault-note-action {
+  position: absolute;
+  top: var(--s3);
+  right: var(--s4);
+}
+
+.fault-note[data-action="true"] .fault-note-head,
+.fault-note[data-action="true"] .fault-note-fields {
+  padding-right: 88px;
+}
+
+.fault-note-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: var(--s3);
+  row-gap: var(--s1);
+  margin: 0;
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+.fault-note-fields dt { color: var(--mute); font-size: var(--t14); }
+.fault-note-fields dd { min-width: 0; margin: 0; color: var(--dim); overflow-wrap: anywhere; }
+.fault-note-fields dd .fig { font-family: var(--fm); font-size: var(--t14); }
+/* U4: the Help link starts where the other values start; a button's inset would shift it. */
+.fault-note-fields dd .btn-ghost {
+  height: auto;
+  padding: 0 var(--s2) 0 0;
+  border-color: transparent;
+  background: none;
+  text-decoration: underline;
+}
+
+@media (max-width: 720px) {
+  .fault-note { grid-template-columns: minmax(0, 1fr); }
+  /* U6: the icon keeps the title's row; the dismiss control drops below both. */
+  .fault-note-head { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+  .fault-note[data-action="true"] .fault-note-head,
+  .fault-note[data-action="true"] .fault-note-fields { padding-right: 0; }
+  .fault-note-action { position: static; grid-column: 1 / -1; justify-self: start; margin-top: var(--s2); }
+  .fault-note-fields { grid-template-columns: max-content minmax(0, 1fr); }
 }
 
 /* The fan editor's status: the daemon's reason, an error, "Applying". The region is as tall
@@ -10463,6 +10615,71 @@ button.chip:hover {
 .help-hero-link {
   margin-top: var(--s3);
 }
+
+/* #580: the fixed device checklist. Each row is one verdict and one next step; the supported
+   list is mono for the ids, and nothing moves when a status poll lands because the rows are a
+   snapshot taken on open and on Try again. */
+.help-check {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.help-check > li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.help-check > li:last-child { border-bottom: 0; }
+
+.help-check-icon {
+  display: inline-flex;
+  flex: none;
+  padding-top: 2px;
+  color: var(--mute);
+}
+
+.help-check > li[data-verdict="OK"] .help-check-icon { color: var(--ok); }
+.help-check > li[data-verdict="Problem"] .help-check-icon { color: var(--warn); }
+.help-check > li[data-verdict="Unknown"] .help-check-icon { color: var(--work); }
+
+.help-check-body { min-width: 0; }
+.help-check-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2); }
+.help-check-head h3 { font-size: var(--t15); }
+.help-check-verdict { color: var(--mute); font-size: var(--t14); }
+.help-check-body p { margin-top: var(--s1); font-size: var(--t14); line-height: 1.45; }
+
+.help-check-devices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--s1) var(--s3);
+  margin: var(--s2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* U7, U8: the name owns the first column and wraps; the id and the state keep their own columns
+   so the state stays on its device's row at 390 px. */
+.help-check-devices li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
+  align-items: baseline;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+  font-size: var(--t14);
+}
+
+.help-check-devices li > span:first-child { overflow-wrap: anywhere; }
+.help-check-devices li[data-connected="true"] { color: var(--ok); }
+.help-check-connected { color: var(--mute); font-size: var(--t14); }
+.help-check-label { color: var(--dim); font-weight: 600; }
+.help-check-actions { margin-top: var(--s3); }
 
 .help-count {
   color: var(--mute);

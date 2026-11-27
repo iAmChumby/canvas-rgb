@@ -43,6 +43,23 @@ fn io_other(detail: impl std::fmt::Display) -> io::Error {
     io::Error::other(detail.to_string())
 }
 
+/// Why PawnIO could not be opened (#580 R1). One value today: the runtime, a signed module or the
+/// driver is unavailable. The service turns this into `ChipProblem::PawnIoUnavailable`; it never
+/// parses the human text back.
+#[derive(Debug, thiserror::Error)]
+pub enum PawnIoError {
+    // The detail only: `ChipOpenError` adds the one "PawnIO unavailable" prefix in logs and in
+    // `chip_error` (fix pass 2).
+    #[error("{0}")]
+    Unavailable(String),
+}
+
+impl From<io::Error> for PawnIoError {
+    fn from(error: io::Error) -> Self {
+        Self::Unavailable(error.to_string())
+    }
+}
+
 fn check(operation: &str, status: i32) -> io::Result<()> {
     if status == 0 {
         Ok(())
@@ -61,7 +78,7 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn load(home: &Path) -> io::Result<Arc<Self>> {
+    fn load(home: &Path) -> Result<Arc<Self>, PawnIoError> {
         let path = home.join("PawnIOLib.dll");
         // SAFETY: loading the PawnIO runtime DLL from the admin-owned install directory.
         let library = unsafe { Library::new(&path) }.map_err(|e| io_other(format!("{}: {e}", path.display())))?;
@@ -95,7 +112,7 @@ unsafe impl Send for Module {}
 
 impl Module {
     /// Opens `modules_dir\file_name` (a `.bin` PawnIO module) on a fresh handle.
-    pub fn open(home: &Path, file_name: &str) -> io::Result<Self> {
+    pub fn open(home: &Path, file_name: &str) -> Result<Self, PawnIoError> {
         let runtime = Runtime::load(home)?;
         let blob_path = home.join("modules").join(file_name);
         let blob = std::fs::read(&blob_path).map_err(|e| io_other(format!("{}: {e}", blob_path.display())))?;
@@ -107,7 +124,7 @@ impl Module {
         if let Err(e) = check(&format!("pawnio_load {file_name}"), loaded) {
             // SAFETY: `handle` is open and not used again.
             unsafe { (runtime.close)(handle) };
-            return Err(e);
+            return Err(e.into());
         }
         Ok(Self { runtime, handle })
     }
@@ -150,9 +167,9 @@ pub struct PawnIoPortIo {
 
 impl PawnIoPortIo {
     /// Opens LpcIO and selects a Super I/O slot: 0 is port 0x2E, 1 is port 0x4E.
-    pub fn open(home: &Path, slot: u64) -> io::Result<Self> {
+    pub fn open(home: &Path, slot: u64) -> Result<Self, PawnIoError> {
         let mut module = Module::open(home, LPC_MODULE)?;
-        module.call("ioctl_select_slot", &[slot], &mut [])?;
+        module.call("ioctl_select_slot", &[slot], &mut []).map_err(PawnIoError::from)?;
         Ok(Self { module })
     }
 }
@@ -184,7 +201,7 @@ pub struct TctlSource {
 pub const AMD_THM_TCON_CUR_TMP: u64 = 0x0005_9800;
 
 impl TctlSource {
-    pub fn open(home: &Path) -> io::Result<Self> {
+    pub fn open(home: &Path) -> Result<Self, PawnIoError> {
         Ok(Self { module: Module::open(home, AMD_MODULE)? })
     }
 }

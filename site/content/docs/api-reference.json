@@ -2683,6 +2683,17 @@
               "name": "hot",
               "type": "array of HotLimitStatus",
               "meaning": "The hot line in force per kind of source, for the curve chart. Old payloads without it parse as empty."
+            },
+            {
+              "name": "chip_problem",
+              "type": "ChipProblem or null",
+              "meaning": "Why the fan chip could not be reached, when it could not.",
+              "optional": true
+            },
+            {
+              "name": "chip_checked",
+              "type": "boolean",
+              "meaning": "True once the fan service tried to open the chip. An older service leaves it false."
             }
           ]
         }
@@ -2860,6 +2871,16 @@
               "name": "hot",
               "type": "array of JSON objects",
               "meaning": "The hot line in force for each source kind."
+            },
+            {
+              "name": "chip_problem",
+              "type": "string or null",
+              "meaning": "Why the fan chip could not be reached, when it could not."
+            },
+            {
+              "name": "chip_checked",
+              "type": "boolean",
+              "meaning": "True once the fan service tried to open the chip. An older service leaves it false."
             }
           ]
         }
@@ -2957,6 +2978,17 @@
               "name": "hot",
               "type": "array of HotLimitStatus",
               "meaning": "The hot line in force per kind of source, for the curve chart. Old payloads without it parse as empty."
+            },
+            {
+              "name": "chip_problem",
+              "type": "ChipProblem or null",
+              "meaning": "Why the fan chip could not be reached, when it could not.",
+              "optional": true
+            },
+            {
+              "name": "chip_checked",
+              "type": "boolean",
+              "meaning": "True once the fan service tried to open the chip. An older service leaves it false."
             }
           ]
         }
@@ -3114,6 +3146,68 @@
       },
       "queryParams": {
         "PUT": [],
+        "DELETE": []
+      },
+      "queryType": {}
+    },
+    {
+      "path": "/api/v1/faults/{key}/dismiss",
+      "title": "Dismiss fault",
+      "area": "Settings and update",
+      "methods": [
+        "POST",
+        "DELETE"
+      ],
+      "pathParams": [
+        {
+          "name": "key",
+          "type": "string",
+          "meaning": "The dismissal key of the note to hide, read from the status response."
+        }
+      ],
+      "descriptions": {
+        "POST": "Hides one hardware note on every viewer. The note comes back when its cause clears and then returns.",
+        "DELETE": "Shows a hidden hardware note again while its condition is still active."
+      },
+      "examples": {
+        "POST": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X POST -H \"Authorization: Bearer $TOKEN\" \"http://127.0.0.1:9430/api/v1/faults/<key>/dismiss\"",
+        "DELETE": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X DELETE -H \"Authorization: Bearer $TOKEN\" \"http://127.0.0.1:9430/api/v1/faults/<key>/dismiss\""
+      },
+      "requestType": {
+        "POST": "none",
+        "DELETE": "none"
+      },
+      "responseType": {
+        "POST": "JSON object",
+        "DELETE": "JSON object"
+      },
+      "requestShape": {},
+      "responseShape": {
+        "POST": {
+          "label": "JSON object",
+          "note": "The fields the daemon sends: the hardware note was hidden.",
+          "fields": [
+            {
+              "name": "ok",
+              "type": "boolean",
+              "meaning": "True when the note was hidden."
+            }
+          ]
+        },
+        "DELETE": {
+          "label": "JSON object",
+          "note": "The fields the daemon sends: the hardware note was shown again.",
+          "fields": [
+            {
+              "name": "ok",
+              "type": "boolean",
+              "meaning": "True when the note was shown again."
+            }
+          ]
+        }
+      },
+      "queryParams": {
+        "POST": [],
         "DELETE": []
       },
       "queryType": {}
@@ -5299,6 +5393,11 @@
               "type": "SafeStart or null",
               "meaning": "Safe start. `null` (and a daemon from before it, which sends none) reads as not active",
               "optional": true
+            },
+            {
+              "name": "faults",
+              "type": "array of Fault",
+              "meaning": "Hardware notes, dismissed ones included. Empty from an older daemon."
             }
           ]
         }
@@ -6456,6 +6555,18 @@
           "type": "array of HotLimitStatus",
           "optional": false,
           "meaning": "The hot line in force per kind of source, for the curve chart. Old payloads without it parse as empty."
+        },
+        {
+          "name": "chip_problem",
+          "type": "ChipProblem or null",
+          "optional": true,
+          "meaning": "Why the fan chip could not be reached, when it could not."
+        },
+        {
+          "name": "chip_checked",
+          "type": "boolean",
+          "optional": false,
+          "meaning": "True once the fan service tried to open the chip. An older service leaves it false."
         }
       ]
     },
@@ -7419,6 +7530,12 @@
           "type": "SafeStart or null",
           "optional": true,
           "meaning": "Safe start. `null` (and a daemon from before it, which sends none) reads as not active"
+        },
+        {
+          "name": "faults",
+          "type": "array of Fault",
+          "optional": false,
+          "meaning": "Hardware notes, dismissed ones included. Empty from an older daemon."
         }
       ]
     },
@@ -8537,6 +8654,20 @@
         }
       ]
     },
+    "ChipProblem": {
+      "fields": [],
+      "note": "One of: \"pawn_io_unavailable\", \"chip_not_found\".",
+      "values": [
+        {
+          "value": "pawn_io_unavailable",
+          "meaning": "PawnIO, the driver used to reach the fan chip, is unavailable."
+        },
+        {
+          "value": "chip_not_found",
+          "meaning": "No supported fan chip was found on the board."
+        }
+      ]
+    },
     "TempSource": {
       "fields": [
         {
@@ -9325,6 +9456,58 @@
         }
       ]
     },
+    "Fault": {
+      "fields": [
+        {
+          "name": "kind",
+          "type": "FaultKind",
+          "optional": false,
+          "meaning": "What the note is about: the fan chip or OpenRGB."
+        },
+        {
+          "name": "key",
+          "type": "string",
+          "optional": false,
+          "meaning": "The stable key used to dismiss the note."
+        },
+        {
+          "name": "device",
+          "type": "string or null",
+          "optional": true,
+          "meaning": "The device the note names, when it names one."
+        },
+        {
+          "name": "affected",
+          "type": "string",
+          "optional": false,
+          "meaning": "What does not work."
+        },
+        {
+          "name": "cause",
+          "type": "string or null",
+          "optional": true,
+          "meaning": "Why it does not work, when the cause is known."
+        },
+        {
+          "name": "fix",
+          "type": "string",
+          "optional": false,
+          "meaning": "What to do about it."
+        },
+        {
+          "name": "ignore_if",
+          "type": "string or null",
+          "optional": true,
+          "meaning": "When the note can be ignored."
+        },
+        {
+          "name": "dismissed",
+          "type": "boolean",
+          "optional": false,
+          "meaning": "True when this note was hidden by the person using the app."
+        }
+      ]
+    },
     "AudioEndpointState": {
       "fields": [],
       "note": "One of: \"active\", \"not_connected\".",
@@ -9980,6 +10163,20 @@
         {
           "value": "user_chose",
           "meaning": "The user asked for safe start; it stays on until they start normally."
+        }
+      ]
+    },
+    "FaultKind": {
+      "fields": [],
+      "note": "One of: \"fan_chip\", \"open_rgb_down\".",
+      "values": [
+        {
+          "value": "fan_chip",
+          "meaning": "The note is about the fan chip."
+        },
+        {
+          "value": "open_rgb_down",
+          "meaning": "The note is about lights reached through OpenRGB."
         }
       ]
     },

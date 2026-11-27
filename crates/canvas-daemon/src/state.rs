@@ -1120,10 +1120,16 @@ impl App {
             (active_scene, active_effects)
         };
         let openrgb = *self.openrgb.read().await;
+        // #580: the notes are derived from the current state on every read. A dismissed fault
+        // stays in the list so the strip still counts it; only the page notes hide it.
+        let fans = self.fans.read().await;
+        let faults = crate::faults::build(openrgb, fans.as_ref(), &store.config.dismissed_faults);
+        drop(fans);
         let conflicts = self.conflicts.read().await.clone();
         drop(store);
         let down = self.service_down_ms.load(Ordering::SeqCst);
         Some(Status {
+            faults,
             version: self.version.clone(),
             power,
             brightness,

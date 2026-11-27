@@ -94,6 +94,7 @@ const baseStatus: Status = {
   conflicts: [],
   show_zone_panel: false,
   onboarding_complete: true,
+  faults: [],
 };
 
 /** The shell's two hosts: the banners' mount and the notification lane. */

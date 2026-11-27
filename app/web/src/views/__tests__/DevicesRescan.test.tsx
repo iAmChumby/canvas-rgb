@@ -4,6 +4,12 @@ import { api } from "@/lib/endpoints";
 import { getSnap, patchSnap, refreshDevices } from "@/lib/store";
 import { DevicesView } from "@/views/DevicesView";
 
+// The Devices notes link to the Help checklist, so the shared ButtonLink needs a router.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: () => {}, replace: () => {} }),
+  usePathname: () => "/devices/",
+}));
+
 // Issue #230: both "Try again" buttons on the Devices page used to call the plain refresh. They
 // never sent `?rescan=1` and never drew the loading placeholder. The retry path does both.
 //

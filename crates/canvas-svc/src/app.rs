@@ -124,8 +124,10 @@ pub fn install_dir() -> PathBuf {
 pub fn build_core(boot: &Boot, deps: Deps) -> Core {
     let home = boot.home();
     let now = Instant::now();
-    let (chip, chip_error, temps, file, confirmed, gpu_rated_max_c) = if boot.secured() {
+    let (chip, chip_error, temps, file, confirmed, gpu_rated_max_c, chip_problem, chip_checked) = if boot.secured() {
         let hardware = (deps.hardware)();
+        // #580 R13: taken before the move below, so the controller knows an open was tried.
+        let (chip_problem, chip_checked) = (hardware.chip_problem, hardware.chip_checked);
         let chip_path = paths::chip_path(home);
         let chip_state = if trusted_file(boot, &chip_path) {
             match store::load_chip_state(&chip_path) {
@@ -151,7 +153,7 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
         } else {
             FansFile::default()
         };
-        (hardware.chip, hardware.chip_error, hardware.temps, file, chip_state.confirmed_map, hardware.gpu_rated_max_c)
+        (hardware.chip, hardware.chip_error, hardware.temps, file, chip_state.confirmed_map, hardware.gpu_rated_max_c, chip_problem, chip_checked)
     } else {
         let reason = boot.secure_error().unwrap_or("unknown").to_string();
         tracing::error!(
@@ -159,10 +161,12 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
             "machine home could not be secured: no config read, no chip access, no OpenRGB; every header stays on BIOS"
         );
         let chip: Option<Box<dyn FanChip>> = None;
-        (chip, Some(format!("machine home not secured: {reason}")), std::collections::BTreeMap::new(), FansFile::default(), None, None)
+        // No chip was opened here: unchecked, so no note and no dismissal is cleared (R13, R4).
+        (chip, Some(format!("machine home not secured: {reason}")), std::collections::BTreeMap::new(), FansFile::default(), None, None, None, false)
     };
 
     let mut fans = FanController::new(home.to_path_buf(), chip, chip_error, temps, file, confirmed);
+    fans.set_chip_open(chip_problem, chip_checked);
     // Issue #130: the rated maxima the hot lines are measured from. The CPU one comes
     // from the CPUID brand string, the GPU one from NVML's slowdown threshold.
     fans.set_rated(crate::fans::cpu_brand_string().as_deref(), gpu_rated_max_c);

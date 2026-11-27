@@ -662,6 +662,8 @@ mod tests {
 
     fn status(temps: Vec<(TempSource, Option<f32>)>, headers: Vec<(&str, Option<u32>)>) -> FansStatus {
         FansStatus {
+            chip_problem: None,
+            chip_checked: true,
             chip: None,
             hardware_watchdog: None,
             headers: headers

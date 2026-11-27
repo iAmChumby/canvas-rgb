@@ -20,8 +20,8 @@ use canvas_proto::api::SafeStartMode;
 use canvas_proto::config::{FansFile, FANS_SCHEMA};
 use canvas_proto::fans::{
     floor_for, hot_limit_status, rated_cpu_max_c, runtime_floor_at, validate_hot_limits, validate_mode,
-    validate_profile, CurvePoint, FanHeaderStatus, FanMode, FanProfile, FanValidationError, FansStatus, HotKind,
-    HotLimitStatus, HotLimits, TempReading, TempSource, HOT_LIMIT_MIN_C, SENSOR_LOSS_TIMEOUT_MS,
+    validate_profile, ChipProblem, CurvePoint, FanHeaderStatus, FanMode, FanProfile, FanValidationError, FansStatus,
+    HotKind, HotLimitStatus, HotLimits, TempReading, TempSource, HOT_LIMIT_MIN_C, SENSOR_LOSS_TIMEOUT_MS,
 };
 use canvas_proto::Rgb8;
 use std::collections::{BTreeMap, BTreeSet};
@@ -470,6 +470,10 @@ pub struct FanController {
     home: PathBuf,
     chip: Option<Box<dyn FanChip>>,
     chip_error: Option<String>,
+    /// #580: the typed answer from the chip open, reported to the daemon in `FansStatus`.
+    chip_problem: Option<ChipProblem>,
+    /// #580: true once the open was tried, so `chip_problem: None` can be read as healthy.
+    chip_checked: bool,
     temps: BTreeMap<TempSource, Box<dyn TempReader>>,
     config: FansFile,
     slots: Vec<Slot>,
@@ -536,6 +540,8 @@ impl FanController {
             home,
             chip,
             chip_error,
+            chip_problem: None,
+            chip_checked: false,
             temps,
             config,
             slots: (0..headers).map(|_| Slot::default()).collect(),
@@ -559,6 +565,13 @@ impl FanController {
             hold_retries: 0,
             hold_retry_at: None,
         }
+    }
+
+    /// Records the chip open's answer (#580 R13). Called by the service once it has tried the
+    /// chip; a controller built in a test with no open stays unchecked.
+    pub fn set_chip_open(&mut self, problem: Option<ChipProblem>, checked: bool) {
+        self.chip_problem = problem;
+        self.chip_checked = checked;
     }
 
     /// Sets the baseboard product the service probed at startup (issue #128) and recomputes
@@ -1688,6 +1701,9 @@ impl FanController {
             });
         }
         FansStatus {
+            // #580: the answer from the chip open, not from `chip_error` (R1, R13, R17).
+            chip_problem: self.chip_problem,
+            chip_checked: self.chip_checked,
             chip: self.chip.as_ref().map(|c| c.chip_name()),
             hardware_watchdog: HARDWARE_WATCHDOG,
             headers: out,

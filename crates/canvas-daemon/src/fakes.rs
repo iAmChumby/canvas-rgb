@@ -669,6 +669,8 @@ pub fn fake_fans_status() -> FansStatus {
         override_available: None,
     };
     FansStatus {
+        chip_problem: None,
+        chip_checked: true,
         chip: Some("NCT6687D-R @ 0xA20 (fake)".into()),
         hardware_watchdog: Some(false),
         headers: vec![

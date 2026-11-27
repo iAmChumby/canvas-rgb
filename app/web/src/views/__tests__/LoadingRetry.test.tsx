@@ -102,6 +102,8 @@ describe("a refresh that fails after the content is on screen", () => {
     patchSnap({
       fans: {
         chip: "NCT6687D-R @ 0xA20",
+        chip_checked: true,
+        chip_problem: null,
         hardware_watchdog: null,
         headers: [
           {

@@ -675,6 +675,10 @@ fn spawn_fan_poller(app: Arc<App>) {
                     if let Ok(canvas_proto::pipe::PipeResponse::FanStatus { status }) =
                         client.request(&canvas_proto::pipe::PipeRequest::FanStatus).await
                     {
+                        // #580 R4: only a checked, healthy chip clears a fan dismissal. The
+                        // service being up with no fans cache, or an older unchecked answer,
+                        // leaves the key alone.
+                        canvas_daemon::faults::clear_fan_if_healthy(&app, &status).await;
                         let mut fans = app.fans.write().await;
                         *fans = Some(status);
                     }

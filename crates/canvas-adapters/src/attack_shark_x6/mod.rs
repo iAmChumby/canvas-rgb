@@ -154,6 +154,10 @@ pub const MANUFACTURER: &str = "Beken";
 /// The name of the product canvas-rgb shows.
 pub const DISPLAY_NAME: &str = "Attack Shark X6";
 
+/// The device this adapter drives itself, for the Help checklist (#580 R10). The name is the one
+/// its device info reports.
+pub const SUPPORTED: &[(&str, u16, u16)] = &[(DISPLAY_NAME, VENDOR_ID, PRODUCT_ID)];
+
 /// The usage page of the configuration collection (COL04): vendor defined.
 pub const CONFIG_USAGE_PAGE: u16 = 0x000B;
 /// The usage of the configuration collection (COL04).
