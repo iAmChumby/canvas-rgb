@@ -76,9 +76,9 @@ function deviceIdEnd(text: string, at: number): number | null {
       const ch = text.charAt(end);
       const next = text.charAt(end + 1);
       if (SPACES.has(ch) || CLOSERS.has(ch)) break;
-      // A full stop that ends the sentence, and a colon before prose, stay in the text.
+      // A full stop that ends the sentence, and a colon before prose or at the end, stay in the text.
       if (ch === "." && (next === "" || SPACES.has(next))) break;
-      if (ch === ":" && SPACES.has(next)) break;
+      if (ch === ":" && (next === "" || SPACES.has(next))) break;
       // A backslash escaping a quote in JSON ends the id.
       if (ch === "\\" && (next === '"' || next === "\\")) break;
     }
