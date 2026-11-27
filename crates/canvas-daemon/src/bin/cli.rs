@@ -104,6 +104,31 @@ fn status(cli: &Cli) -> Result<(), CliError> {
 fn render_status(status: &serde_json::Value) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
+    // #577: the safe-start state is the first line, so a person who runs `status` after a crash
+    // sees why the lights are doing something different before any other number.
+    let safe = status.get("safe_start").and_then(|v| v.as_object());
+    let active = safe.and_then(|s| s.get("active")).and_then(|v| v.as_bool()).unwrap_or(false);
+    if active {
+        let reason = safe
+            .and_then(|s| s.get("reason"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let streak = safe
+            .and_then(|s| s.get("unclean_streak"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let fans = match safe
+            .and_then(|s| s.get("fans_on_bios"))
+            .and_then(|v| v.as_bool())
+        {
+            Some(true) => "fans on BIOS control",
+            Some(false) => "fans not confirmed on BIOS",
+            None => "fan state unknown",
+        };
+        let _ = writeln!(out, "  safe start ACTIVE ({reason}; {streak} unclean run(s); {fans})");
+    } else {
+        let _ = writeln!(out, "  safe start off");
+    }
     let _ = writeln!(out, "canvas-rgb {}", status.get("version").and_then(|v| v.as_str()).unwrap_or("?"));
     let _ = writeln!(out,
         "  power        {}",

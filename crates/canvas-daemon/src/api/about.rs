@@ -36,7 +36,7 @@ pub fn build_about(app: &App) -> About {
         build_date: build_date(),
         os: windows_version(),
         service_version: app.service_version(),
-        last_exit: LastExit::Unknown, // #577 writes the marker; until then it is honestly unknown.
+        last_exit: app.last_exit(), // #577: the service's verdict from the first Hello.
     }
 }
 

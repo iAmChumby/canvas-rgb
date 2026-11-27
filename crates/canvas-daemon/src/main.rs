@@ -108,6 +108,66 @@ const BLACK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 const SERVICE_NOTICE_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 const ENGINE_STOP_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
 const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+/// How long a start waits for the service's first `Hello`. Inside the 30 s first-heartbeat
+/// grace; a service that cannot answer in time gives Normal and `Unknown` (#577 R13).
+const FIRST_HELLO_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Reads the mode the service chose for this run from its first `Hello`, before anything is
+/// restored or played. A missing or old service answers Normal / `Unknown`. The mode is latched
+/// once here; later replies cannot change it mid-run (#577 R13).
+async fn read_start_decision(app: &std::sync::Arc<App>) -> canvas_proto::api::SafeStartMode {
+    use canvas_proto::api::{LastExit, SafeStartMode};
+    use canvas_proto::pipe::{PipeRequest, PipeResponse};
+    let hello = PipeRequest::Hello {
+        protocol: canvas_proto::pipe::PROTOCOL_VERSION,
+        daemon_pid: std::process::id(),
+    };
+    let (mode, last_exit) = match tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&hello)).await {
+        Ok(Ok(PipeResponse::Hello { start_mode, last_exit, .. })) => (start_mode, last_exit),
+        Ok(other) => {
+            tracing::debug!(response = ?other, "the service answered the start hello differently; starting normally");
+            (SafeStartMode::Normal, LastExit::Unknown)
+        }
+        Err(_) => {
+            tracing::info!("the service did not answer before the start hello timed out; starting normally");
+            (SafeStartMode::Normal, LastExit::Unknown)
+        }
+    };
+    app.latch_start(mode, last_exit);
+    mode
+}
+
+/// In safe start, the fan line comes from the headers the service actually reports, not from a
+/// claim: no reply is unknown, a header still manual is "not confirmed", all on BIOS is confirmed.
+async fn read_fan_hold(app: &std::sync::Arc<App>) {
+    use canvas_proto::pipe::{PipeRequest, PipeResponse};
+    let reply = tokio::time::timeout(FIRST_HELLO_LIMIT, app.pipe.exchange(&PipeRequest::FanStatus)).await;
+    if let Ok(Ok(PipeResponse::FanStatus { status })) = reply {
+        let on_bios = if status.headers.is_empty() {
+            None
+        } else {
+            Some(status.headers.iter().all(|h| h.on_bios))
+        };
+        app.set_fans_on_bios(on_bios);
+    }
+}
+
+/// What safe start puts on the lights: one in-memory scene of every light playing Breathing.
+/// Nothing is saved. If the effect cannot be built, one steady colour is painted and the status
+/// names that instead.
+async fn play_safe_lights(app: &std::sync::Arc<App>) {
+    const STEADY: canvas_proto::Rgb8 = canvas_proto::Rgb8::new(40, 90, 160);
+    match canvas_daemon::scenes::play_builtin_on_all(app, "breathing").await {
+        Ok(()) => {
+            *app.safe_effect.lock().unwrap_or_else(|e| e.into_inner()) = Some("breathing".into());
+        }
+        Err(why) => {
+            tracing::warn!(error = %why, "safe start could not build Breathing; painting one steady colour");
+            app.identify.paint_solid(app.engine.as_ref(), STEADY);
+            *app.safe_effect.lock().unwrap_or_else(|e| e.into_inner()) = Some("steady-color".into());
+        }
+    }
+}
 
 /// The daemon's main loop. Returns the process exit code.
 ///
@@ -262,13 +322,25 @@ async fn daemon_main(fakes: bool) -> Exit {
     // first frame.
     app.set_input_source(Some(app.capture_source()));
 
+    // #577: decide the mode from the service's first Hello before anything is restored or
+    // played. The first-beat grace covers this wait, and a service that cannot answer gives
+    // Normal - detection that cannot prove a crash must not turn the lights safe.
+    let mode = read_start_decision(&app).await;
+    let safe = mode == canvas_proto::api::SafeStartMode::Safe;
+    if safe {
+        read_fan_hold(&app).await;
+    }
+
     // The peripherals the owner allowed are opened; the others stay closed. In fakes mode this
     // applies to the in-memory fakes, so a saved access is honoured there too (#243).
-    canvas_daemon::peripherals::apply_saved(&app).await;
-    // The values a device has are read only while the person is away (#127): a view open never
-    // triggers a read, so the refresh runs here in the background, gated on Windows' last-input
-    // time. In fakes mode it reads the in-memory fakes.
-    canvas_daemon::peripherals::start_idle_refresh(app.clone());
+    // Safe start skips these: no saved file is read and no background read is started.
+    if !safe {
+        canvas_daemon::peripherals::apply_saved(&app).await;
+        // The values a device has are read only while the person is away (#127): a view open never
+        // triggers a read, so the refresh runs here in the background, gated on Windows' last-input
+        // time. In fakes mode it reads the in-memory fakes.
+        canvas_daemon::peripherals::start_idle_refresh(app.clone());
+    }
 
     // The zone sizes from disk.
     {
@@ -279,17 +351,23 @@ async fn daemon_main(fakes: bool) -> Exit {
 
     tracing::info!(version = %canvas_daemon::version(), "canvas-rgbd is starting");
 
-    // The user HTML effects are listed before the API answers; the watcher keeps them current.
-    app.user_effects.rescan(&app.effects_dir);
-    // The stacks are read again now the effects folder is known: a stack's name may not be a
-    // user effect's name, and a layer may name one (D95.1.4).
-    app.stacks.reload(&app.user_effects);
+    if safe {
+        // Safe start runs no user HTML effect, no stack and no saved scene. Instead one
+        // in-memory scene of every light plays the built-in Breathing effect.
+        play_safe_lights(&app).await;
+    } else {
+        // The user HTML effects are listed before the API answers; the watcher keeps them current.
+        app.user_effects.rescan(&app.effects_dir);
+        // The stacks are read again now the effects folder is known: a stack's name may not be a
+        // user effect's name, and a layer may name one (D95.1.4).
+        app.stacks.reload(&app.user_effects);
 
-    // The active scene runs again, so a restart does not leave the lights black until something
-    // plays an effect. Its groups' effects are built here; a group whose effect is missing (a
-    // deleted HTML file) is dark and named in the log, and the others run. The device list that
-    // arrives next applies the scene to the real devices.
-    canvas_daemon::scenes::restore_active(&app).await;
+        // The active scene runs again, so a restart does not leave the lights black until
+        // something plays an effect. Its groups' effects are built here; a group whose effect
+        // is missing (a deleted HTML file) is dark and named in the log. The device list that
+        // arrives next applies the scene to the real devices.
+        canvas_daemon::scenes::restore_active(&app).await;
+    }
 
     // The background tasks. Fakes mode gates off every task that touches a
     // real touchpoint (see `canvas_daemon::fakes`); the OpenRGB supervisor
@@ -299,7 +377,7 @@ async fn daemon_main(fakes: bool) -> Exit {
         spawn_pipe_client(app.clone());
         spawn_fan_poller(app.clone());
     }
-    if canvas_daemon::fakes::real_display_enabled(fakes) {
+    if !safe && canvas_daemon::fakes::real_display_enabled(fakes) {
         spawn_display_task(app.clone());
     }
     if canvas_daemon::fakes::real_conflict_check_enabled(fakes) {
@@ -308,10 +386,12 @@ async fn daemon_main(fakes: bool) -> Exit {
     if canvas_daemon::fakes::real_power_watcher_enabled(fakes) {
         spawn_power_watcher(app.clone());
     }
-    if canvas_daemon::fakes::real_first_run_enabled(fakes) {
+    if !safe && canvas_daemon::fakes::real_first_run_enabled(fakes) {
         spawn_first_run(app.clone());
     }
-    spawn_user_effects_watch(app.clone());
+    if !safe {
+        spawn_user_effects_watch(app.clone());
+    }
     canvas_daemon::draft::spawn_sweeper(app.clone());
     canvas_daemon::api::audio::spawn_sweeper(app.clone());
     // The engine's numbers are kept fresh by the daemon's own threads, so a route never

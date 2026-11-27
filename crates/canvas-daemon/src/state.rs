@@ -6,7 +6,7 @@
 
 use canvas_adapters::frame_lane::FrameLane;
 use canvas_adapters::resume::ResumeBehavior;
-use canvas_proto::api::{LinkState, Status};
+use canvas_proto::api::{LastExit, LinkState, SafeStart, SafeStartMode, Status};
 use canvas_proto::device::{DeviceId, DeviceInfo};
 use canvas_proto::fans::FansStatus;
 use canvas_proto::traits::{DeviceAdapter, Engine, FrameSink, GroupState, PreviewSink, RenderStats};
@@ -551,6 +551,16 @@ pub struct App {
     /// 503 (issue #225). The pipe client has no timeout of its own, so a hung service would
     /// otherwise hold the lock, and with it config export and every other fans writer.
     pub fans_pipe_limit: std::time::Duration,
+    /// The mode from the first service `Hello` (#577), latched for this run. `None` until it
+    /// arrives (or for ever when the pipe cannot be reached in time).
+    pub start_mode: Mutex<Option<SafeStartMode>>,
+    /// How the last daemon run ended, from the same reply. `About.last_exit` reads it.
+    pub last_exit: Mutex<LastExit>,
+    /// The status field every surface reads. Built once when the mode is latched, with the
+    /// fan line updated from the first fan status in safe mode.
+    pub safe_start: Mutex<Option<SafeStart>>,
+    /// The built-in effect playing in safe mode, or `None` when the fallback solid is in use.
+    pub safe_effect: Mutex<Option<String>>,
     /// SignalRGB conflicts, refreshed every 5 s.
     pub conflicts: tokio::sync::RwLock<Vec<canvas_proto::api::Conflict>>,
     /// Where OpenRGB is, as the daemon sees it.
@@ -746,6 +756,10 @@ impl App {
             fans: tokio::sync::RwLock::new(None),
             fans_last: tokio::sync::RwLock::new(None),
             fans_pipe_limit: FANS_LOCK_PIPE_LIMIT,
+            start_mode: Mutex::new(None),
+            last_exit: Mutex::new(LastExit::Unknown),
+            safe_start: Mutex::new(None),
+            safe_effect: Mutex::new(None),
             conflicts: tokio::sync::RwLock::new(Vec::new()),
             openrgb: tokio::sync::RwLock::new(LinkState::Down),
             shutting_down: AtomicU32::new(0),
@@ -805,6 +819,58 @@ impl App {
     /// The service version, when the service has answered a `Hello`.
     pub fn service_version(&self) -> Option<String> {
         self.service_version.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The latched mode, or Normal when the first `Hello` never arrived (#577 R13).
+    pub fn start_mode(&self) -> SafeStartMode {
+        self.start_mode.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or_default()
+    }
+
+    /// The latched verdict for Help & About. `Unknown` until the first `Hello` arrives.
+    pub fn last_exit(&self) -> LastExit {
+        *self.last_exit.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Latches the first `Hello`'s decision. Later replies never change it mid-run.
+    pub fn latch_start(&self, mode: SafeStartMode, last_exit: LastExit) {
+        let mut slot = self.start_mode.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(mode);
+        drop(slot);
+        *self.last_exit.lock().unwrap_or_else(|e| e.into_inner()) = last_exit;
+        if mode == SafeStartMode::Safe {
+            // The service's Hello carries only the mode and the last verdict (spine #577).
+            // A crash that ended the last run gets `UncleanOnce`; a deliberate choice from
+            // Help & About ends with a planned verdict and reads as `UserChose`.
+            let reason = if last_exit == LastExit::Unclean {
+                Some(canvas_proto::api::SafeStartReason::UncleanOnce)
+            } else {
+                Some(canvas_proto::api::SafeStartReason::UserChose)
+            };
+            *self.safe_start.lock().unwrap_or_else(|e| e.into_inner()) = Some(SafeStart {
+                active: true,
+                reason,
+                unclean_streak: u32::from(last_exit == LastExit::Unclean),
+                since: None,
+                fans_on_bios: None,
+            });
+        } else {
+            *self.safe_start.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
+    /// The service's answer to `EnterSafeStart`: whether every header is on BIOS control.
+    pub fn set_fans_on_bios(&self, on_bios: Option<bool>) {
+        if let Some(status) = self.safe_start.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            status.fans_on_bios = on_bios;
+        }
+    }
+
+    /// The status snapshot a surface reads, with the fan line the service confirmed.
+    pub fn safe_start_status(&self) -> Option<SafeStart> {
+        self.safe_start.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Replaces the scrubber. Tests pass a fake profile here; production uses the one built from
@@ -979,6 +1045,19 @@ impl App {
         // dismisses it.
         let show_zone_panel = !store.config.zone_panel_dismissed;
         let onboarding_complete = store.config.onboarding_complete;
+        // #577: in safe start the synthetic scene is what is actually on the lights, and the
+        // saved scene is not run. The status names what plays, not what would play after a
+        // restart. Nothing here is written to the store.
+        let safe = self.safe_start_status();
+        let (active_scene, active_effects) = if safe.as_ref().is_some_and(|s| s.active) {
+            let effect = self.safe_effect.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            (
+                Some(canvas_proto::api::SceneRef { id: "safe-start".into(), name: "Safe start".into() }),
+                effect.into_iter().collect::<Vec<_>>(),
+            )
+        } else {
+            (active_scene, active_effects)
+        };
         let openrgb = *self.openrgb.read().await;
         let conflicts = self.conflicts.read().await.clone();
         drop(store);
@@ -1006,8 +1085,8 @@ impl App {
             conflicts,
             show_zone_panel,
             onboarding_complete,
-            // #577 fills this from the service's Hello; until then it reads not active.
-            safe_start: None,
+            // #577: the value latched from the first Hello, with the service's fan answer.
+            safe_start: safe,
         })
     }
 

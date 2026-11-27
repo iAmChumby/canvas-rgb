@@ -710,6 +710,45 @@ pub async fn apply_active(app: &Arc<App>, fade: bool) {
     apply_with(app, &lock, fade).await;
 }
 
+/// Safe start (#577): plays a built-in effect on every saved light, in memory only. Nothing is
+/// written to the store and the scene is not marked active, so the saved scene comes back on the
+/// next normal start. A group that cannot be built is an error for the caller to report.
+pub async fn play_builtin_on_all(app: &Arc<App>, effect: &str) -> Result<(), String> {
+    let lights = app.store.read().await.lights.lights.clone();
+    let devices = app.devices.read().await.clone();
+    let members: Vec<LightId> = lights.iter().map(|l| l.id.clone()).collect();
+    if members.is_empty() {
+        return Err("there are no saved lights to play on".into());
+    }
+    let scene = Scene {
+        id: "safe-start".into(),
+        name: "Safe start".into(),
+        rev: 0,
+        groups: vec![Group {
+            id: "safe-start".into(),
+            name: "Safe start".into(),
+            members,
+            plays: Plays::Effect { effect: effect.to_string(), props: Props::new() },
+            mode: GroupMode::default(),
+            brightness: GROUP_BRIGHTNESS_MAX,
+            sequence: None,
+        }],
+    };
+    let built = {
+        let app = Arc::clone(app);
+        let lights = lights.clone();
+        let devices = devices.clone();
+        let scene = scene.clone();
+        tokio::task::spawn_blocking(move || build_and_set(&app, &lights, &devices, &scene, false)).await
+    };
+    let failures = built.map_err(|e| format!("the safe-start scene could not be built: {e}"))?;
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.values().next().cloned().unwrap_or_else(|| "the safe-start scene did not build".into()))
+    }
+}
+
 /// [`apply_active`] for a caller that already orders the lights with the draft gate.
 ///
 /// The scene order is *not* taken here, and that is deliberate: a scene write holds the scene
