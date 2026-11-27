@@ -214,8 +214,15 @@
   font-family: var(--fm);
   font-size: var(--t14);
   line-height: 1.5;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.licenceParagraph {
+  margin: 0 0 var(--s2);
+}
+
+.licenceParagraph:last-child {
+  margin-bottom: 0;
 }
 
 .error {

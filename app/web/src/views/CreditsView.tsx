@@ -118,10 +118,10 @@ export function CreditsView() {
                   className={s.disclosure}
                   caretClassName={s.caret}
                   bodyClassName={s.disclosureBody}
+                  paragraphClassName={s.licenceParagraph}
                   label={`Read the ${group.licence} text (${group.count} ${group.count === 1 ? "notice" : "notices"})`}
-                >
-                  {group.texts.map((text, i) => (group.texts.length > 1 ? `[${i + 1}]\n${text}` : text)).join("\n\n---\n\n")}
-                </LicenceDisclosure>
+                  text={group.texts.map((text, i) => (group.texts.length > 1 ? `[${i + 1}]\n${text}` : text)).join("\n\n---\n\n")}
+                />
               </section>
             ))}
           </Panel>
