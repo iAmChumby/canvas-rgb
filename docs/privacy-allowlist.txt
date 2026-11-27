@@ -23,6 +23,8 @@ objects.githubusercontent.com
 release-assets.githubusercontent.com
 # Pinned OpenRGB zip downloaded by setup (outbound row 4)
 codeberg.org
+# Docs site linked from Help & About; the browser opens it, the app never fetches it (row 5)
+iamchumby.github.io
 # Tauri config schema: a build-time $schema URL, never fetched by the app
 schema.tauri.app
 

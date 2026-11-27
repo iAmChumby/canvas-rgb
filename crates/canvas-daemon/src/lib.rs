@@ -33,6 +33,7 @@ pub mod power;
 pub mod scene_migration;
 pub mod scene_move;
 pub mod scenes;
+pub mod scrub;
 pub mod preview;
 pub mod state;
 pub mod stack;

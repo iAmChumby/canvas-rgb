@@ -3,6 +3,7 @@
 //! Every route is under `/api/v1`. The G9 guards (bearer token, Origin, Host) run as
 //! middleware on the whole router.
 
+pub mod about;
 pub mod audio;
 pub mod chains;
 pub mod diag;
@@ -34,6 +35,8 @@ use crate::state::App;
 pub fn router(app: Arc<App>) -> Router {
     let api = Router::new()
         .route(routes::STATUS, get(status::status))
+        .route(routes::ABOUT, get(about::about))
+        .route(routes::ABOUT_REPORT, get(about::report))
         .route(routes::OUTPUT, get(output::get_output).patch(output::patch_output))
         .route(routes::DEVICES, get(devices::list_devices))
         .route(

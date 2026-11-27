@@ -535,6 +535,12 @@ pub struct App {
     pub token: String,
     /// The daemon's version, as reported by `/status`.
     pub version: String,
+    /// The service's version from its pipe `Hello`. The pipe client writes it; `/about` reads it.
+    /// `None` until the service has answered (or for ever in a fakes run).
+    pub service_version: Mutex<Option<String>>,
+    /// The one scrubber for every string that leaves the app (#574). Tests replace it with a
+    /// fake profile so no test depends on the account that runs it.
+    pub scrubber: Mutex<crate::scrub::Scrubber>,
     /// Milliseconds the service pipe has been down.
     pub service_down_ms: AtomicU64,
     /// The last fan status the service reported.
@@ -734,6 +740,8 @@ impl App {
             inputs,
             token,
             version,
+            service_version: Mutex::new(None),
+            scrubber: Mutex::new(crate::scrub::Scrubber::from_env()),
             service_down_ms: AtomicU64::new(0),
             fans: tokio::sync::RwLock::new(None),
             fans_last: tokio::sync::RwLock::new(None),
@@ -781,6 +789,28 @@ impl App {
     /// answers `None`.
     pub fn take_rescan_inbox(&self) -> Option<tokio::sync::mpsc::Receiver<crate::openrgb_supervisor::Rescan>> {
         self.rescan_inbox.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// Keeps the service's version from its `Hello` reply (#574 R6). The pipe client used to log
+    /// and drop it, so `/about` could not say what service was answering.
+    pub fn set_service_version(&self, version: String) {
+        *self.service_version.lock().unwrap_or_else(|e| e.into_inner()) = Some(version);
+    }
+
+    /// Forgets the last `Hello`: a disconnected service has no version to show (#574).
+    pub fn clear_service_version(&self) {
+        *self.service_version.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// The service version, when the service has answered a `Hello`.
+    pub fn service_version(&self) -> Option<String> {
+        self.service_version.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Replaces the scrubber. Tests pass a fake profile here; production uses the one built from
+    /// the process's own environment.
+    pub fn set_scrubber(&self, scrubber: crate::scrub::Scrubber) {
+        *self.scrubber.lock().unwrap_or_else(|e| e.into_inner()) = scrubber;
     }
 
 

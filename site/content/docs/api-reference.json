@@ -1,6 +1,131 @@
 {
   "entries": [
     {
+      "path": "/api/v1/about",
+      "title": "About",
+      "area": "Status and output",
+      "methods": [
+        "GET"
+      ],
+      "pathParams": [],
+      "descriptions": {
+        "GET": "Reports the app version, build, Windows edition, service version and how the previous run ended."
+      },
+      "examples": {
+        "GET": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X GET -H \"Authorization: Bearer $TOKEN\" \"http://127.0.0.1:9430/api/v1/about\""
+      },
+      "requestType": {
+        "GET": "none"
+      },
+      "responseType": {
+        "GET": "About"
+      },
+      "requestShape": {},
+      "responseShape": {
+        "GET": {
+          "label": "About",
+          "fields": [
+            {
+              "name": "version",
+              "type": "string",
+              "meaning": "The daemon's version (`CARGO_PKG_VERSION`), the same as `version`"
+            },
+            {
+              "name": "commit",
+              "type": "string or null",
+              "meaning": "The short commit the daemon was built from, when the build knew it",
+              "optional": true
+            },
+            {
+              "name": "build_date",
+              "type": "string or null",
+              "meaning": "The build date, `YYYY-MM-DD`, when the build knew it",
+              "optional": true
+            },
+            {
+              "name": "os",
+              "type": "string or null",
+              "meaning": "Windows edition and build, for example `Windows 11 Home 10.0.26300`, when it could be read",
+              "optional": true
+            },
+            {
+              "name": "service_version",
+              "type": "string or null",
+              "meaning": "The service's version from its `Hello`, when the service is connected",
+              "optional": true
+            },
+            {
+              "name": "last_exit",
+              "type": "LastExit",
+              "meaning": "How the previous run ended"
+            }
+          ]
+        }
+      },
+      "queryParams": {
+        "GET": []
+      },
+      "queryType": {}
+    },
+    {
+      "path": "/api/v1/about/report",
+      "title": "About report",
+      "area": "Status and output",
+      "methods": [
+        "GET"
+      ],
+      "pathParams": [],
+      "descriptions": {
+        "GET": "Returns the scrubbed support report the editor shows and copies, with the fields the bug report template fills."
+      },
+      "examples": {
+        "GET": "# Check who owns port 9430 first; see the Verify the listener before you send the token section of the getting-started page\ncurl -X GET -H \"Authorization: Bearer $TOKEN\" \"http://127.0.0.1:9430/api/v1/about/report\""
+      },
+      "requestType": {
+        "GET": "none"
+      },
+      "responseType": {
+        "GET": "AboutReport"
+      },
+      "requestShape": {},
+      "responseShape": {
+        "GET": {
+          "label": "AboutReport",
+          "fields": [
+            {
+              "name": "markdown",
+              "type": "string",
+              "meaning": "The whole report as GitHub Markdown: what the preview shows and Copy puts on the clipboard"
+            },
+            {
+              "name": "version",
+              "type": "string",
+              "meaning": "The bug template's `version` field"
+            },
+            {
+              "name": "windows",
+              "type": "string",
+              "meaning": "The bug template's `windows` field"
+            },
+            {
+              "name": "hardware",
+              "type": "string",
+              "meaning": "The bug template's `hardware` field: one line per device, model-level only"
+            },
+            {
+              "name": "other_rgb_apps",
+              "type": "string",
+              "meaning": "The bug template's `other-rgb-apps` field"
+            }
+          ]
+        }
+      },
+      "queryParams": {
+        "GET": []
+      },
+      "queryType": {}
+    },
+    {
       "path": "/api/v1/audio/source",
       "title": "Audio source",
       "area": "Audio",
@@ -5217,6 +5342,80 @@
     }
   ],
   "types": {
+    "About": {
+      "fields": [
+        {
+          "name": "version",
+          "type": "string",
+          "optional": false,
+          "meaning": "The daemon's version (`CARGO_PKG_VERSION`), the same as `version`"
+        },
+        {
+          "name": "commit",
+          "type": "string or null",
+          "optional": true,
+          "meaning": "The short commit the daemon was built from, when the build knew it"
+        },
+        {
+          "name": "build_date",
+          "type": "string or null",
+          "optional": true,
+          "meaning": "The build date, `YYYY-MM-DD`, when the build knew it"
+        },
+        {
+          "name": "os",
+          "type": "string or null",
+          "optional": true,
+          "meaning": "Windows edition and build, for example `Windows 11 Home 10.0.26300`, when it could be read"
+        },
+        {
+          "name": "service_version",
+          "type": "string or null",
+          "optional": true,
+          "meaning": "The service's version from its `Hello`, when the service is connected"
+        },
+        {
+          "name": "last_exit",
+          "type": "LastExit",
+          "optional": false,
+          "meaning": "How the previous run ended"
+        }
+      ]
+    },
+    "AboutReport": {
+      "fields": [
+        {
+          "name": "markdown",
+          "type": "string",
+          "optional": false,
+          "meaning": "The whole report as GitHub Markdown: what the preview shows and Copy puts on the clipboard"
+        },
+        {
+          "name": "version",
+          "type": "string",
+          "optional": false,
+          "meaning": "The bug template's `version` field"
+        },
+        {
+          "name": "windows",
+          "type": "string",
+          "optional": false,
+          "meaning": "The bug template's `windows` field"
+        },
+        {
+          "name": "hardware",
+          "type": "string",
+          "optional": false,
+          "meaning": "The bug template's `hardware` field: one line per device, model-level only"
+        },
+        {
+          "name": "other_rgb_apps",
+          "type": "string",
+          "optional": false,
+          "meaning": "The bug template's `other-rgb-apps` field"
+        }
+      ]
+    },
     "AudioSource": {
       "fields": [
         {
@@ -7266,6 +7465,24 @@
           "type": "string",
           "optional": true,
           "meaning": "The page's epoch: the editor page's session counter. A delete from a page that does not own the preview leaves the preview running."
+        }
+      ]
+    },
+    "LastExit": {
+      "fields": [],
+      "note": "One of: \"clean\", \"unclean\", \"unknown\".",
+      "values": [
+        {
+          "value": "clean",
+          "meaning": "The previous run ended on purpose."
+        },
+        {
+          "value": "unclean",
+          "meaning": "The previous run ended without a clean stop."
+        },
+        {
+          "value": "unknown",
+          "meaning": "There is no record of the previous run yet."
         }
       ]
     },

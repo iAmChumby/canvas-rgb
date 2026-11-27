@@ -199,6 +199,7 @@ export function ButtonLink({
   prefetch = false,
   label,
   onClick,
+  external = false,
 }: {
   href: string;
   variant?: Variant;
@@ -210,12 +211,34 @@ export function ButtonLink({
   /** The link's accessible name, for a link whose words are hidden at some widths. */
   label?: string;
   onClick?: () => void;
+  /**
+   * An address outside the editor. The caller opens it through the host (no navigation guard,
+   * no router push), but the look still comes from this component.
+   */
+  external?: boolean;
 }) {
   const router = useRouter();
+  const cls = buttonClass(variant, size, className);
+  if (external) {
+    return (
+      <a
+        href={href}
+        className={cls}
+        aria-label={label}
+        onClick={(e) => {
+          e.preventDefault();
+          onClick?.();
+        }}
+      >
+        {icon}
+        {children}
+      </a>
+    );
+  }
   return (
     <Link
       href={href}
-      className={buttonClass(variant, size, className)}
+      className={cls}
       prefetch={prefetch}
       aria-label={label}
       onClick={(e) => {
