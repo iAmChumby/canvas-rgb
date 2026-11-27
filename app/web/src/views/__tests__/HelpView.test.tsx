@@ -131,13 +131,21 @@ describe("the Help & About page", () => {
     expect(help?.label).toBe("Help & About");
   });
 
-  it("gives every Go-to row its address and leaves room for two lines", async () => {
+  it("gives every Go-to row one line and the full URL in its name", async () => {
     render(<HelpView />);
     await screen.findByTestId("receipt-text");
     const keys = Array.from(document.querySelectorAll(".help-key"));
-    expect(keys).toHaveLength(5);
-    for (const key of keys) {
-      expect(key.querySelector(".help-key-address")?.textContent).toBeTruthy();
+    expect(keys).toHaveLength(4);
+    const fullUrls = [
+      "https://iamchumby.github.io/canvas-rgb/docs/",
+      "https://github.com/iAmChumby/canvas-rgb",
+      "https://github.com/iAmChumby/canvas-rgb/blob/main/docs/privacy.md",
+      "https://github.com/iAmChumby/canvas-rgb/blob/main/docs/thanks.md",
+    ];
+    for (const [i, key] of keys.entries()) {
+      const address = key.querySelector(".help-key-address");
+      expect(address?.textContent).toBeTruthy();
+      expect(address?.getAttribute("title")).toBe(fullUrls[i]);
       expect(key.querySelector(".help-key-hint")).toBeNull();
     }
     const cssPath = ["src/styles/app.css", "app/web/src/styles/app.css"]
@@ -145,16 +153,34 @@ describe("the Help & About page", () => {
       .find((p) => existsSync(p));
     expect(cssPath).toBeDefined();
     const css = readFileSync(cssPath!, "utf8");
-    const rule = css.match(/\.help-key\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(rule).toMatch(/height:\s*auto/);
-    expect(rule).toMatch(/white-space:\s*normal/);
-    expect(rule).not.toMatch(/border-radius:\s*0/);
+    const keyRule = css.match(/\.help-key\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(keyRule).toMatch(/height:\s*auto/);
+    expect(keyRule).toMatch(/white-space:\s*normal/);
+    expect(keyRule).not.toMatch(/border-radius:\s*0/);
+    const addressRule = css.match(/\.help-key-address\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(addressRule).toMatch(/white-space:\s*nowrap/);
+    expect(addressRule).toMatch(/overflow:\s*hidden/);
+    expect(addressRule).toMatch(/text-overflow:\s*ellipsis/);
+    expect(addressRule).not.toMatch(/overflow-wrap/);
+  });
+
+  it("keeps release notes in the identity panel and leaves only external Go-to keys", async () => {
+    render(<HelpView />);
+    await screen.findByTestId("receipt-text");
+    const keys = Array.from(document.querySelectorAll(".help-key"));
+    for (const key of keys) {
+      expect(key.textContent).not.toContain("Release notes");
+      expect(key.getAttribute("href")).toMatch(/^https:\/\//);
+      expect(key.querySelector(".help-key-arrow")).not.toBeNull();
+    }
+    const notes = screen.getByRole("link", { name: "Release notes for this version" });
+    expect(notes.getAttribute("href")).toBe("/updates/");
   });
 
   it("opens external keys through the host control layer", async () => {
     render(<HelpView />);
     await screen.findByTestId("receipt-text");
-    fireEvent.click(screen.getByRole("link", { name: "Docs" }));
+    fireEvent.click(screen.getByRole("link", { name: /^Docs/ }));
     await waitFor(() =>
       expect(openExternal).toHaveBeenCalledWith("https://iamchumby.github.io/canvas-rgb/docs/"),
     );

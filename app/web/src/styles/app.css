@@ -10537,11 +10537,14 @@ button.chip:hover {
 }
 
 .help-key-address {
+  display: block;
   color: var(--mute);
   font-family: var(--fm);
   font-size: var(--t14);
   line-height: 1.4;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .help-key-arrow {

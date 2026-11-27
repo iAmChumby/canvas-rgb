@@ -6,7 +6,6 @@ import {
   ArrowSquareOut,
   BookOpen,
   Check,
-  ClockCounterClockwise,
   Copy,
   GithubLogo,
   ShieldCheck,
@@ -223,11 +222,10 @@ export function HelpView() {
                   external
                   onOpen={() => openAway(SOURCE)}
                 />
-                <KeyRow href="/updates/" icon={ClockCounterClockwise} label="Release notes" address="/updates" />
                 <KeyRow
                   icon={ShieldCheck}
                   label="Privacy"
-                  address="github.com/iAmChumby/canvas-rgb/docs/privacy.md"
+                  address="…/docs/privacy.md"
                   href={PRIVACY}
                   external
                   onOpen={() => openAway(PRIVACY)}
@@ -235,7 +233,7 @@ export function HelpView() {
                 <KeyRow
                   icon={Star}
                   label="Credits"
-                  address="github.com/iAmChumby/canvas-rgb/docs/thanks.md"
+                  address="…/docs/thanks.md"
                   href={CREDITS}
                   external
                   onOpen={() => openAway(CREDITS)}
@@ -249,7 +247,11 @@ export function HelpView() {
   );
 }
 
-/** One key: an icon, its name, the address it opens, and the arrow that says it leaves. */
+/**
+ * One key: an icon, its name, a short address and the arrow for a key that leaves the app. The
+ * short address fits on one line; its `title` and the link's accessible name carry the full URL,
+ * so a truncated address still says where the key goes. An internal key gets no external arrow.
+ */
 function KeyRow({
   icon: Glyph,
   label,
@@ -270,16 +272,16 @@ function KeyRow({
       href={href}
       variant="ghost"
       className="help-key"
-      label={label}
+      label={`${label}: ${href}`}
       external={external}
       onClick={onOpen}
     >
       <Glyph size={18} className="help-key-icon" aria-hidden="true" />
       <span className="help-key-text">
         <span className="help-key-label">{label}</span>
-        <span className="help-key-address fig">{address}</span>
+        <span className="help-key-address fig" title={href}>{address}</span>
       </span>
-      <ArrowSquareOut size={14} className="help-key-arrow" aria-hidden="true" />
+      {external && <ArrowSquareOut size={14} className="help-key-arrow" aria-hidden="true" />}
     </ButtonLink>
   );
 }
