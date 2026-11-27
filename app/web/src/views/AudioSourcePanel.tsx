@@ -1,4 +1,5 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
 import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useRef, useState, type RefObject } from "react";
@@ -384,7 +385,7 @@ export function AudioSourcePanel() {
               {popoverOpen ? "Hide readings" : "Show readings"}
             </Button>
           </span>
-          {err && <ErrorLine>{err}</ErrorLine>}
+          {err && <ErrorState compact message={err} />}
           <Popover
             anchor={triggerRef as unknown as RefObject<HTMLElement | null>}
             open={popoverOpen}
@@ -403,7 +404,7 @@ export function AudioSourcePanel() {
           <p className="audio-state" role="status" aria-busy={waiting || undefined}>
             <StateWords words={words} waiting={waiting} />
           </p>
-          {err && <ErrorLine>{err}</ErrorLine>}
+          {err && <ErrorState compact message={err} />}
           {readings}
         </>
       )}

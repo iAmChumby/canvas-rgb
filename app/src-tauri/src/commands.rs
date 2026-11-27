@@ -52,12 +52,75 @@ pub fn diag_bundle_save() -> Result<DiagBundle, String> {
     canvas_diag::bundle::Bundle::new().write(&scrubber).map_err(scrub_error)
 }
 
+/// Only a `.zip` file directly inside the one diagnostics folder may be revealed (F6).
+/// Canonicalizing resolves a junction to its target, so a linked file outside the folder is
+/// refused. Kept as a plain function so the rule can be tested without a Tauri handle.
+pub fn reveal_target_ok(diagnostics: &std::path::Path, candidate: &std::path::Path) -> bool {
+    let Ok(root) = std::fs::canonicalize(diagnostics) else {
+        return false;
+    };
+    let Ok(target) = std::fs::canonicalize(candidate) else {
+        return false;
+    };
+    target.parent() == Some(root.as_path())
+        && target.extension().and_then(|e| e.to_str()) == Some("zip")
+        && target.is_file()
+}
+
 /// Reveals the saved zip in Explorer, with the file selected.
 #[tauri::command]
 pub fn reveal_diag_bundle<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
-    app.opener()
-        .reveal_item_in_dir(PathBuf::from(path))
-        .map_err(scrub_error)
+    let target = PathBuf::from(path);
+    if !reveal_target_ok(&canvas_diag::paths::diagnostics_dir(), &target) {
+        return Err(scrub_error("only a zip in the diagnostics folder can be revealed"));
+    }
+    app.opener().reveal_item_in_dir(target).map_err(scrub_error)
+}
+
+#[cfg(test)]
+mod reveal_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_zip_directly_in_the_diagnostics_folder_can_be_revealed() {
+        let root = std::env::temp_dir().join(format!(
+            "canvas-rgb-reveal-{}-{}",
+            std::process::id(),
+            canvas_diag::paths::timestamp()
+        ));
+        let inside = root.join("diagnostics");
+        let other = root.join("elsewhere");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let zip = inside.join("canvas-rgb-diag.zip");
+        std::fs::write(&zip, b"PK").unwrap();
+        assert!(reveal_target_ok(&inside, &zip));
+        assert!(!reveal_target_ok(&inside, &root.join("diagnostics/../elsewhere/x.zip")));
+        assert!(!reveal_target_ok(&inside, &other.join("x.zip")));
+        assert!(!reveal_target_ok(&inside, &inside.join("notes.txt")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_to_a_zip_elsewhere_is_refused() {
+        use std::os::windows::fs::symlink_file;
+        let root = std::env::temp_dir().join(format!(
+            "canvas-rgb-reveal-junction-{}-{}",
+            std::process::id(),
+            canvas_diag::paths::timestamp()
+        ));
+        let inside = root.join("diagnostics");
+        let other = root.join("elsewhere");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let real = other.join("real.zip");
+        std::fs::write(&real, b"PK").unwrap();
+        let link = inside.join("link.zip");
+        symlink_file(&real, &link).unwrap();
+        assert!(!reveal_target_ok(&inside, &link));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 /// Opens the service's own log folder by its fixed path. Never creates or writes to it; a
@@ -66,7 +129,7 @@ pub fn reveal_diag_bundle<R: Runtime>(app: AppHandle<R>, path: String) -> Result
 pub fn open_service_logs_folder<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let dir = canvas_diag::paths::machine_log_dir();
     if let Some(reason) = canvas_diag::service_logs::refusal(
-        &canvas_diag::service_logs::RealLogFs,
+        &canvas_diag::service_logs::RealLogFs::default(),
         &dir,
     ) {
         return Err(scrub_error(reason));

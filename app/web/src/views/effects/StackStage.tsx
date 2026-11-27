@@ -143,7 +143,7 @@ export function StackStage({
                   ? `The preview is not showing: ${feedProblem}`
                   : count === 0
                     ? "An empty stack runs nothing; the lights keep their effect."
-                    : "Preview only — nothing is on the lights."}
+                    : "Preview only ΓÇö nothing is on the lights."}
           </span>
           <span className="row-wrap">
             {fpsTarget > 50 && html > 0 && (

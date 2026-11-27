@@ -486,8 +486,9 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
         }),
       );
     }
-    if (fault === "inline") {
-      await page.route(`${daemonBase}/api/v1/devices`, (route) =>
+    if (fault === "fans-error" || fault === "inline") {
+      const path = fault === "fans-error" ? "/api/v1/fans" : "/api/v1/devices";
+      await page.route(`${daemonBase}${path}`, (route) =>
         route.fulfill({
           status: 503,
           contentType: "application/json",

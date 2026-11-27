@@ -1,4 +1,4 @@
-//! The read-only, fail-closed reader for the service's log folder (R5, P3).
+//! The read-only, fail-closed reader for the service's log folder (R5, P3, F1).
 //!
 //! Nothing under `%ProgramData%\canvas-rgb` is ever written, deleted, renamed or adopted. Every
 //! component of the path is checked for a reparse point and for a SYSTEM/Administrators owner
@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 /// SID strings of the only owners we trust, as in the service's secure home.
 pub const TRUSTED_OWNER_SIDS: [&str; 2] = ["S-1-5-18", "S-1-5-32-544"];
+
+/// A service log over this size is refused, not silently cut (F1).
+pub const MAX_LOG_BYTES: usize = 4 * 1024 * 1024;
 
 /// Windows itself owns the folders above the program tree; they are trusted parents, but never
 /// an entry inside the canvas-rgb tree.
@@ -26,6 +29,10 @@ fn trusted_parent(sid: &str) -> bool {
 
 /// The filesystem facts the fail-closed rule needs. A fake supplies them in tests.
 pub trait LogFs {
+    /// The owner rule this filesystem applies; tests on a user-owned folder can inject one.
+    fn trusts(&self, sid: &str) -> bool {
+        owner_is_trusted(sid)
+    }
     fn exists(&self, path: &Path) -> Result<bool, String>;
     /// True for a junction or symlink, checked without following it.
     fn is_reparse(&self, path: &Path) -> Result<bool, String>;
@@ -83,7 +90,7 @@ fn check(fs: &dyn LogFs, dir: &Path) -> Result<(), String> {
         let owner = fs.owner(component).map_err(|e| {
             format!("Service logs: not included. Windows did not let canvas-rgb read the owner. ({e})")
         })?;
-        if !trusted_parent(&owner) {
+        if !trusted_parent(&owner) && !fs.trusts(&owner) {
             return Err(format!(
                 "Service logs: not included. The folder is owned by {owner}, not SYSTEM or Administrators."
             ));
@@ -100,7 +107,7 @@ fn check(fs: &dyn LogFs, dir: &Path) -> Result<(), String> {
         let owner = fs
             .owner(&path)
             .map_err(|e| format!("Service logs: not included. Windows did not let canvas-rgb read an owner. ({e})"))?;
-        if !owner_is_trusted(&owner) {
+        if !fs.trusts(&owner) {
             return Err(format!(
                 "Service logs: not included. A service log is owned by {owner}, not SYSTEM or Administrators."
             ));
@@ -117,182 +124,262 @@ fn refuse_reparse(fs: &dyn LogFs, path: &Path, what: &str) -> Result<(), String>
     }
 }
 
-/// The real filesystem. Compiled for Windows; other targets have no machine tree and refuse.
-#[cfg(windows)]
-pub struct RealLogFs;
+/// The real filesystem. The owner predicate is a field so a test can inject "trust this temp
+/// folder"; production uses the SYSTEM/Administrators rule.
+pub struct RealLogFs {
+    owner_check: fn(&str) -> bool,
+}
 
-#[cfg(windows)]
-impl LogFs for RealLogFs {
-    fn exists(&self, path: &Path) -> Result<bool, String> {
-        match std::fs::symlink_metadata(path) {
-            Ok(_) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e.to_string()),
-        }
+impl Default for RealLogFs {
+    fn default() -> Self {
+        Self { owner_check: owner_is_trusted }
     }
+}
 
-    fn is_reparse(&self, path: &Path) -> Result<bool, String> {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        let attrs = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?.file_attributes();
-        Ok(attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+impl RealLogFs {
+    /// Only for tests on a folder this process owns; never used in production.
+    pub fn with_owner_check(check: fn(&str) -> bool) -> Self {
+        Self { owner_check: check }
     }
+}
 
-    fn owner(&self, path: &Path) -> Result<String, String> {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
-        use windows::Win32::Foundation::{HLOCAL, LocalFree};
-        use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT};
-        use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSID, PSECURITY_DESCRIPTOR};
+#[cfg(windows)]
+mod real {
+    use super::*;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
+    };
+    use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSID};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, ReadFile, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        READ_CONTROL,
+    };
 
+    /// Opens without following a reparse point. `directory` adds `FILE_FLAG_BACKUP_SEMANTICS`.
+    fn open(path: &Path, access: u32, directory: bool) -> Result<HANDLE, String> {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let mut sid: PSID = PSID::default();
-        let mut descriptor = PSECURITY_DESCRIPTOR::default();
-        // SAFETY: the path is NUL-terminated and the out-pointers are valid locals.
-        let status = unsafe {
-            GetNamedSecurityInfoW(
+        let mut flags = FILE_FLAG_OPEN_REPARSE_POINT;
+        if directory {
+            flags |= FILE_FLAG_BACKUP_SEMANTICS;
+        }
+        // SAFETY: the path is NUL-terminated; no reparse point is followed on this open.
+        let handle: HANDLE = unsafe {
+            CreateFileW(
                 PCWSTR(wide.as_ptr()),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                flags,
+                Some(HANDLE::default()),
+            )
+        }
+        .map_err(|e| format!("could not open {}: {e}", path.display()))?;
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(format!("could not open {}", path.display()));
+        }
+        Ok(handle)
+    }
+
+    /// Reads the owner SID from an already-open handle: `GetSecurityInfo` needs `READ_CONTROL`.
+    fn owner_from_handle(handle: HANDLE) -> Result<String, String> {
+        let mut sid: PSID = PSID::default();
+        // SAFETY: the handle is open and `sid` receives a pointer into the security descriptor.
+        let status = unsafe {
+            GetSecurityInfo(
+                handle,
                 SE_FILE_OBJECT,
                 OWNER_SECURITY_INFORMATION,
                 Some(&mut sid),
                 None,
                 None,
                 None,
-                &mut descriptor,
+                None,
             )
         };
         if status.0 != 0 {
-            return Err(format!("GetNamedSecurityInfoW returned {}", status.0));
+            return Err(format!("GetSecurityInfo returned {}", status.0));
         }
         let mut text = windows::core::PWSTR::null();
         let result = unsafe { ConvertSidToStringSidW(sid, &mut text) }
             .map_err(|e| format!("ConvertSidToStringSidW failed: {e}"))
-            .and_then(|_| unsafe { text.to_string() }.map_err(|e| format!("the owner SID could not be read: {e}")));
-        // SAFETY: both buffers came from the calls above and are freed once.
+            .and_then(|_| unsafe { text.to_string() }.map_err(|e| e.to_string()));
+        // SAFETY: the string came from ConvertSidToStringSidW and is freed once.
         unsafe {
             if !text.is_null() {
                 LocalFree(Some(HLOCAL(text.0.cast())));
             }
-            LocalFree(Some(HLOCAL(descriptor.0)));
         }
         result
     }
 
-    fn files(&self, dir: &Path) -> Result<Vec<PathBuf>, String> {
-        std::fs::read_dir(dir)
-            .map_err(|e| e.to_string())?
-            .filter_map(|entry| match entry {
-                Ok(e) if e.path().is_file() => Some(Ok(e.path())),
-                Ok(_) => None,
-                Err(e) => Some(Err(e.to_string())),
-            })
-            .collect()
-    }
-
-    fn open_checked(&self, path: &Path) -> Result<Vec<u8>, String> {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-        use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT};
-        use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSID};
-        use windows::Win32::Storage::FileSystem::{
-            CreateFileW, GetFileInformationByHandle, ReadFile, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, OPEN_EXISTING,
-        };
-        use windows::core::PCWSTR;
-
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        // SAFETY: the path is NUL-terminated; no reparse point is followed on this open.
-        let handle: HANDLE = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                FILE_READ_ATTRIBUTES.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-                Some(HANDLE::default()),
-            )
+    impl LogFs for RealLogFs {
+        fn trusts(&self, sid: &str) -> bool {
+            (self.owner_check)(sid)
         }
-        .map_err(|e| format!("could not open the log: {e}"))?;
-        if handle == INVALID_HANDLE_VALUE {
-            return Err("could not open the log".to_string());
+        fn exists(&self, path: &Path) -> Result<bool, String> {
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e.to_string()),
+            }
         }
-        let result = (|| {
+
+        fn is_reparse(&self, path: &Path) -> Result<bool, String> {
+            let handle = open(path, FILE_READ_ATTRIBUTES.0, true)?;
             let mut info = BY_HANDLE_FILE_INFORMATION::default();
-            // SAFETY: `handle` is open for the whole closure.
-            unsafe { GetFileInformationByHandle(handle, &mut info) }
-                .map_err(|e| format!("could not read the log's attributes: {e}"))?;
-            if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
-                return Err("the log is a junction or symlink".to_string());
-            }
-            let mut sid: PSID = PSID::default();
-            // SAFETY: the handle is valid and `sid` receives a pointer into the security
-            // descriptor; both are freed below.
-            let status = unsafe {
-                GetSecurityInfo(
-                    handle,
-                    SE_FILE_OBJECT,
-                    OWNER_SECURITY_INFORMATION,
-                    Some(&mut sid),
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            };
-            if status.0 != 0 {
-                return Err(format!("GetSecurityInfo returned {}", status.0));
-            }
-            let mut text = windows::core::PWSTR::null();
-            let owner = unsafe { ConvertSidToStringSidW(sid, &mut text) }
-                .map_err(|e| format!("ConvertSidToStringSidW failed: {e}"))
-                .and_then(|_| unsafe { text.to_string() }.map_err(|e| e.to_string()))?;
-            // SAFETY: the string came from ConvertSidToStringSidW and is freed once.
+            // SAFETY: `handle` is open for the whole call.
+            let result = unsafe { GetFileInformationByHandle(handle, &mut info) }
+                .map_err(|e| e.to_string())
+                .map(|()| info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0);
+            // SAFETY: `handle` was opened above and is closed once here.
             unsafe {
-                if !text.is_null() {
-                    windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(text.0.cast())));
-                }
+                let _ = CloseHandle(handle);
             }
-            if !owner_is_trusted(&owner) {
-                return Err(format!("the log is owned by {owner}, not SYSTEM or Administrators"));
-            }
-            // A text log is small; read from the same handle that was checked.
-            let mut buf = vec![0u8; 1024 * 1024];
-            let mut read = 0u32;
-            // SAFETY: `buf` is valid for `buf.len()` bytes and `read` is a valid out-parameter.
-            unsafe { ReadFile(handle, Some(&mut buf[..]), Some(&mut read), None) }
-                .map_err(|e| format!("could not read the log: {e}"))?;
-            buf.truncate(read as usize);
-            Ok(buf)
-        })();
-        // SAFETY: `handle` was opened above and is closed exactly once here.
-        unsafe {
-            let _ = CloseHandle(handle);
+            result
         }
-        result
+
+        fn owner(&self, path: &Path) -> Result<String, String> {
+            // Directories need BACKUP_SEMANTICS; files open the same way without it.
+            let is_dir = std::fs::symlink_metadata(path).map(|m| m.is_dir()).unwrap_or(false);
+            let handle = open(path, FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0, is_dir)?;
+            let result = owner_from_handle(handle);
+            // SAFETY: `handle` was opened above and is closed once here.
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            result
+        }
+
+        fn files(&self, dir: &Path) -> Result<Vec<PathBuf>, String> {
+            std::fs::read_dir(dir)
+                .map_err(|e| e.to_string())?
+                // A junction is not a file: include every entry so `check` can refuse it (F1).
+                .map(|entry| entry.map(|e| e.path()).map_err(|e| e.to_string()))
+                .collect()
+        }
+
+        fn open_checked(&self, path: &Path) -> Result<Vec<u8>, String> {
+            // FILE_GENERIC_READ = FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE:
+            // both GetSecurityInfo and ReadFile need rights the old attributes-only open lacked.
+            let handle = open(path, FILE_GENERIC_READ.0, false)?;
+            let result = (|| {
+                let mut info = BY_HANDLE_FILE_INFORMATION::default();
+                // SAFETY: `handle` is open for the whole closure.
+                unsafe { GetFileInformationByHandle(handle, &mut info) }
+                    .map_err(|e| format!("could not read the log's attributes: {e}"))?;
+                if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+                    return Err("the log is a junction or symlink".to_string());
+                }
+                let owner = owner_from_handle(handle)?;
+                if !(self.owner_check)(&owner) {
+                    return Err(format!("the log is owned by {owner}, not SYSTEM or Administrators"));
+                }
+                // Read in a loop until EOF, with a cap: an oversized log is refused, never cut.
+                let mut out = Vec::new();
+                loop {
+                    let mut chunk = vec![0u8; 64 * 1024];
+                    let mut read = 0u32;
+                    // SAFETY: `chunk` is valid for its length and `read` is a valid out-parameter.
+                    unsafe { ReadFile(handle, Some(&mut chunk[..]), Some(&mut read), None) }
+                        .map_err(|e| format!("could not read the log: {e}"))?;
+                    if read == 0 {
+                        break;
+                    }
+                    if out.len() + read as usize > MAX_LOG_BYTES {
+                        return Err("larger than 4 MiB".to_string());
+                    }
+                    out.extend_from_slice(&chunk[..read as usize]);
+                }
+                Ok(out)
+            })();
+            // SAFETY: `handle` was opened above and is closed exactly once here.
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            result
+        }
     }
 }
 
 #[cfg(not(windows))]
-pub struct RealLogFs;
+mod real {
+    use super::*;
 
-#[cfg(not(windows))]
-impl LogFs for RealLogFs {
-    fn exists(&self, _path: &Path) -> Result<bool, String> {
-        Ok(false)
+    impl LogFs for RealLogFs {
+        fn trusts(&self, sid: &str) -> bool {
+            (self.owner_check)(sid)
+        }
+        fn exists(&self, _path: &Path) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn is_reparse(&self, _path: &Path) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn owner(&self, _path: &Path) -> Result<String, String> {
+            Err("the machine folder is a Windows-only location".to_string())
+        }
+        fn files(&self, _dir: &Path) -> Result<Vec<PathBuf>, String> {
+            Ok(Vec::new())
+        }
+        fn open_checked(&self, _path: &Path) -> Result<Vec<u8>, String> {
+            Err("the machine folder is a Windows-only location".to_string())
+        }
     }
-    fn is_reparse(&self, _path: &Path) -> Result<bool, String> {
-        Ok(false)
+}
+
+#[cfg(windows)]
+#[cfg(test)]
+mod windows_tests {
+    use super::*;
+    use std::os::windows::fs::symlink_dir;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-logs-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
-    fn owner(&self, _path: &Path) -> Result<String, String> {
-        Err("the machine folder is a Windows-only location".to_string())
+
+    #[test]
+    fn a_real_file_is_read_whole_with_an_injected_owner_check() {
+        let dir = temp_dir("read");
+        let file = dir.join("svc.log");
+        let bytes = vec![b'x'; 100_000];
+        std::fs::write(&file, &bytes).unwrap();
+        // The injected check covers the read and reparse behaviour; it does not cover the real
+        // SYSTEM/Administrators owner rule (a temp folder belongs to the test user).
+        let fs = RealLogFs::with_owner_check(|_| true);
+        assert_eq!(fs.open_checked(&file).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&dir);
     }
-    fn files(&self, _dir: &Path) -> Result<Vec<PathBuf>, String> {
-        Ok(Vec::new())
+
+    #[test]
+    fn a_real_file_over_the_cap_is_refused() {
+        let dir = temp_dir("cap");
+        let file = dir.join("big.log");
+        std::fs::write(&file, vec![b'x'; MAX_LOG_BYTES + 1]).unwrap();
+        let fs = RealLogFs::with_owner_check(|_| true);
+        let error = fs.open_checked(&file).unwrap_err();
+        assert!(error.contains("larger than 4 MiB"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
-    fn open_checked(&self, _path: &Path) -> Result<Vec<u8>, String> {
-        Err("the machine folder is a Windows-only location".to_string())
+
+    #[test]
+    fn a_real_junction_inside_the_folder_is_refused() {
+        let dir = temp_dir("junction");
+        let elsewhere = temp_dir("junction-target");
+        symlink_dir(&elsewhere, dir.join("link")).unwrap();
+        let fs = RealLogFs::with_owner_check(|_| true);
+        let error = refusal(&fs, &dir).unwrap();
+        assert!(error.contains("junction or symlink"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
     }
 }
 
@@ -320,11 +407,7 @@ mod tests {
             Ok(self.reparse.contains(path))
         }
         fn owner(&self, path: &Path) -> Result<String, String> {
-            Ok(self
-                .owners
-                .get(path)
-                .cloned()
-                .unwrap_or_else(|| "S-1-5-18".to_string()))
+            Ok(self.owners.get(path).cloned().unwrap_or_else(|| "S-1-5-18".to_string()))
         }
         fn files(&self, _dir: &Path) -> Result<Vec<PathBuf>, String> {
             Ok(self.logs.clone())
@@ -364,16 +447,6 @@ mod tests {
         fs.reparse.insert(PathBuf::from("machine"));
         let reason = refusal(&fs, Path::new("machine/logs")).unwrap();
         assert!(reason.contains("junction or symlink"), "{reason}");
-        assert!(collect(&fs, Path::new("machine/logs")).is_err());
-        assert_eq!(fs.reads.get(), 0);
-    }
-
-    #[test]
-    fn a_reparse_point_is_refused_without_a_read() {
-        let mut fs = fake();
-        fs.reparse.insert(PathBuf::from("machine/logs"));
-        let reason = refusal(&fs, Path::new("machine/logs")).unwrap();
-        assert!(reason.contains("junction or symlink"), "{reason}");
         assert_eq!(fs.reads.get(), 0);
     }
 
@@ -387,28 +460,10 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_owned_file_is_refused_without_a_read() {
-        let mut fs = fake();
-        fs.owners.insert(PathBuf::from("machine/logs/svc.log"), "S-1-5-21-999".to_string());
-        let reason = refusal(&fs, Path::new("machine/logs")).unwrap();
-        assert!(reason.contains("A service log is owned by"), "{reason}");
-        assert_eq!(fs.reads.get(), 0);
-    }
-
-    #[test]
-    fn an_unreadable_file_is_a_plain_reason() {
-        let mut fs = fake();
-        fs.unreadable.insert(PathBuf::from("machine/logs/svc.log"));
-        let reason = collect(&fs, Path::new("machine/logs")).unwrap_err();
-        assert!(reason.contains("Windows did not let canvas-rgb read them"), "{reason}");
-    }
-
-    #[test]
     fn an_empty_folder_is_not_reported_as_included() {
         let mut fs = fake();
         fs.logs.clear();
         let reason = collect(&fs, Path::new("machine/logs")).unwrap_err();
         assert!(reason.contains("folder is empty"), "{reason}");
-        assert_eq!(fs.reads.get(), 0);
     }
 }

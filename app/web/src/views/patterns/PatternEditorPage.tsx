@@ -1,4 +1,5 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
 
 // The pattern editor's page: the editor on one pattern, with the query saying which.
 //
@@ -85,7 +86,7 @@ export function PatternEditorPage() {
     await refreshPatterns();
   }, []);
 
-  if (error !== null) return <ErrorLine className={s.pageLine}>{error}</ErrorLine>;
+  if (error !== null) return <ErrorState compact message={error} className={s.pageLine} />;
   if (pattern === null) return <p className={s.pageLine}>Opening the pattern…</p>;
   return (
     <PatternEditor

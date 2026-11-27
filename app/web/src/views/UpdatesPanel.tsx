@@ -1,4 +1,5 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
 import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useState } from "react";
@@ -136,7 +137,7 @@ export function UpdatesPanel() {
         )}
       </div>
       {!acts && <p className="mute upd-note">Tray app only</p>}
-      {err && <ErrorLine>{err}</ErrorLine>}
+      {err && <ErrorState compact message={err} />}
     </>
   );
 }

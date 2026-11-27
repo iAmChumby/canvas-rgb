@@ -25,9 +25,7 @@ export function DaemonDown({
       icon={<CloudSlash size={26} />}
       title="canvas-rgb is not answering"
       lead="canvas-rgb draws the lights on 127.0.0.1:9430. It may still be starting, or it may have stopped."
-      keeps={[
-        "canvas-rgb restarts it by itself; if it keeps stopping, save diagnostics and report it.",
-      ]}
+      keeps={["Save diagnostics if it keeps stopping, then report the problem."]}
       onRetry={onRetry}
       lastTryAt={lastTryAt}
       nextTryInMs={nextTryInMs}

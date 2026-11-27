@@ -121,7 +121,7 @@ export function LayerList({
                 type="button"
                 className="layer-grip"
                 aria-label={`Reorder ${layer.name}`}
-                title="Drag to reorder, or press Space; Alt+↑/↓ on the keyboard"
+                title="Drag to reorder, or press Space; Alt+Γåæ/Γåô on the keyboard"
                 onPointerDown={(event) => onGripDown(layer, event)}
                 onKeyDown={(event) => {
                   if (isLifted()) return;

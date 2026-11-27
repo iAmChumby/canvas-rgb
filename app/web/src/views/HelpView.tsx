@@ -282,7 +282,7 @@ export function HelpView() {
                 <KeyRow
                   icon={ShieldCheck}
                   label="Privacy"
-                  address="…/docs/privacy.md"
+                  address="ΓÇª/docs/privacy.md"
                   href={PRIVACY}
                   external
                   onOpen={() => openAway(PRIVACY)}
@@ -290,7 +290,7 @@ export function HelpView() {
                 <KeyRow
                   icon={Star}
                   label="Credits"
-                  address="…/docs/thanks.md"
+                  address="ΓÇª/docs/thanks.md"
                   href={CREDITS}
                   external
                   onOpen={() => openAway(CREDITS)}

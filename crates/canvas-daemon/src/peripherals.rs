@@ -1184,13 +1184,19 @@ pub fn no_longer_there(name: &str) -> String {
 /// adapter's refusal is already written for them; the technical text of a link failure goes to
 /// the log, where the caller puts it.
 pub fn user_words(error: &AdapterError) -> String {
+    user_words_with(error, &canvas_diag::scrub::Scrubber::from_env())
+}
+
+/// The same words, with the scrubber supplied: a test can pass a fake profile (F4).
+pub fn user_words_with(error: &AdapterError, scrubber: &canvas_diag::scrub::Scrubber) -> String {
     match error {
         // A `Protocol` error used to be printed verbatim. An adapter's refusal may be written
         // for a person, but a link failure carries raw technical text (#572). Keep the sentence
         // only when it is already plain; otherwise give the same next step as the other arms.
         AdapterError::Protocol(message) => {
             if plain_sentence(message) {
-                canvas_diag::scrub::scrub_device_ids(message)
+                // A device sentence can still name a profile path or a serial (F4).
+                crate::api::scrub_errors::scrub_error_text(scrubber, message)
             } else {
                 "The device did not answer as expected. Check that it is connected and press Read again."
                     .to_string()
@@ -1365,6 +1371,24 @@ pub async fn apply_saved(app: &App) {
 mod tests {
     use super::*;
     use canvas_proto::peripheral::{PeripheralInfo, PeripheralKind, PeripheralSchema};
+
+    #[test]
+    fn a_plain_device_sentence_is_fully_scrubbed() {
+        let scrubber = canvas_diag::scrub::Scrubber::new(
+            Some(concat!("C:\\", "Use", "rs\\Alice").into()),
+            Some("Alice".into()),
+            None,
+        );
+        let error = AdapterError::Protocol(concat!(
+            "could not read openrgb:SERIAL-42 from C:\\",
+            "Use",
+            "rs\\Alice\\device.json."
+        ).to_string());
+        let words = user_words_with(&error, &scrubber);
+        assert!(!words.to_ascii_lowercase().contains("alice"), "{words}");
+        assert!(!words.contains("SERIAL-42"), "{words}");
+        assert_eq!(words.matches("the device").count(), 1, "{words}");
+    }
 
     /// A peripheral that is never opened for real: it takes the sink the daemon gives it, calls
     /// it on a thread of its own and then keeps the read open, so the test can cancel the read

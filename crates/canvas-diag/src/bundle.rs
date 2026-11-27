@@ -29,12 +29,21 @@ pub const CONFIG_FILES: &[&str] = &[
 
 /// The next free bundle path in the one fixed folder. A clash adds `-2`, `-3`, ...; an existing
 /// file is never opened for writing (P2).
-pub fn output_path(dir: &Path) -> PathBuf {
-    // A process-local counter makes two saves in the same second different before either is
-    // opened, so create-new cannot race between parallel callers (P2).
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    dir.join(format!("canvas-rgb-diag-{}-{n}.zip", crate::paths::timestamp()))
+pub fn output_path(dir: &Path) -> Result<PathBuf, BundleError> {
+    let stamp = crate::paths::timestamp();
+    let first = dir.join(format!("canvas-rgb-diag-{stamp}.zip"));
+    if !first.exists() {
+        return Ok(first);
+    }
+    for n in 2..=99 {
+        let candidate = dir.join(format!("canvas-rgb-diag-{stamp}-{n}.zip"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(BundleError::Io(std::io::Error::other(
+        "no free diagnostics zip name in the folder",
+    )))
 }
 
 /// One piece of a bundle while it is being made. `bytes` are the original on-disk bytes; the
@@ -73,7 +82,7 @@ impl Bundle {
             home: crate::paths::home(),
             logs: crate::paths::log_dir(),
             machine_logs: crate::paths::machine_log_dir(),
-            fs: Box::new(RealLogFs),
+            fs: Box::new(RealLogFs::default()),
         }
     }
 
@@ -150,13 +159,21 @@ impl Bundle {
     pub fn write(&self, scrubber: &Scrubber) -> Result<DiagBundle, BundleError> {
         let dir = crate::paths::diagnostics_dir();
         std::fs::create_dir_all(&dir)?;
-        let out = output_path(&dir);
+        // Two writers in the same second can pick the same name; create-new is the arbiter and
+        // the loser picks the next free suffix (F5).
+        let (out, file) = loop {
+            let candidate = output_path(&dir)?;
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+                Ok(file) => break (candidate, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        };
         let sources = self.sources();
         let texts: Vec<String> = sources.files.iter().map(|s| String::from_utf8_lossy(&s.bytes).into_owned()).collect();
         let aliases = aliases_for(&texts);
         let options: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&out)?;
         let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
         let mut files = sources.notices;
         let mut replaced = 0u32;
@@ -197,11 +214,21 @@ fn aliases_for(texts: &[String]) -> Vec<(String, String)> {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
             visit_json(&value, &mut found);
         }
-        // Logs carry the same ids and the controller location in free text. Scan for the shape
-        // of a device id, and for the location shapes OpenRGB and the HID adapters print.
-        for token in text.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '(' | ')')) {
+        // Logs carry ids in free text: `device=openrgb:ABC`, `[openrgb:ABC]`, `id="hid:…"`.
+        // Match the prefix after any non-id character and take the whole id (F3).
+        let mut at = 0;
+        while at < text.len() {
+            if let Some(end) = scrub::device_id_end(text, at) {
+                found.insert(text[at..end].to_string());
+                at = end;
+            } else {
+                at += text[at..].chars().next().unwrap().len_utf8();
+            }
+        }
+        // OpenRGB logs the controller location separately from its device id.
+        for token in text.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']')) {
             let token = token.trim_matches(|c: char| matches!(c, ':' | ',' | '.' | ')' | '(' | '"' | '\''));
-            if looks_like_device_id(token) || looks_like_location(token) {
+            if looks_like_location(token) {
                 found.insert(token.to_string());
             }
         }
@@ -405,6 +432,30 @@ mod tests {
         let path = PathBuf::from(answer.path.unwrap());
         assert_ne!(path, config);
         assert_eq!(std::fs::read(&config).unwrap(), before);
+    }
+
+    #[test]
+    fn ids_inside_wire_shapes_get_one_alias_each() {
+        let text = r#"{"device=openrgb:ABC":1,"note":"[openrgb:ABC] and id=\"hid:VID_1\" and royuan:3151:4015"}"#.to_string();
+        let aliases = aliases_for(std::slice::from_ref(&text));
+        assert!(aliases.iter().any(|(id, _)| id == "openrgb:ABC"), "{aliases:?}");
+        assert!(aliases.iter().any(|(id, _)| id == "hid:VID_1"), "{aliases:?}");
+        assert!(aliases.iter().any(|(id, _)| id == "royuan:3151:4015"), "{aliases:?}");
+        let (out, _) = apply_aliases(&text, &aliases);
+        assert!(!out.contains("ABC") && !out.contains("3151") && !out.contains("VID_1"), "{out}");
+    }
+
+    #[test]
+    fn a_zip_name_never_clashes() {
+        let dir = home().join("clash");
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = output_path(&dir).unwrap();
+        std::fs::write(&first, b"keep me").unwrap();
+        let second = output_path(&dir).unwrap();
+        assert_ne!(first, second);
+        assert!(second.file_name().and_then(|n| n.to_str()).unwrap().ends_with("-2.zip"), "{:?}", second.file_name());
+        assert_eq!(std::fs::read(&first).unwrap(), b"keep me");
+        assert!(!second.exists());
     }
 
     #[test]

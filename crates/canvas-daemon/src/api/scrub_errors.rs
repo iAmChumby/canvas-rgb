@@ -17,18 +17,32 @@ use std::sync::Arc;
 use crate::state::App;
 
 /// The largest error body we will rewrite. A rejection is a sentence, never a file.
-const MAX_ERROR_BODY: usize = 64 * 1024;
+/// A 2xx preview body carries a base64 picture, so the layer must not truncate it while looking
+/// for a `note` field. Errors stay tiny; success bodies are bounded well above a preview frame.
+const MAX_ERROR_BODY: usize = 32 * 1024 * 1024;
 
 pub async fn scrub_errors(State(app): State<Arc<App>>, request: Request, next: Next) -> Response {
     let response = next.run(request).await;
-    if !response.status().is_client_error() && !response.status().is_server_error() {
-        return response;
-    }
+    let status = response.status();
+    let is_error = status.is_client_error() || status.is_server_error();
     let is_json = response
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.to_ascii_lowercase().contains("json"));
+    if !is_error && !is_json {
+        return response;
+    }
+    // A large 2xx body (effects list, source) must never be dropped by the layer.
+    let too_large = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some_and(|n| n > MAX_ERROR_BODY);
+    if too_large {
+        return response;
+    }
     let (parts, body) = response.into_parts();
     let bytes = match axum::body::to_bytes(body, MAX_ERROR_BODY).await {
         Ok(bytes) => bytes,
@@ -36,27 +50,42 @@ pub async fn scrub_errors(State(app): State<Arc<App>>, request: Request, next: N
     };
     let scrubber = app.scrubber.lock().unwrap_or_else(|e| e.into_inner());
     let rewritten = if is_json {
-        // Parse as a `Value`, not as `ApiError`: some conflict bodies carry extra fields (the
-        // current scene, the write order) that the editor reads. Scrub only the two text fields
-        // and keep every other field exactly as it was.
         match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Ok(mut value) => {
-                if let Some(object) = value.as_object_mut() {
-                    for key in ["message", "hint", "problem"] {
-                        if let Some(text) = object.get(key).and_then(|v| v.as_str()) {
-                            let scrubbed = scrub_error_text(&scrubber, text);
-                            object.insert(key.to_string(), serde_json::Value::String(scrubbed));
-                        }
-                    }
-                }
+                scrub_json_value(&mut value, &scrubber);
                 serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec())
             }
-            Err(_) => scrub_plain(&bytes, &scrubber),
+            Err(_) if is_error => scrub_plain(&bytes, &scrubber),
+            Err(_) => bytes.to_vec(),
         }
     } else {
         scrub_plain(&bytes, &scrubber)
     };
     Response::from_parts(parts, Body::from(rewritten))
+}
+
+/// Every person-facing string field, at any depth in any JSON body — 2xx included (F7). Rewriting
+/// only error status bodies leaves `EffectError.message` and `note` fields unscrubbed.
+pub fn scrub_json_value(value: &mut serde_json::Value, scrubber: &crate::scrub::Scrubber) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                let person_field = matches!(key.as_str(), "message" | "error" | "note" | "hint" | "problem");
+                if person_field && child.is_string() {
+                    let text = child.as_str().unwrap_or_default();
+                    *child = serde_json::Value::String(scrub_error_text(scrubber, text));
+                } else {
+                    scrub_json_value(child, scrubber);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                scrub_json_value(item, scrubber);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// One rule for every string a person reads: names first, then device ids (P6).
@@ -132,6 +161,24 @@ mod tests {
         let scrubber = crate::scrub::Scrubber::default();
         let out = scrub_error_text(&scrubber, "the device openrgb:SERIAL-42 refused the write");
         assert_eq!(out, "the device the device refused the write");
+    }
+
+    #[test]
+    fn nested_text_in_a_200_body_is_scrubbed_at_any_depth() {
+        let scrubber = Scrubber::new(
+            Some(concat!("C:\\", "Use", "rs\\Alice").into()),
+            Some("Alice".into()),
+            None,
+        );
+        let profile = concat!("C:\\", "Use", "rs\\Alice");
+        let mut value = serde_json::json!({
+            "layers": [{ "note": format!("failed at {profile}\\a.html: openrgb:SERIAL-42") }],
+            "failed": [{ "error": format!("{profile}\\b.html failed") }]
+        });
+        scrub_json_value(&mut value, &scrubber);
+        let text = value.to_string();
+        assert!(!text.to_ascii_lowercase().contains("alice"), "{text}");
+        assert!(!text.contains("SERIAL-42"), "{text}");
     }
 
     #[test]

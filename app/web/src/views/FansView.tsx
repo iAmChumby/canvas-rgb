@@ -205,7 +205,7 @@ export function FansView() {
               </Button>
             }
           >
-            No answer for {downFor}. The fans stay under BIOS control.
+            No answer for {downFor}. Nothing here has confirmed what the fans are doing now.
             <Details>{fansError}</Details>
           </EmptyState>
         </Panel>

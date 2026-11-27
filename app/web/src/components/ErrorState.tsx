@@ -31,9 +31,15 @@ export function ErrorState({
   onSaveDiagnostics,
   onReport,
   logsEnabled = true,
+  compact = false,
+  className,
+  style,
+  id,
+  role: _role,
 }: {
-  /** The scrubbed "what happened". */
-  message?: string | null;
+  /** The scrubbed "what happened" (or inline error text). */
+  message?: ReactNode | null;
+  role?: string;
   /** The scrubbed next step. Falls back to the hint on an `ApiFailure`. */
   hint?: string | null;
   /** A local detail, e.g. `errorText(e)` for a plain `Error`. */
@@ -49,6 +55,11 @@ export function ErrorState({
   onReport?: () => void;
   /** False outside the tray: the key says "Tray app only" and is disabled. */
   logsEnabled?: boolean;
+  /** An inline error in a row or a modal: the same anatomy, one line. */
+  compact?: boolean;
+  className?: string;
+  style?: CSSProperties;
+  id?: string;
 }) {
   const title = message ?? (error !== undefined ? messageOf(error) : "Something went wrong.");
   const lead = hint ?? (error !== undefined ? hintOf(error) : null);
@@ -67,6 +78,12 @@ export function ErrorState({
       setCopyFailed(true);
     }
   };
+
+  if (compact) {
+    // A row-sized error still goes through this component; ErrorLine lives here, so no view
+    // writes a bare error paragraph (F8/F9).
+    return <ErrorLine className={className} style={style} id={id} role="alert">{title}</ErrorLine>;
+  }
 
   return (
     <div className={s.state} role="alert" data-anatomy="error-state">

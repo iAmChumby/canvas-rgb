@@ -1,4 +1,5 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
 import { ErrorLine } from "@/components/ErrorState";
 
 import { useEffect, useRef, useState } from "react";
@@ -68,7 +69,7 @@ function UpdateKey({ u }: { u: UpdateState }) {
           />
         </div>
       </div>
-      {err && <ErrorLine>{err}</ErrorLine>}
+      {err && <ErrorState compact message={err} />}
     </>
   );
 }
@@ -208,7 +209,7 @@ export function UpdatesView() {
                   <span className="mute upd-note">Tray app only</span>
                 )}
               </div>
-              {err && <ErrorLine>{err}</ErrorLine>}
+              {err && <ErrorState compact message={err} />}
             </Panel>
           ) : (
             <Panel title="Up to date">
@@ -228,7 +229,7 @@ export function UpdatesView() {
                   {acts ? `Last checked ${fmtChecked(u.last_check)}` : "Tray app only"}
                 </span>
               </div>
-              {err && <ErrorLine>{err}</ErrorLine>}
+              {err && <ErrorState compact message={err} />}
             </Panel>
           )}
         </div>

@@ -47,6 +47,10 @@ export function violations(source: string): string[] {
   }
   for (const match of source.matchAll(/\b(?:e|err|error)\s*\.\s*message\b/g)) found.push(match[0]);
   for (const match of source.matchAll(/\bString\s*\(\s*(?:e|err|error)\s*\)/g)) found.push(match[0]);
+  for (const match of source.matchAll(/\?\.\s*message\b/g)) found.push(match[0]);
+  for (const match of source.matchAll(/\(\s*(?:e|err|error)\s+as\s+Error\s*\)\s*\.\s*message\b/g)) found.push(match[0]);
+  // A caught error's `.error` field rendered straight into the page (F8).
+  for (const match of source.matchAll(/(?<!message=)\{(?:f|failure|issue)\.error\}/g)) found.push(match[0]);
   for (const match of source.matchAll(/<(?:p|span|div)[^>]*>\{(?:e|err|error)\}<\/(?:p|span|div)>/g)) {
     found.push(match[0].replace(/\s+/g, " "));
   }
@@ -75,6 +79,12 @@ describe("every error has one anatomy (#576, P9)", () => {
       expect(violations("return { state: 'refused', message: e.message };")).toContain("e.message");
       expect(violations("const text = String(error);")).toContain("String(error)");
       expect(violations("<div className=\"load-note\">{error}</div>").length).toBeGreaterThan(0);
+      expect(violations("setErr(e?.message);")).toContain("?.message");
+      expect(violations("setErr((e as Error).message);").length).toBeGreaterThan(0);
+      expect(violations("<span>{f.error}</span>").length).toBeGreaterThan(0);
+      // The two bans still tracked separately: errorText( and a bare ErrorLine in a view.
+      expect(/\berrorText\s*\(/.test("setErr(errorText(e));")).toBe(true);
+      expect(/<ErrorLine\b/.test("<ErrorLine>{err}</ErrorLine>")).toBe(true);
     });
 
     it("leaves the anatomy and its callers alone", () => {

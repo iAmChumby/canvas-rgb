@@ -24,7 +24,7 @@ pub const DEVICE_TOKEN: &str = "the device";
 /// Adapter prefixes a `DeviceId` may carry, shared by the bundle's alias pass and the error
 /// scrubber. `<prefix>:<rest>` is a device fingerprint, never a sentence or a URL.
 pub const ADAPTER_PREFIXES: &[&str] = &[
-    "openrgb", "ring", "chione", "royuan", "attack-shark-x6", "8bitdo-ultimate-2", "8bitdo", "hid", "usb",
+    "openrgb", "ring", "chione", "royuan", "attack-shark-x6", "eightbitdo-ultimate-2", "hid", "usb", "fake", "cpu",
 ];
 
 /// Replaces every device-shaped token in text a person may read. Used on error bodies (P6) and
@@ -32,31 +32,9 @@ pub const ADAPTER_PREFIXES: &[&str] = &[
 /// whole, so a serial or a USB location cannot survive as a prefix or a suffix.
 pub fn scrub_device_ids(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let bytes = text.as_bytes();
     let mut at = 0;
-    while at < bytes.len() {
-        let mut matched = None;
-        for prefix in ADAPTER_PREFIXES {
-            let prefix_bytes = prefix.as_bytes();
-            if bytes[at..].starts_with(prefix_bytes)
-                && bytes.get(at + prefix_bytes.len()) == Some(&b':')
-                && (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
-            {
-                let start = at + prefix_bytes.len() + 1;
-                let mut end = start;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_alphanumeric()
-                        || matches!(bytes[end], b'#' | b'&' | b'_' | b'.' | b'\\' | b'-'))
-                {
-                    end += 1;
-                }
-                if end > start + 1 {
-                    matched = Some(end);
-                    break;
-                }
-            }
-        }
-        if let Some(end) = matched {
+    while at < text.len() {
+        if let Some(end) = device_id_end(text, at) {
             out.push_str(DEVICE_TOKEN);
             at = end;
         } else {
@@ -66,6 +44,47 @@ pub fn scrub_device_ids(text: &str) -> String {
         }
     }
     out
+}
+
+/// True when a byte can be part of an identifier (used to decide whether a prefix starts one).
+fn is_id_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
+}
+
+/// If a `<prefix>:<id>` starts exactly at `at`, returns the byte offset where the whole id ends.
+/// The id runs to whitespace, a quote or a closing bracket, or a sentence-final full stop — not
+/// to the second colon, so `royuan:3151:4015` is taken whole (F3).
+pub fn device_id_end(text: &str, at: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if at > 0 && is_id_byte(bytes[at - 1]) {
+        return None;
+    }
+    for prefix in ADAPTER_PREFIXES {
+        let p = prefix.as_bytes();
+        if bytes[at..].starts_with(p) && bytes.get(at + p.len()) == Some(&b':') {
+            let start = at + p.len() + 1;
+            let mut end = start;
+            while end < bytes.len() {
+                let b = bytes[end];
+                if b.is_ascii_whitespace() || matches!(b, b'"' | b'\'' | b',' | b';' | b')' | b']' | b'}' | b'>')
+                {
+                    break;
+                }
+                if b == b'.' && (end + 1 == bytes.len() || bytes[end + 1].is_ascii_whitespace()) {
+                    break;
+                }
+                // A backslash escaping a quote in JSON is the end of the id, not part of it.
+                if b == b'\\' && matches!(bytes.get(end + 1), Some(b'"' | b'\\')) {
+                    break;
+                }
+                end += 1;
+            }
+            if end > start {
+                return Some(end);
+            }
+        }
+    }
+    None
 }
 
 /// One replacement. Paths match as prefixes; bare names need whole-token boundaries.
@@ -431,5 +450,71 @@ mod tests {
         let out = scrub_device_ids("the device openrgb:SERIAL-42 refused, and hid:VID_1234 too");
         assert_eq!(out, "the device the device refused, and the device too");
         assert!(!out.contains("SERIAL-42") && !out.contains("VID_1234"), "{out}");
+    }
+
+    #[test]
+    fn ids_are_taken_whole_in_every_wire_shape() {
+        let forms = [
+            "device=openrgb:ABC",
+            "[openrgb:ABC]",
+            "id=\"hid:VID_1234&PID_5678\"",
+            "royuan:3151:4015 refused",
+            "openrgb:ABC.",
+            "openrgb:ABC",
+            "openrgb:ABC; next",
+        ];
+        for form in forms {
+            let out = scrub_device_ids(form);
+            assert!(!out.contains("ABC"), "{form} -> {out}");
+            assert!(!out.contains("3151:4015"), "{form} -> {out}");
+            assert!(!out.contains("VID_1234"), "{form} -> {out}");
+        }
+        assert_eq!(scrub_device_ids("royuan:3151:4015 refused"), "the device refused");
+        assert_eq!(scrub_device_ids("openrgb:ABC."), "the device.");
+        assert_eq!(scrub_device_ids("openrgb:ABC"), "the device");
+    }
+
+    #[test]
+    fn every_adapter_prefix_in_the_adapters_is_scrubbed() {
+        let adapters = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("canvas-adapters/src");
+        let mut found = std::collections::BTreeSet::new();
+        fn walk(dir: &std::path::Path, found: &mut std::collections::BTreeSet<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for line in text.lines() {
+                        if let Some(i) = line.find("DeviceId(format!(\"") {
+                            let tail = &line[i + "DeviceId(format!(\"".len()..];
+                            if let Some(col) = tail.find(':') {
+                                let prefix = &tail[..col];
+                                if prefix.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+                                    found.insert(prefix.to_string());
+                                }
+                            }
+                        }
+                        if let Some(i) = line.find("ADAPTER_NAME: &str = \"") {
+                            let tail = &line[i + "ADAPTER_NAME: &str = \"".len()..];
+                            let name = tail.split('"').next().unwrap_or("");
+                            found.insert(name.to_string());
+                        }
+                        if line.contains("RING_PREFIX") {
+                            found.insert("ring".to_string());
+                        }
+                    }
+                }
+            }
+        }
+        walk(&adapters, &mut found);
+        found.insert("fake".to_string());
+        found.insert("cpu".to_string());
+        for prefix in found {
+            assert!(ADAPTER_PREFIXES.contains(&prefix.as_str()), "missing adapter prefix {prefix:?}");
+        }
     }
 }

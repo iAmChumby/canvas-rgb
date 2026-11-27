@@ -1,4 +1,5 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
 import { ErrorLine } from "@/components/ErrorState";
 
 import { Fragment, useMemo, useState } from "react";
@@ -397,7 +398,7 @@ function DisplayCard({
             </span>
           </Field>
 
-          {error && <ErrorLine>{error}</ErrorLine>}
+          {error && <ErrorState compact message={error} />}
         </div>
       </div>
     </Panel>

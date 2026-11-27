@@ -1,4 +1,5 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
 import { ErrorLine } from "@/components/ErrorState";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -1267,7 +1268,7 @@ export function EffectsView() {
               <p className="mute eff-starting-values">Starting values. A group keeps its own.</p>
             )}
             {(shownWriteError ?? readError) && (
-              <ErrorLine style={{ marginTop: 8 }}>{shownWriteError ?? readError}</ErrorLine>
+              <ErrorState compact message={shownWriteError ?? readError} style={{ marginTop: 8 }} />
             )}
           </Panel>
         </>
@@ -1513,7 +1514,7 @@ export function EffectsView() {
             {failed.map((f) => (
               <p key={f.file} className="failed-line">
                 <span className="fig">{f.file}</span>
-                <span className="failed-error">{f.error}</span>
+                <ErrorState compact message={f.error} className="failed-error" />
               </p>
             ))}
           </div>
@@ -1540,7 +1541,7 @@ export function EffectsView() {
               </div>
             </>
           ) : (
-            <ErrorLine>{importError}</ErrorLine>
+            <ErrorState compact message={importError} />
           )}
         </div>
       )}

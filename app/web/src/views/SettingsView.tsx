@@ -1,4 +1,5 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
 import { ErrorLine } from "@/components/ErrorState";
 
 import { useState } from "react";
@@ -210,7 +211,7 @@ export function SettingsView() {
                 {shownWarmth === 6500 && <span className="unit">Off</span>}
               </span>
             </Field>
-            {renderErr && <ErrorLine style={{ marginTop: 8 }}>{renderErr}</ErrorLine>}
+            {renderErr && <ErrorState compact message={renderErr} style={{ marginTop: 8 }} />}
           </Panel>
 
           {/* Audio source sits under Rendering: both are what the effects draw from, and the
@@ -299,7 +300,7 @@ export function SettingsView() {
               </FileButton>
             </Field>
             {note && <StateDot tone="ok">{note}</StateDot>}
-            {err && <ErrorLine style={{ marginTop: 8 }}>{err}</ErrorLine>}
+            {err && <ErrorState compact message={err} style={{ marginTop: 8 }} />}
           </Panel>
 
           <Panel title="Version" actions={<span className="fig rd-version" aria-busy={!status || undefined}>{status ? status.version : <InlineSkeleton width="8ch" />}</span>}>

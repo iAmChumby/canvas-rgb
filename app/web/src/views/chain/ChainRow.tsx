@@ -1,4 +1,5 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
 
 // One resizable ARGB header on the Devices page: what state it is in, the one key that starts or
 // redoes its setup, and every device's own controls once it is set up.
@@ -154,7 +155,7 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
           onChange={(next) => void patch({ reversed: next })}
         />
       </span>
-      {error && <ErrorLine className={s.partError}>{error}</ErrorLine>}
+      {error && <ErrorState compact message={error} className={s.partError} />}
     </li>
   );
 }

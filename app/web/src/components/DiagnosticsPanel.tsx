@@ -71,7 +71,7 @@ export function DiagnosticsPanel({ compact = false }: { compact?: boolean }) {
                 {serviceLine(list?.service_logs) ? <li className={s.reason}>{serviceLine(list?.service_logs)}</li> : null}
               </ul>
               <Button id="diag-save" icon={<DownloadSimple size={16} />} busy={busy} onClick={() => void save()}>
-                Save diagnostics
+                {compact ? "Save the zip" : "Save diagnostics"}
               </Button>
             </>
           ) : (

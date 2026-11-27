@@ -588,7 +588,7 @@ export function DevicesView() {
       {openrgb === "down" && !openrgbFault && (
         <p className="rule rule-warn">OpenRGB is not connected.</p>
       )}
-      {openrgb === "connecting" && <p className="rule rule-warn">Connecting to OpenRGB…</p>}
+      {openrgb === "connecting" && <p className="rule rule-warn">Connecting to OpenRGBΓÇª</p>}
 
       <LoadFrame
         className="load-list"

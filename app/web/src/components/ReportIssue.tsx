@@ -56,12 +56,12 @@ export function ReportIssue({
     <div className={s.body}>
       <p className={s.note}>
         The issue opens in your browser with these fields filled. Nothing is sent until you post the
-        issue. {built.url.length} of {REPORT_URL_MAX} characters used.
+        issue. {built.url.length} of {REPORT_URL_MAX} characters used
+        {built.droppedHardware ? " (hardware left out to fit)" : ""}.
       </p>
       <pre className={s.preview} aria-label="Report issue preview">
         {fields.map(([name, value]) => `${name}: ${value}`).join("\n")}
       </pre>
-      <p className={s.exact}>{built.whatHappened || "(what happened: add your own words)"}</p>
       {built.droppedHardware ? (
         <p className={s.warn}>Hardware was dropped to fit the address. Add it by hand; Copy report has the full text.</p>
       ) : null}
