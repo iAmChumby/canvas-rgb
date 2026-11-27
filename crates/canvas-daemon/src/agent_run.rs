@@ -323,16 +323,9 @@ pub fn save_scene_copy(run: &str, scene: &serde_json::Value) -> Result<PathBuf, 
     Ok(path)
 }
 
-/// A 64-bit FNV-1a hash of some text: a stable name for a copy, so two copies of different
-/// content never share a file and a copy is never written over.
-fn fnv1a(text: &str) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in text.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
+/// The FNV-1a lives in [`crate::faults::fnv1a`] now (#580 R7): the same stable hash names a run's
+/// copies and a hardware note's dismissal key.
+use crate::faults::fnv1a;
 
 /// `text` as a piece of a file name: at most 40 of `A-Z a-z 0-9 - _`, anything else an `_`.
 /// A copy's name starts with its hash, so no piece can make a Windows device name.

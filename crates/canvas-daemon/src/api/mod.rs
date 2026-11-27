@@ -151,6 +151,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::AUDIO_SOURCE, put(audio::put_source))
         .route(routes::AUDIO_TEST, put(audio::put_test).get(audio::get_test).delete(audio::delete_test))
         .route(routes::DISMISS_ZONE_PANEL, post(settings::dismiss_zone_panel))
+        .route(routes::FAULT_DISMISS, post(settings::dismiss_fault))
         .route(routes::ONBOARDING_COMPLETE, post(settings::complete_onboarding))
         .route(routes::CONFIG_EXPORT, get(settings::config_export))
         .route(routes::CONFIG_IMPORT, post(settings::config_import))

@@ -1,6 +1,6 @@
 //! The settings routes, the first-run panel and the config export/import (G10).
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::Json;
 use canvas_proto::api::OutputState;
 use canvas_proto::config::{ConfigFile, ExportBundle, Settings};
@@ -71,6 +71,35 @@ pub async fn dismiss_zone_panel(State(app): State<Arc<App>>) -> ApiResult<Json<s
         &app,
         |store| {
             store.config.zone_panel_dismissed = true;
+            Ok(())
+        },
+        |store| {
+            store
+                .save_config()
+                .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))
+        },
+    )
+    .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// `POST /api/v1/faults/{key}/dismiss` (#580).
+///
+/// The note goes away on this viewer and stays away across restarts. Its key is stored beside
+/// `zone_panel_dismissed` in `config.toml` and comes back when the condition clears and returns.
+pub async fn dismiss_fault(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if key.is_empty() || key.len() > 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ApiFailure::validation("the fault key is not a dismissal key"));
+    }
+    crate::store_io::store_save(
+        &app,
+        |store| {
+            if !store.config.dismissed_faults.iter().any(|k| k == &key) {
+                store.config.dismissed_faults.push(key.clone());
+            }
             Ok(())
         },
         |store| {

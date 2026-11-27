@@ -3,6 +3,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { PeripheralsView, UNREAD_POLL_MS } from "@/views/PeripheralsView";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 
+// The no-settings panel links to the Help checklist, so the shared ButtonLink needs a router.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: () => {}, replace: () => {} }),
+  usePathname: () => "/peripherals/",
+}));
+
 // A connection that carries no settings (a controller over Bluetooth): the page says so once, in
 // the daemon's words, and offers no control that cannot work.
 

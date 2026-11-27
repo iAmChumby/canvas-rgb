@@ -160,8 +160,21 @@ describe("the strip mark (#577)", () => {
     });
   });
 
-  it("is first, ahead of a link that is down", () => {
-    const down = { ...status(base), openrgb: "down" } as Status;
-    expect(problems(down, null).map((p) => p.text)).toEqual(["Safe start", "OpenRGB down"]);
+  it("is first, ahead of the OpenRGB fault (#580 R15)", () => {
+    const down = {
+      ...status(base),
+      openrgb: "down",
+      faults: [{
+        kind: "open_rgb_down",
+        key: "0123456789abcdef",
+        affected: "Lights reached through OpenRGB are not available.",
+        fix: "Start OpenRGB.",
+        dismissed: false,
+      }],
+    } as Status;
+    expect(problems(down, null).map((p) => p.text)).toEqual([
+      "Safe start",
+      "Lights reached through OpenRGB are not available.",
+    ]);
   });
 });

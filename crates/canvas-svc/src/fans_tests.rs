@@ -10,7 +10,7 @@ use crate::paths;
 use crate::store;
 use crate::temps::TempReader;
 use canvas_proto::config::FansFile;
-use canvas_proto::fans::{CurvePoint, FanMode, FanProfile, TempSource};
+use canvas_proto::fans::{ChipProblem, CurvePoint, FanMode, FanProfile, TempSource};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
@@ -429,6 +429,26 @@ fn a_chip_that_is_absent_reports_no_headers_and_refuses_modes() {
     assert_eq!(fans.chip_error(), Some("no chip"));
     let err = fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).err().unwrap();
     assert!(matches!(err, FanError::Unavailable(_)), "{err}");
+}
+
+#[test]
+fn status_reports_the_chip_problem_from_the_open_and_stays_unchecked_without_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fans = FanController::new(dir.path().to_path_buf(), None, Some("no chip".into()), BTreeMap::new(), FansFile::default(), None);
+    // No open was tried: an old service, so no note and no healthy observation.
+    assert!(!fans.status().chip_checked);
+    assert_eq!(fans.status().chip_problem, None);
+    fans.set_chip_open(Some(ChipProblem::PawnIoUnavailable), true);
+    let status = fans.status();
+    assert!(status.chip_checked);
+    assert_eq!(status.chip_problem, Some(ChipProblem::PawnIoUnavailable));
+    fans.set_chip_open(Some(ChipProblem::ChipNotFound), true);
+    assert_eq!(fans.status().chip_problem, Some(ChipProblem::ChipNotFound));
+    // A healthy open reports checked and no problem.
+    fans.set_chip_open(None, true);
+    let status = fans.status();
+    assert!(status.chip_checked);
+    assert_eq!(status.chip_problem, None);
 }
 
 #[test]

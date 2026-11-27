@@ -1,33 +1,100 @@
 //! Opens the real fan chip and temperature sources. Every failure becomes "unavailable" and
 //! is logged; the service still runs, with the fan headers absent from status.
 
-use crate::chip::{FanChip, Nct6687, MSI_ALT1_MAP};
+use crate::chip::{FanChip, Nct6687, ChipError, MSI_ALT1_MAP};
 use crate::gpu_fans::{CompositeChip, GpuFanApi, NvmlFans};
-use crate::pawnio::{pawnio_home, PawnIoPortIo, TctlSource};
+use crate::pawnio::{pawnio_home, PawnIoError, PawnIoPortIo, TctlSource};
 use crate::temps::{NvmlSource, TempReader};
-use canvas_proto::fans::TempSource;
+use canvas_proto::fans::{ChipProblem, TempSource};
 use std::collections::BTreeMap;
 
 pub struct Hardware {
     pub chip: Option<Box<dyn FanChip>>,
     pub chip_error: Option<String>,
+    /// Issue #580 (R1): why the NCT half could not be opened, from the open itself. The daemon
+    /// must never parse `chip_error` to learn this; a GPU can be present when the NCT is not.
+    pub chip_problem: Option<ChipProblem>,
+    /// Issue #580 (R13): the chip open was tried, so `chip_problem: None` means "fine". An older
+    /// service has no such field and reads false, which is never a healthy observation.
+    pub chip_checked: bool,
     pub temps: BTreeMap<TempSource, Box<dyn TempReader>>,
     /// The GPU's slowdown threshold in °C (issue #130), read through the same NVML
     /// loader as the fans. `None` when there is no GPU or the driver reports none.
     pub gpu_rated_max_c: Option<f32>,
 }
 
+/// Why the NCT half could not be opened (#580 R1, R17). The human text stays for the log; the
+/// `ChipProblem` is the typed answer that crosses the pipe.
+#[derive(Debug, thiserror::Error)]
+pub enum ChipOpenError {
+    #[error("PawnIO unavailable: {0}")]
+    PawnIoUnavailable(String),
+    #[error("chip not found: {0}")]
+    ChipNotFound(String),
+}
+
+impl From<PawnIoError> for ChipOpenError {
+    fn from(error: PawnIoError) -> Self {
+        Self::PawnIoUnavailable(error.to_string())
+    }
+}
+
+/// The typed answer for one failed Super I/O port (R17). A transport failure means PawnIO could
+/// not be used; a chip that answered with the wrong id or base means no supported chip.
+pub fn chip_problem_from(error: &ChipOpenError) -> ChipProblem {
+    match error {
+        ChipOpenError::PawnIoUnavailable(_) => ChipProblem::PawnIoUnavailable,
+        ChipOpenError::ChipNotFound(_) => ChipProblem::ChipNotFound,
+    }
+}
+
+/// Two ports are tried. A failed PawnIO on either port wins (R17): one port with no driver says
+/// more about the machine than one port with no chip.
+fn merge_problems(a: Option<ChipProblem>, b: Option<ChipProblem>) -> Option<ChipProblem> {
+    match (a, b) {
+        (Some(ChipProblem::PawnIoUnavailable), _) | (_, Some(ChipProblem::PawnIoUnavailable)) => {
+            Some(ChipProblem::PawnIoUnavailable)
+        }
+        (Some(ChipProblem::ChipNotFound), _) | (_, Some(ChipProblem::ChipNotFound)) => {
+            Some(ChipProblem::ChipNotFound)
+        }
+        _ => None,
+    }
+}
+
+/// The problem from the ports that failed, in port order. `None` for a port means it was not
+/// tried because an earlier port found a chip; the open then has no problem at all.
+fn chip_problem_from_ports(outcomes: [Option<ChipOpenError>; 2]) -> Option<ChipProblem> {
+    // A found chip ends the open with `Ok`; nothing about the other ports matters then.
+    if outcomes.iter().any(Option::is_none) {
+        return None;
+    }
+    outcomes
+        .into_iter()
+        .flatten()
+        .fold(None, |problem, e| merge_problems(problem, Some(chip_problem_from(&e))))
+}
+
+/// The chip open and the GPU threshold as one answer (#580 R17): the NCT problem is carried in
+/// both the composite case and the case where no chip at all was opened.
+struct ChipOpen {
+    chip: Result<Box<dyn FanChip>, String>,
+    threshold: Option<f32>,
+    problem: Option<ChipProblem>,
+}
+
 /// Opens the fan headers: the NCT6687D-R's, then the GPU's through NVML, as one chip. Either
 /// half may be missing; both missing is the NCT error. Used by service startup and by
 /// `--restore-bios`, so the GPU handback runs in both.
 pub fn open_chip() -> Result<Box<dyn FanChip>, String> {
-    open_chip_and_threshold().0
+    open_chip_and_threshold().chip
 }
 
 /// Like [`open_chip`], with the GPU's slowdown threshold (issue #130) read from the
-/// NVML instance before it is boxed into the composite chip.
-fn open_chip_and_threshold() -> (Result<Box<dyn FanChip>, String>, Option<f32>) {
+/// NVML instance before it is boxed into the composite chip, and the NCT's problem.
+fn open_chip_and_threshold() -> ChipOpen {
     let nct = open_nct();
+    let problem = nct.as_ref().err().map(chip_problem_from);
     let (gpu, threshold): (Option<Box<dyn GpuFanApi>>, Option<f32>) = match NvmlFans::open() {
         Ok(mut fans) => {
             let threshold = match fans.slowdown_threshold_c() {
@@ -45,7 +112,7 @@ fn open_chip_and_threshold() -> (Result<Box<dyn FanChip>, String>, Option<f32>) 
         }
     };
     let chip: Result<Box<dyn FanChip>, String> = match (nct, gpu) {
-        (Err(e), None) => Err(e),
+        (Err(e), None) => Err(e.to_string()),
         (nct, gpu) => {
             let nct = match nct {
                 Ok(chip) => Some(chip),
@@ -57,34 +124,61 @@ fn open_chip_and_threshold() -> (Result<Box<dyn FanChip>, String>, Option<f32>) 
             Ok(Box::new(CompositeChip::new(nct, gpu)))
         }
     };
-    (chip, threshold)
+    ChipOpen { chip, threshold, problem }
 }
 
-/// Opens the NCT6687D-R through PawnIO's LpcIO module and checks it with the detect path.
-fn open_nct() -> Result<Box<dyn FanChip>, String> {
+/// Opens the NCT6687D-R through PawnIO's LpcIO module and checks it with the detect path. Both
+/// Super I/O ports are tried, 0x2E first; the errors of both are reported.
+fn open_nct() -> Result<Box<dyn FanChip>, ChipOpenError> {
     let home = pawnio_home();
-    // Both Super I/O ports are tried, 0x2E first; the errors of both are reported.
     let mut errors = Vec::new();
+    let mut outcomes = Vec::new();
     for (slot, sio) in crate::chip::SIO_PORTS.iter().enumerate() {
         let io = match PawnIoPortIo::open(&home, slot as u64) {
             Ok(io) => io,
             Err(e) => {
                 errors.push(format!("{sio:#x}: PawnIO LpcIO: {e}"));
+                outcomes.push(Some(ChipOpenError::from(e)));
                 continue;
             }
         };
         match Nct6687::detect_at(io, MSI_ALT1_MAP, *sio) {
             Ok(chip) => return Ok(Box::new(chip)),
-            Err(e) => errors.push(format!("{sio:#x}: {e}")),
+            Err(e) => {
+                errors.push(format!("{sio:#x}: {e}"));
+                outcomes.push(Some(match chip_error_problem(&e) {
+                    ChipProblem::PawnIoUnavailable => ChipOpenError::PawnIoUnavailable(e.to_string()),
+                    ChipProblem::ChipNotFound => ChipOpenError::ChipNotFound(e.to_string()),
+                }));
+            }
         }
     }
-    Err(errors.join("; "))
+    // Both ports were tried and neither found a chip; the typed answer follows R17's rule. The
+    // human text keeps each port's detail for the log.
+    let problem = chip_problem_from_ports(outcomes.try_into().expect("two Super I/O ports"))
+        .unwrap_or(ChipProblem::ChipNotFound);
+    Err(match problem {
+        ChipProblem::PawnIoUnavailable => ChipOpenError::PawnIoUnavailable(errors.join("; ")),
+        ChipProblem::ChipNotFound => ChipOpenError::ChipNotFound(errors.join("; ")),
+    })
+}
+
+/// One chip-detect failure as a typed problem (R17). A port read that failed is a PawnIO
+/// transport failure; a chip that answered with no id or a wrong monitor base is no chip.
+pub fn chip_error_problem(error: &ChipError) -> ChipProblem {
+    match error {
+        ChipError::Io(_) => ChipProblem::PawnIoUnavailable,
+        ChipError::NotFound { .. }
+        | ChipError::WrongBase { .. }
+        | ChipError::CommandTimeout(_)
+        | ChipError::Readback { .. } => ChipProblem::ChipNotFound,
+    }
 }
 
 /// Opens every source the service can read. Nothing here panics on a missing driver.
 pub fn open() -> Hardware {
-    let (opened, gpu_rated_max_c) = open_chip_and_threshold();
-    let (chip, chip_error) = match opened {
+    let opened = open_chip_and_threshold();
+    let (chip, chip_error) = match opened.chip {
         Ok(chip) => {
             tracing::info!(chip = %chip.chip_name(), map = MSI_ALT1_MAP.name, confirmed = MSI_ALT1_MAP.confirmed, "fan chip detected");
             (Some(chip), None)
@@ -107,5 +201,49 @@ pub fn open() -> Hardware {
         }
         Err(e) => tracing::warn!(error = %e, "GPU temperature unavailable"),
     }
-    Hardware { chip, chip_error, temps, gpu_rated_max_c }
+    Hardware {
+        chip,
+        chip_error,
+        chip_problem: opened.problem,
+        chip_checked: true,
+        temps,
+        gpu_rated_max_c: opened.threshold,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chip_errors_map_to_the_two_problems_r17() {
+        let io = ChipError::Io(std::io::Error::other("port read failed"));
+        assert_eq!(chip_error_problem(&io), ChipProblem::PawnIoUnavailable);
+        assert_eq!(
+            chip_error_problem(&ChipError::NotFound { port: 0x2E, id: 0x1234 }),
+            ChipProblem::ChipNotFound
+        );
+        assert_eq!(
+            chip_error_problem(&ChipError::WrongBase { found: 0xA30, expected: 0xA20 }),
+            ChipProblem::ChipNotFound
+        );
+    }
+
+    #[test]
+    fn every_nct_outcome_gives_the_documented_problem_r17() {
+        let available = || Some(ChipOpenError::PawnIoUnavailable("no driver".into()));
+        let missing = || Some(ChipOpenError::ChipNotFound("no chip".into()));
+        let found = || None; // the open returns the chip before the next port is tried
+        // Both ports with no PawnIO: unavailable.
+        assert_eq!(chip_problem_from_ports([available(), available()]), Some(ChipProblem::PawnIoUnavailable));
+        // Either port with no PawnIO wins, even when the other found no chip.
+        assert_eq!(chip_problem_from_ports([missing(), available()]), Some(ChipProblem::PawnIoUnavailable));
+        assert_eq!(chip_problem_from_ports([available(), missing()]), Some(ChipProblem::PawnIoUnavailable));
+        // No chip on both ports: chip not found.
+        assert_eq!(chip_problem_from_ports([missing(), missing()]), Some(ChipProblem::ChipNotFound));
+        // A chip on either port: no problem, whatever the earlier port reported.
+        assert_eq!(chip_problem_from_ports([found(), missing()]), None);
+        assert_eq!(chip_problem_from_ports([missing(), found()]), None);
+        assert_eq!(chip_problem_from_ports([found(), found()]), None);
+    }
 }

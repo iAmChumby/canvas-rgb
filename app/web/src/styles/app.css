@@ -541,6 +541,18 @@ html[data-motion="reduced"] *::after {
   .strip-mark-text {
     display: none;
   }
+  /* #580: the words are dropped at this width, so the count sits beside the mark's icon as a
+     short number. The badge takes no extra row and the button's label carries the full words. */
+  .strip-mark-icon[data-count] {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .strip-mark-icon[data-count]::after {
+    content: attr(data-count);
+    font-family: var(--fm);
+    font-size: var(--t14);
+  }
 }
 
 /* A page with its own strip actions (Apply, Save layout, the fan profiles) needs the room
@@ -4791,6 +4803,69 @@ button.chip:hover {
 .rule-warn {
   border-color: color-mix(in srgb, var(--warn) 40%, transparent);
   background: color-mix(in srgb, var(--warn) 8%, var(--sunk));
+}
+
+/* #580: one hardware note, with the five parts in the same order on every page. The tint is the
+   existing `--tone` one, so a note on the Fans page and one on Devices share their colours. */
+.fault-note {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: var(--s2) var(--s4);
+  padding: var(--s3) var(--s4);
+  border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--tone) 8%, var(--sunk));
+  animation: canvas-enter var(--dur) var(--ease) both;
+}
+
+.fault-note[data-tone="warn"] { --tone: var(--warn); }
+.fault-note[data-tone="down"] { --tone: var(--down); }
+
+.fault-note-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.fault-note-icon {
+  display: inline-flex;
+  flex: none;
+  padding-top: 2px;
+  color: var(--tone);
+}
+
+.fault-note-title {
+  min-width: 0;
+  font-size: var(--t15);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.fault-note-action {
+  flex: none;
+  margin-left: auto;
+}
+
+.fault-note-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: var(--s3);
+  row-gap: var(--s1);
+  margin: 0;
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+.fault-note-fields dt { color: var(--mute); font-size: var(--t14); }
+.fault-note-fields dd { min-width: 0; margin: 0; color: var(--dim); overflow-wrap: anywhere; }
+.fault-note-fields dd .fig { font-family: var(--fm); font-size: var(--t14); }
+
+@media (max-width: 720px) {
+  .fault-note { grid-template-columns: minmax(0, 1fr); }
+  .fault-note-head { flex-wrap: wrap; }
+  .fault-note-action { margin-left: 0; }
+  .fault-note-fields { grid-template-columns: max-content minmax(0, 1fr); }
 }
 
 /* The fan editor's status: the daemon's reason, an error, "Applying". The region is as tall
@@ -10463,6 +10538,67 @@ button.chip:hover {
 .help-hero-link {
   margin-top: var(--s3);
 }
+
+/* #580: the fixed device checklist. Each row is one verdict and one next step; the supported
+   list is mono for the ids, and nothing moves when a status poll lands because the rows are a
+   snapshot taken on open and on Try again. */
+.help-check {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.help-check > li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.help-check > li:last-child { border-bottom: 0; }
+
+.help-check-icon {
+  display: inline-flex;
+  flex: none;
+  padding-top: 2px;
+  color: var(--mute);
+}
+
+.help-check > li[data-verdict="OK"] .help-check-icon { color: var(--ok); }
+.help-check > li[data-verdict="Problem"] .help-check-icon { color: var(--warn); }
+.help-check > li[data-verdict="Unknown"] .help-check-icon { color: var(--work); }
+
+.help-check-body { min-width: 0; }
+.help-check-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2); }
+.help-check-head h3 { font-size: var(--t15); }
+.help-check-verdict { color: var(--mute); font-size: var(--t14); }
+.help-check-body p { margin-top: var(--s1); font-size: var(--t14); line-height: 1.45; }
+
+.help-check-devices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--s1) var(--s3);
+  margin: var(--s2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.help-check-devices li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+  font-size: var(--t14);
+}
+
+.help-check-devices li[data-connected="true"] { color: var(--ok); }
+.help-check-connected { margin-left: auto; color: var(--mute); font-size: var(--t14); }
+.help-check-actions { margin-top: var(--s3); }
 
 .help-count {
   color: var(--mute);

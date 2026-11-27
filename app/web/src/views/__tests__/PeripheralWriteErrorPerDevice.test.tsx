@@ -4,6 +4,12 @@ import { PeripheralsView } from "@/views/PeripheralsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 
+// The no-settings panel links to the Help checklist, so the shared ButtonLink needs a router.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: () => {}, replace: () => {} }),
+  usePathname: () => "/peripherals/",
+}));
+
 // Issue #156 (Peripherals): `saveError` is one slot for the whole view, so a failed write
 // on device A is cleared when device B's read lands, and switching back to A loses it.
 // And a late read calls `setStaged({})`, dropping edits the user made after that read

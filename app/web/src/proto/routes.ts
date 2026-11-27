@@ -59,6 +59,8 @@ export const routes = {
   // PUT takes a lease; GET ?lease=<id> reads and renews it (410 when expired).
   audioTest: "/api/v1/audio/test",
   dismissZonePanel: "/api/v1/first-run/dismiss-zone-panel",
+  // POST, no body: hide one hardware note (#580). The key is the fault's own dismissal key.
+  faultDismiss: (key: string) => `/api/v1/faults/${encodeURIComponent(key)}/dismiss`,
   // POST, no body: the owner reached the end of the onboarding (Status.onboarding_complete).
   onboardingComplete: "/api/v1/onboarding/complete",
   // GET every numeric display with its config and the value it shows now; PUT a DisplayConfig

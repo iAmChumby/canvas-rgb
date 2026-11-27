@@ -105,8 +105,17 @@ export function StatusStrip({
   // On a phone the row has room for the link's name, not for the whole sentence. The full
   // words are the button's own label, so nothing is lost.
   const phone = useMediaQuery(PHONE_QUERY);
+  // #580 R2, R14: the mark's text carries the count of hardware notes. A dismissed note still
+  // counts, because its condition is still there; the page notes are the only ones that hide.
+  const warnings = list.filter((p) => p.fault).length;
   const fullText = list[0]?.text ?? ALL_GOOD;
-  const markText = list[0] ? (phone ? (list[0].short ?? list[0].text) : list[0].text) : ALL_GOOD;
+  const markText = warnings > 0
+    ? phone
+      ? String(warnings)
+      : `${warnings} warning${warnings === 1 ? "" : "s"}`
+    : list[0]
+      ? (phone ? (list[0].short ?? list[0].text) : list[0].text)
+      : ALL_GOOD;
   // The swatch's own name, for the widths where the effect's name is dropped from the row.
   // Before the daemon has answered there is nothing to name: the row says why, never a bare dash.
   // The daemon that is up with its engine not answering (#241) is not offline: its engine is.
@@ -183,7 +192,7 @@ export function StatusStrip({
           onClick={() => onDetailsOpen(!detailsOpen)}
         >
           <Crossfade swapKey={`${tone}:${fullText}`}>
-            <span className="strip-mark-icon" aria-hidden="true">
+            <span className="strip-mark-icon" data-count={warnings > 0 ? String(warnings) : undefined} aria-hidden="true">
               {markIcon(tone)}
             </span>
             <span className="strip-mark-text">{markText}</span>

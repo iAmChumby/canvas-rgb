@@ -374,6 +374,8 @@ export const api = {
   releaseAudioTest: (lease: string) =>
     request<unknown>("DELETE", `${routes.audioTest}?lease=${encodeURIComponent(lease)}`),
   dismissZonePanel: () => request<unknown>("POST", routes.dismissZonePanel),
+  /** Hides one hardware note on every viewer (#580). It comes back when its cause clears and returns. */
+  dismissFault: (key: string) => request<unknown>("POST", routes.faultDismiss(key)),
   /** The owner reached the end of the onboarding: the window stops opening by itself. */
   completeOnboarding: () => request<unknown>("POST", routes.onboardingComplete),
 

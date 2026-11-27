@@ -13,6 +13,7 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 import { Button, ButtonLink } from "@/components/Button";
+import { DeviceChecklist } from "@/components/DeviceChecklist";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { notify } from "@/components/Notify";
 import { Panel, StateDot } from "@/components/Panel";
@@ -230,6 +231,10 @@ export function HelpView() {
                 </>
               )}
             </Panel>
+
+            {/* #580: one fixed checklist, read on open and on Try again, never on the status
+                poll. It sits on Help so Devices, Fans and Peripherals can all point at it. */}
+            <DeviceChecklist />
           </div>
 
           <div className="help-side">

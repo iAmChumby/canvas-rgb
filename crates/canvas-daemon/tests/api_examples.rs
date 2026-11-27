@@ -262,6 +262,8 @@ fn fixture(url: &str, method: &str, name: &str, lease: Option<&str>) -> String {
         "zone" => "0",
         "device" => DEVICE_A,
         "h" => "cpu_fan",
+        // A hardware note's dismissal key is a hex FNV-1a value (#580).
+        "key" => "0123456789abcdef",
         "group" => "everything",
         "name" if path.contains("/fans/profiles/") => "Default",
         "name" => "Warm",

@@ -11,9 +11,9 @@ import {
   GameController,
   Keyboard,
   Mouse,
-  Prohibit,
 } from "@phosphor-icons/react";
-import { Button, Swap } from "@/components/Button";
+import { Button, ButtonLink, Swap } from "@/components/Button";
+import { FaultNote } from "@/components/FaultNote";
 import { Chip } from "@/components/Chip";
 import { Panel, StateDot } from "@/components/Panel";
 import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
@@ -1009,16 +1009,22 @@ function PeripheralDetail({
       </Panel>
 
       {noSettings && (
-        <Panel className="rd-peri-unread">
-          <div className="rd-peri-unread-body" data-role="no-settings">
-            <span className="rd-peri-unread-icon" aria-hidden="true">
-              <Prohibit size={22} />
-            </span>
-            <p className="rd-peri-unread-text">
-              {detail.problem ?? `The ${noun}'s settings cannot be read or changed over this connection.`}
-            </p>
-          </div>
-        </Panel>
+        <div data-role="no-settings">
+          <FaultNote
+            parts={{
+              affected: `The ${noun}'s settings cannot be read or changed over this connection.`,
+              cause: detail.problem,
+              fix: (detail.problem ?? "").startsWith("Over Bluetooth")
+                ? "Connect through the 2.4G receiver or a USB cable to change its profiles."
+                : "Switch to XInput mode and connect through the 2.4G receiver or a USB cable.",
+              ignore_if: "You only need this pad's buttons, sticks and triggers.",
+            }}
+          >
+            <ButtonLink href="/help/" size="sm" variant="ghost">
+              Why isn&apos;t my device here?
+            </ButtonLink>
+          </FaultNote>
+        </div>
       )}
 
       {unread && (
