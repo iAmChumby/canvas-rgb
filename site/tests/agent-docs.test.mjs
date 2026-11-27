@@ -31,7 +31,7 @@ const LOCAL = new RegExp(
 );
 
 test("generated data covers the published reference and the CLI", () => {
-  assert.equal(counts.routes, 66);
+  assert.equal(counts.routes, 68);
   assert.equal(routeBySlug.size, counts.routes);
   assert.ok(counts.commands > 25);
   assert.equal(new Set(cli.commands.map((c) => c.slug)).size, cli.commands.length);

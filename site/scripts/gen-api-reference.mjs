@@ -36,6 +36,8 @@ const LISTENER_NOTE = "# Check who owns port 9430 first; see the Verify the list
  */
 const DESCRIPTIONS = {
   "STATUS:GET": "Reports the daemon's version, power state, brightness, frame rate, connected devices, active scene and the links to OpenRGB and to the fan and update service.",
+  "ABOUT:GET": "Reports the app version, build, Windows edition, service version and how the previous run ended.",
+  "ABOUT_REPORT:GET": "Returns the scrubbed support report the editor shows and copies, with the fields the bug report template fills.",
   "OUTPUT:GET": "Reports the current power state, brightness and warmth of the lighting output.",
   "OUTPUT:PATCH": "Changes the power state, brightness or warmth of the lighting output.",
   "QUIT:POST": "Stops the daemon after applying its exit lighting setting and telling the fan and update service the stop was deliberate.",
@@ -134,6 +136,8 @@ const DESCRIPTIONS = {
  */
 const TITLES = {
   "/api/v1/status": "Status",
+  "/api/v1/about": "About",
+  "/api/v1/about/report": "About report",
   "/api/v1/output": "Output",
   "/api/v1/quit": "Quit",
   "/api/v1/devices": "Devices",
@@ -1201,6 +1205,9 @@ const FIELD_MEANINGS = {
  * not the values, so each value carries its own plain sentence here.
  */
 const ENUM_VALUE_MEANINGS = {
+  "LastExit.clean": "The previous run ended on purpose.",
+  "LastExit.unclean": "The previous run ended without a clean stop.",
+  "LastExit.unknown": "There is no record of the previous run yet.",
   "AudioFlow.render": "An output, captured as the sound it plays.",
   "AudioFlow.capture": "An input such as a microphone or line-in, captured directly.",
   "AudioTestStatus.off": "No lease is held and no effect needs audio.",
@@ -1407,6 +1414,7 @@ function titled(routePath) {
 
 /** Areas named in issue #540. Each router module maps to one. */
 const AREAS = {
+  about: "Status and output",
   status: "Status and output",
   output: "Status and output",
   devices: "Devices and lights",

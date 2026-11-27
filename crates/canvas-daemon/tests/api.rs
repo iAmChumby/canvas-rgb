@@ -4816,6 +4816,59 @@ async fn issue295_a_profile_patch_waits_for_a_push_in_flight() {
 }
 
 #[tokio::test]
+async fn about_reports_the_build_and_the_service_version() {
+    let (router, app, _home) = build();
+    app.set_service_version("0.9.1".to_string());
+    let response = router.oneshot(request("GET", routes::ABOUT)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    assert_eq!(body["version"], "0.1.0-test");
+    assert_eq!(body["service_version"], "0.9.1");
+    assert_eq!(body["last_exit"], "unknown");
+    assert!(body.as_object().unwrap().contains_key("commit"));
+    assert!(body.as_object().unwrap().contains_key("build_date"));
+    assert!(body.as_object().unwrap().contains_key("os"));
+}
+
+#[tokio::test]
+async fn about_report_is_an_allow_list_and_scrubs_last() {
+    let (router, app, _home) = build();
+    app.set_scrubber(canvas_daemon::scrub::Scrubber::new(
+        Some(r"C:\Users\Alice".to_string()),
+        Some("Alice".to_string()),
+        Some("ALICE-PC".to_string()),
+    ));
+    let mut good = common::device("ALICE-PC strip", canvas_proto::device::DeviceKind::LedStrip, 12);
+    good.vendor = "C:/Users/alice/Vendor".to_string();
+    good.serial = "SER-ALICE-123".to_string();
+    good.location = "hid:1d57:fa60:unit-98765".to_string();
+    let mut odd = common::device("Desk", canvas_proto::device::DeviceKind::Other, 1);
+    odd.location = "smbus:unit-222".to_string();
+    *app.devices.write().await = vec![good, odd];
+
+    let response = router
+        .oneshot(request("GET", routes::ABOUT_REPORT))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let markdown = body["markdown"].as_str().expect("markdown is text").to_string();
+    assert!(markdown.contains("1d57:fa60"), "{markdown}");
+    assert!(markdown.contains("hid"), "{markdown}");
+    assert!(markdown.contains("not parsed"), "{markdown}");
+    assert!(markdown.contains("<machine>"), "{markdown}");
+    assert!(markdown.contains("<profile>"), "{markdown}");
+    let lower = markdown.to_ascii_lowercase();
+    assert!(!lower.contains("alice"), "{markdown}");
+    assert!(!lower.contains("ser-alice"), "{markdown}");
+    assert!(!markdown.contains("unit-98765"), "{markdown}");
+    assert!(!markdown.contains("smbus:unit-222"), "{markdown}");
+    assert_eq!(body["version"], "0.1.0-test");
+    assert!(body["hardware"].as_str().unwrap().contains("1d57:fa60"));
+    assert!(body["other_rgb_apps"].as_str().unwrap().contains("not checked"));
+}
+
+#[tokio::test]
 async fn issue295_a_profile_put_that_cannot_read_the_base_saves_nothing() {
     // The base is read BEFORE the first send (issue #295 review): a write that cannot start is
     // refused with 503, instead of saving the profile and then saying nothing was changed.

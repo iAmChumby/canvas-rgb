@@ -18,6 +18,18 @@
     "keywords": "api reference reference every local api route, grouped by area, with its body and answer shapes. /docs/api"
   },
   {
+    "title": "About",
+    "hint": "Status and output",
+    "href": "/docs/api/about",
+    "keywords": "about status and output reports the app version, build, windows edition, service version and how the previous run ended. /docs/api/about"
+  },
+  {
+    "title": "About report",
+    "hint": "Status and output",
+    "href": "/docs/api/about-report",
+    "keywords": "about report status and output returns the scrubbed support report the editor shows and copies, with the fields the bug report template fills. /docs/api/about-report"
+  },
+  {
     "title": "Output",
     "hint": "Status and output",
     "href": "/docs/api/output",
