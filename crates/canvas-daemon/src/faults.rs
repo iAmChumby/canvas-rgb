@@ -128,16 +128,6 @@ pub fn build(openrgb: LinkState, fans: Option<&FansStatus>, dismissed: &[String]
     out
 }
 
-/// The number of store saves started, for the poll-path test that must see none (#580 C6).
-pub fn store_save_count() -> usize {
-    crate::store_io::save_count()
-}
-
-/// Resets the diagnostic counter at the start of a test.
-pub fn reset_store_save_count() {
-    crate::store_io::reset_save_count();
-}
-
 /// Clears one dismissal key after an observed healthy state, and writes `config.toml` only when
 /// the key was actually stored (R4, R16). A connecting service, an empty fans cache and an
 /// unchecked chip never call this, so a restart cannot revive a note the owner hid.

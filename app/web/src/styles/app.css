@@ -558,6 +558,14 @@ html[data-motion="reduced"] *::after {
     font-family: var(--fm);
     font-size: var(--t14);
   }
+  /* #580 fix pass 2: the phone drops the words, so a hidden fault keeps its own quiet edge and a
+     muted badge instead of looking the same as an active one. */
+  .strip-mark[data-dismissed="true"] {
+    border-color: var(--mute);
+  }
+  .strip-mark[data-dismissed="true"] .strip-mark-icon[data-count]::after {
+    color: var(--mute);
+  }
 }
 
 /* A page with its own strip actions (Apply, Save layout, the fan profiles) needs the room
@@ -3813,8 +3821,21 @@ button.chip:hover {
     padding-top: var(--s1);
     padding-bottom: var(--s1);
   }
-  .rd-devices .rd-dev-name {
+  /* U7: both the device row and the zone sub-row wrap their names; `.one-line` would clip the
+     long product name and the kind/vendor/sub-line in the narrow name column. */
+  .rd-devices .rd-dev-who .one-line,
+  .rd-devices .rd-light-who .one-line {
     white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+  /* The light row's rename button holds that same long name; it must wrap with the row. */
+  .rd-devices .rd-light-name {
+    height: auto;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
     overflow-wrap: anywhere;
   }
 }
@@ -4841,6 +4862,7 @@ button.chip:hover {
 /* #580: one hardware note, with the five parts in the same order on every page. The tint is the
    existing `--tone` one, so a note on the Fans page and one on Devices share their colours. */
 .fault-note {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
   gap: var(--s2) var(--s4);
@@ -4878,10 +4900,17 @@ button.chip:hover {
   line-height: 1.35;
 }
 
+/* U3: the dismiss control belongs at the note's right edge, not at the end of the title column.
+   It leaves the grid flow, and the head reserves its width only on notes that carry one. */
 .fault-note-action {
-  flex: none;
-  margin-left: auto;
-  justify-self: end;
+  position: absolute;
+  top: var(--s3);
+  right: var(--s4);
+}
+
+.fault-note[data-action="true"] .fault-note-head,
+.fault-note[data-action="true"] .fault-note-fields {
+  padding-right: 88px;
 }
 
 .fault-note-fields {
@@ -4910,7 +4939,9 @@ button.chip:hover {
   .fault-note { grid-template-columns: minmax(0, 1fr); }
   /* U6: the icon keeps the title's row; the dismiss control drops below both. */
   .fault-note-head { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
-  .fault-note-action { grid-column: 1 / -1; justify-self: start; margin-left: 0; }
+  .fault-note[data-action="true"] .fault-note-head,
+  .fault-note[data-action="true"] .fault-note-fields { padding-right: 0; }
+  .fault-note-action { position: static; grid-column: 1 / -1; justify-self: start; margin-top: var(--s2); }
   .fault-note-fields { grid-template-columns: max-content minmax(0, 1fr); }
 }
 

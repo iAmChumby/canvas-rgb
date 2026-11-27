@@ -117,7 +117,9 @@ export function StatusStrip({
     : list[0]
       ? (phone ? (list[0].short ?? list[0].text) : list[0].text)
       : ALL_GOOD;
-  const fullText = warnings > 0 ? markText : (list[0]?.text ?? ALL_GOOD);
+  // The accessible name is always the full sentence, including ", dismissed" (fix pass 2): the
+  // phone's visible number is short, but the button must still say what the count means.
+  const fullText = warnings > 0 ? countText : (list[0]?.text ?? ALL_GOOD);
   // The swatch's own name, for the widths where the effect's name is dropped from the row.
   // Before the daemon has answered there is nothing to name: the row says why, never a bare dash.
   // The daemon that is up with its engine not answering (#241) is not offline: its engine is.
@@ -200,6 +202,7 @@ export function StatusStrip({
           type="button"
           className="strip-mark"
           data-tone={tone}
+          data-dismissed={allDismissed ? "true" : undefined}
           aria-label={fullText}
           title={fullText}
           aria-expanded={detailsOpen}

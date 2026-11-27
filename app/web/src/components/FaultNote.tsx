@@ -32,7 +32,7 @@ export function FaultNote({
   className?: string;
 }) {
   return (
-    <div className={`fault-note ${className}`.trim()} data-tone={tone} role="status">
+    <div className={`fault-note ${className}`.trim()} data-tone={tone} data-action={action ? "true" : undefined} role="status">
       <div className="fault-note-head">
         <span className="fault-note-icon" aria-hidden="true">
           <Warning size={18} weight="fill" />

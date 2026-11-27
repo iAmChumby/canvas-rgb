@@ -34,19 +34,6 @@ use std::sync::Arc;
 use crate::api::ApiFailure;
 use crate::state::App;
 use crate::storage::Store;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// How many detached store saves have started. A diagnostic so a poll path can prove it never
-/// asks the writer for work when there is nothing to write (#580 C6).
-static SAVE_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-pub fn reset_save_count() {
-    SAVE_COUNT.store(0, Ordering::SeqCst);
-}
-
-pub fn save_count() -> usize {
-    SAVE_COUNT.load(Ordering::SeqCst)
-}
 
 /// What a caller sees when the detached save task itself died (a panic, a cancelled runtime).
 fn task_failed(e: &tokio::task::JoinError) -> String {
@@ -64,7 +51,6 @@ pub(crate) async fn store_save<T: Send + 'static>(
     mutate: impl FnOnce(&mut Store) -> Result<T, ApiFailure>,
     save: impl FnOnce(&mut Store) -> Result<(), ApiFailure> + Send + 'static,
 ) -> Result<T, ApiFailure> {
-    SAVE_COUNT.fetch_add(1, Ordering::SeqCst);
     let writer = Arc::clone(&app.store_writer).lock_owned().await;
     let (value, mut snapshot) = {
         let mut store = app.store.write().await;

@@ -20,9 +20,10 @@ vi.mock("@/lib/endpoints", () => ({
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const phoneRef = { current: false };
 beforeAll(() => {
   window.matchMedia = ((query: string) => ({
-    matches: false,
+    matches: phoneRef.current && query.includes("max-width: 720px"),
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {},
@@ -36,6 +37,7 @@ beforeAll(() => {
 afterEach(() => {
   cleanup();
   showAgain.mockClear();
+  phoneRef.current = false;
 });
 
 const fault = (key: string, dismissed = false): Fault => ({
@@ -138,5 +140,16 @@ describe("a dismissed fault says so and can be shown again (C2)", () => {
     patchSnap({ status: status({ faults: [fault("1111111111111111", true)] }) });
     openStrip();
     expect(mark().textContent).not.toContain("All connected");
+  });
+
+  it("keeps the full words and the dismissed mark on a phone", () => {
+    phoneRef.current = true;
+    patchSnap({ status: status({ faults: [fault("1111111111111111", true)] }) });
+    openStrip();
+    const m = mark();
+    expect(m.textContent).toBe("1");
+    expect(m.getAttribute("aria-label")).toBe("1 warning, dismissed");
+    expect(m.getAttribute("title")).toBe("1 warning, dismissed");
+    expect(m.getAttribute("data-dismissed")).toBe("true");
   });
 });

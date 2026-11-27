@@ -154,7 +154,7 @@ fn open_nct_with(opener: &dyn SioOpener) -> Result<Box<dyn FanChip>, ChipOpenErr
         let io = match opener.open(slot as u64, *sio) {
             Ok(io) => io,
             Err(e) => {
-                errors.push(format!("{sio:#x}: PawnIO LpcIO: {e}"));
+                errors.push(format!("{sio:#x}: {e}"));
                 outcomes.push(e);
                 continue;
             }
@@ -268,7 +268,17 @@ mod tests {
         );
     }
 
+    use crate::pawnio::PawnIoError;
     use std::io;
+
+    #[test]
+    fn a_pawnio_failure_has_one_prefix_in_logs_and_chip_error() {
+        let error = ChipOpenError::from(PawnIoError::Unavailable("LpcIO open failed".into()));
+        let text = error.to_string();
+        assert!(text.starts_with("PawnIO unavailable:"), "{text}");
+        assert_eq!(text.matches("PawnIO").count(), 1, "{text}");
+        assert!(!text.contains("unavailable: PawnIO"), "{text}");
+    }
 
     /// A Super I/O port that answers zero to every probe, so the detect path reports NotFound.
     #[derive(Default)]

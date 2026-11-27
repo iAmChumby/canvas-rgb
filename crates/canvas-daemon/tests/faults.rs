@@ -229,10 +229,11 @@ async fn an_unknown_hex_key_is_refused_and_writes_nothing() {
 
 #[tokio::test]
 async fn the_dismissal_store_is_capped_at_32_keys() {
-    let old: Vec<String> = (0..32).map(|n| format!("{n:016x}")).collect();
+    // Start over the cap: one dismiss must shrink the list to 32, not drop a single key.
+    let old: Vec<String> = (0..40).map(|n| format!("{n:016x}")).collect();
     let current = key(FaultKind::FanChip, None, "pawn_io_unavailable");
     let (router, app, _home) = seeded_app(&old);
-    assert_eq!(app.store.read().await.config.dismissed_faults.len(), 32, "the seeded keys loaded");
+    assert_eq!(app.store.read().await.config.dismissed_faults.len(), 40, "the seeded keys loaded");
     *app.openrgb.write().await = LinkState::Connected;
     *app.fans.write().await = Some(bad_fans(ChipProblem::PawnIoUnavailable));
     let response = router
@@ -241,9 +242,13 @@ async fn the_dismissal_store_is_capped_at_32_keys() {
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK);
     let stored = app.store.read().await.config.dismissed_faults.clone();
-    assert_eq!(stored.len(), 32, "the oldest key was dropped");
+    assert_eq!(stored.len(), 32, "the oversized list was trimmed to the cap in one go");
     assert!(stored.contains(&current));
-    assert!(!stored.contains(&old[0]));
+    // 40 seeded keys plus the new one makes 41; the nine oldest go in one trim.
+    for dropped in &old[..9] {
+        assert!(!stored.contains(dropped), "the nine oldest keys were dropped");
+    }
+    assert!(stored.contains(&old[9]), "the tenth key is kept");
 }
 
 #[tokio::test]
@@ -253,14 +258,16 @@ async fn healthy_polls_with_no_key_do_not_touch_the_store() {
     let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
     file.set_modified(std::time::SystemTime::UNIX_EPOCH).unwrap();
     let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
     let healthy = canvas_daemon::fakes::fake_fans_status();
-    canvas_daemon::faults::reset_store_save_count();
     for _ in 0..100 {
         clear_fan_if_healthy(&app, &healthy).await;
         clear_openrgb_if_healthy(&app, LinkState::Connected).await;
     }
-    assert_eq!(canvas_daemon::faults::store_save_count(), 0, "100 healthy polls saved nothing");
-    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before, "the config file was not rewritten");
+    // A save writes a new file: its bytes and its timestamp both change. Neither is a process-
+    // global counter, so other tests saving in parallel cannot move this test's verdict.
+    assert_eq!(std::fs::read(&path).unwrap(), bytes, "the config file was not rewritten");
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before, "the config file's time did not move");
 }
 
 #[tokio::test]

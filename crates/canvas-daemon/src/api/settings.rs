@@ -122,9 +122,12 @@ pub async fn dismiss_fault(
         |store| {
             if !store.config.dismissed_faults.iter().any(|k| k == &key) {
                 store.config.dismissed_faults.push(key.clone());
-                if store.config.dismissed_faults.len() > MAX_DISMISSED_FAULTS {
-                    store.config.dismissed_faults.remove(0);
-                }
+            }
+            // Trim in one go, so a config that already holds more than the cap shrinks to it on
+            // the first dismiss instead of losing one key per call (#580 fix pass 2).
+            if store.config.dismissed_faults.len() > MAX_DISMISSED_FAULTS {
+                let drop = store.config.dismissed_faults.len() - MAX_DISMISSED_FAULTS;
+                store.config.dismissed_faults.drain(..drop);
             }
             Ok(())
         },

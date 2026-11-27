@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { ArrowClockwise, Check, Question, Warning } from "@phosphor-icons/react";
 import { Button, ButtonLink } from "@/components/Button";
 import { Panel } from "@/components/Panel";
-import { getSnap } from "@/lib/store";
+import { getSnap, useSnap } from "@/lib/store";
 import { SUPPORTED_DEVICES } from "@/lib/supportedDevices";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { FansStatus } from "@/proto/FansStatus";
@@ -49,11 +49,30 @@ function snapshot(): Snapshot {
 }
 
 export function DeviceChecklist() {
-  // The state initializer is the open: the checklist holds what it saw until the person asks
-  // again. No effect and no subscription, so a 1 s status poll cannot move a row.
-  const [seen, setSeen] = useState<Snapshot>(snapshot);
+  // "Open" is the first status answer, which reaches the fake daemon a moment after mount. The
+  // store subscription only waits for that answer; once it lands the row is frozen until Try
+  // again, so a later 1 s poll cannot move a verdict under a reading finger.
+  const liveStatus = useSnap((s) => s.status);
+  const liveDevices = useSnap((s) => s.devices);
+  const liveFans = useSnap((s) => s.fans);
+  const [seen, setSeen] = useState<Snapshot | null>(() => {
+    const first = snapshot();
+    return first.status && first.devices ? first : null;
+  });
+  useEffect(() => {
+    // The daemon answers a moment after mount. This is the delayed *open* of the checklist, not a
+    // poll: the functional guard means it can happen once, and Try again is the only later read.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSeen((current) =>
+      current ?? (liveStatus && liveDevices ? { status: liveStatus, devices: liveDevices, fans: liveFans } : null),
+    );
+  }, [liveStatus, liveDevices, liveFans]);
+  const { status, devices, fans } = seen ?? {
+    status: liveStatus,
+    devices: liveDevices,
+    fans: liveFans,
+  };
   const run = useCallback(() => setSeen(snapshot()), []);
-  const { status, devices, fans } = seen;
 
   const rows: Row[] = [];
   const openrgb = status?.openrgb ?? null;

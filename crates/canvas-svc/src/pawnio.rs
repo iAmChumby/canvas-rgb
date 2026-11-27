@@ -48,7 +48,9 @@ fn io_other(detail: impl std::fmt::Display) -> io::Error {
 /// parses the human text back.
 #[derive(Debug, thiserror::Error)]
 pub enum PawnIoError {
-    #[error("PawnIO is unavailable: {0}")]
+    // The detail only: `ChipOpenError` adds the one "PawnIO unavailable" prefix in logs and in
+    // `chip_error` (fix pass 2).
+    #[error("{0}")]
     Unavailable(String),
 }
 
