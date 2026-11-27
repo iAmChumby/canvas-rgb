@@ -60,7 +60,7 @@ export const STATES = [
   // B6: the builder really loads, then a dirty draft and an open rename field.
   { name: "builder", url: builder("loaded"), state: "loaded" },
   { name: "builder", url: builder("long-name"), state: "long-name" },
-  { name: "peripherals", url: "/peripherals/?peripherals=unread", state: "pending" },
+  { name: "peripherals", url: "/peripherals/?state=reads-on", state: "pending" },
   // B6: a draft that differs from what is saved, and a name being typed.
   { name: "builder", url: builder("loaded"), state: "dirty" },
   { name: "builder", url: "/effects/?stack=new&state=complete,stack", state: "renaming" },
@@ -71,7 +71,7 @@ export const STATES = [
   // B10: every secondary key has one home at every width, the bar or the overflow.
   { name: "effects", url: "/effects/?group=g-case", state: "overflow" },
   { name: "builder", url: builder("loaded", "&group=g-case"), state: "overflow" },
-  { name: "peripherals", url: "/peripherals/?peripherals=unread", state: "overflow" },
+  { name: "peripherals", url: "/peripherals/?state=reads-on", state: "overflow" },
   { name: "command-palette", url: "/fans/", state: "palette" },
   { name: "status-popover", url: "/fans/", state: "popover" },
 ];
@@ -339,7 +339,7 @@ export function judge(m, state) {
   // B6: a fixture that cannot load is a failure, never a quiet error-panel capture.
   if (state.name === "builder" && m.fixtureError) bad.push(`${where}: the builder fixture did not load (error panel)`);
   // B2: a required primary must be drawn inside the window, not merely present in the DOM.
-  if (["fans", "effects", "builder"].includes(state.name) && !m.primaryPresent) bad.push(`${where}: the primary action is not visible in the bar`);
+  if ((["fans", "effects", "builder"].includes(state.name) || state.state === "pending") && !m.primaryPresent) bad.push(`${where}: the primary action is not visible in the bar`);
   if (state.state === "long-name" && (!m.userTitle.present || !m.userTitle.visible)) bad.push(`${where}: the user-named title is not visible in the bar`);
   if (state.state === "long-name" && !m.userTitle.full) bad.push(`${where}: the user-named title has no full name in its title or accessible name`);
   // B5: a title may only shorten when the full name cannot fit the room that is there.
@@ -385,6 +385,12 @@ async function addLayer(page) {
   await tile.click({ timeout: 5000 });
 }
 
+/** One change that is not on the device yet: writes are allowed, then one setting is picked. */
+async function stageChange(page) {
+  await page.getByRole("switch", { name: "Change settings on the device" }).click({ timeout: 5000 });
+  await page.getByRole("radiogroup", { name: "Polling rate (Hz)" }).getByRole("radio", { name: "500", exact: true }).click({ timeout: 5000 });
+}
+
 async function driveState(page, state) {
   if (mutation === "mutate-state") {
     await page.getByRole("button", { name: "No such control" }).click({ timeout: 500 });
@@ -403,10 +409,10 @@ async function driveState(page, state) {
   } else if (state.name === "fans" && state.state === "dirty") {
     // A header's mode that the saved profile does not hold. Fans draws no dirty mark (#586 R7).
     const fixed = page.locator("main").getByRole("radio", { name: "Fixed %" }).first();
-    const card = page.locator("main .fan-card").first();
-    await card.waitFor({ timeout: 5000 });
-    // A narrow page opens no header until one is tapped.
-    if (!(await fixed.isVisible())) await card.click({ timeout: 5000 });
+    // The headers are a table on a wide page and cards on a narrow one, which opens no header
+    // until one is tapped.
+    await page.locator("main .fan-table, main .fan-card").first().waitFor({ timeout: 5000 });
+    if (!(await fixed.isVisible())) await page.locator("main .fan-card").first().click({ timeout: 5000 });
     await fixed.click({ timeout: 5000 });
     await page.evaluate(() => {
       for (const el of [document.scrollingElement, document.querySelector(".content")]) el?.scrollTo(0, 0);
@@ -417,7 +423,7 @@ async function driveState(page, state) {
     await page.setViewportSize(REGROW.wide);
   } else if (state.state === "overflow") {
     // Peripherals has keys in its bar only while a change is staged.
-    if (state.name === "peripherals") await page.getByRole("switch").first().click({ timeout: 5000 });
+    if (state.name === "peripherals") await stageChange(page);
     await page.locator(".strip-inner [data-bar-primary]").waitFor({ timeout: 5000 });
     await page.waitForTimeout(250);
     // The overflow key is there only when something did not fit; a bar that holds everything has none.
@@ -427,7 +433,8 @@ async function driveState(page, state) {
       await page.getByRole("dialog", { name: "More page actions" }).waitFor({ timeout: 5000 });
     }
   } else if (state.state === "pending" && state.name === "peripherals") {
-    await page.getByRole("switch").first().click({ timeout: 5000 });
+    await stageChange(page);
+    await page.locator(".strip-inner [data-bar-primary]").waitFor({ timeout: 5000 });
   } else if (state.state === "palette") {
     await page.keyboard.press("Control+k");
     await page.waitForSelector(".cmdk", { timeout: 5000 });
