@@ -265,6 +265,7 @@ export const MEASURE = () => {
     isBuilder: document.querySelector("[data-testid='stack-builder']") !== null,
     fixtureError: /The stack could not be read/.test(document.body.textContent ?? ""),
     barActions, menuActions, cutControls, overlaps,
+    pendingWords: [...document.querySelectorAll(".strip-inner .rd-peri-pending-text")].some(fullyVisible),
     statusLost: !!document.querySelector(".strip-mark-text") && !shown(".strip-mark-text") && !shown(".status-body-line"),
     dirty: primaryEl?.getAttribute("data-dirty") === "true",
     naming: shown('[role="dialog"][aria-label="Name the stack"]'),
@@ -325,6 +326,13 @@ export function judge(m, state) {
   for (const o of m.overlaps ?? []) bad.push(`${where}: ${o}`);
   // B8: status words that left the strip are under it.
   if (m.statusLost && state.state !== "loading") bad.push(`${where}: the status words left the strip and have no home in the page`);
+  // A phone with a staged peripheral change says so in words, and holds Revert in the overflow.
+  if (m.vw <= 720 && state.name === "peripherals" && (state.state === "pending" || state.state === "overflow")) {
+    if (!m.pendingWords) bad.push(`${where}: the unsent changes are not said in words in the bar`);
+    if (state.state === "overflow" && !(m.menuActions ?? []).some((a) => a.includes("Revert"))) {
+      bad.push(`${where}: Revert is not in the overflow menu on a phone`);
+    }
+  }
   // B6: each driven state is really on screen.
   if (state.name === "builder" && state.state === "dirty" && !m.dirty) bad.push(`${where}: the builder's Save does not say the draft is unsaved`);
   if (state.name === "builder" && state.state === "renaming" && !m.naming) bad.push(`${where}: the name dialog is not open`);
@@ -385,10 +393,16 @@ async function addLayer(page) {
   await tile.click({ timeout: 5000 });
 }
 
+/** Back to the top: a phone's bar scrolls with the page, and it is the bar that is measured. */
+const scrollHome = (page) => page.evaluate(() => {
+  for (const el of [document.scrollingElement, document.querySelector(".content")]) el?.scrollTo(0, 0);
+});
+
 /** One change that is not on the device yet: writes are allowed, then one setting is picked. */
 async function stageChange(page) {
   await page.getByRole("switch", { name: "Change settings on the device" }).click({ timeout: 5000 });
   await page.getByRole("radiogroup", { name: "Polling rate (Hz)" }).getByRole("radio", { name: "500", exact: true }).click({ timeout: 5000 });
+  await scrollHome(page);
 }
 
 async function driveState(page, state) {
@@ -414,9 +428,7 @@ async function driveState(page, state) {
     await page.locator("main .fan-table, main .fan-card").first().waitFor({ timeout: 5000 });
     if (!(await fixed.isVisible())) await page.locator("main .fan-card").first().click({ timeout: 5000 });
     await fixed.click({ timeout: 5000 });
-    await page.evaluate(() => {
-      for (const el of [document.scrollingElement, document.querySelector(".content")]) el?.scrollTo(0, 0);
-    });
+    await scrollHome(page);
   } else if (state.state === "regrow") {
     await page.setViewportSize(REGROW.narrow);
     await page.waitForFunction(() => document.querySelector("[data-bar-user-title]")?.textContent?.includes("…"), { timeout: 5000 });

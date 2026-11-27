@@ -49,7 +49,7 @@ afterEach(() => {
 });
 
 /** Title 100, context 300, secondary key 90, primary 80: 570 in all. */
-function fit(width: number, wraps = false) {
+function fit(width: number, wraps = false, phoneMenu = false) {
   rowWidth = width;
   const { container } = render(
     <div className="strip">
@@ -62,7 +62,7 @@ function fit(width: number, wraps = false) {
         </span>
         <span className="strip-page-actions">
           <span className="rd-actions">
-            <button className="rd-secondary" data-w="90" />
+            <button className="rd-secondary" data-w="90" data-phone-menu={phoneMenu ? "" : undefined} />
             <button data-bar-primary="" data-w="80" />
           </span>
         </span>
@@ -87,6 +87,10 @@ describe("the strip's fit", () => {
 
   it("takes a second line only for a primary key that cannot fit, and asks both lines again", () => {
     expect(fit(175, true)).toEqual({ context: "body", secondary: "bar", rows: "2" });
+  });
+
+  it("sends a phone-menu key to the overflow on the second line even where it fits", () => {
+    expect(fit(175, true, true)).toEqual({ context: "body", secondary: "menu", rows: "2" });
   });
 
   it("stays on one line where the stylesheet does not wrap the row", () => {

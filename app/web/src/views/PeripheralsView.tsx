@@ -699,6 +699,8 @@ export function PeripheralsView() {
             </span>
             <Button
               className="rd-secondary"
+              // On a phone the keys' line keeps the unsent words whole, so Revert is in the overflow.
+              data-phone-menu=""
               variant="ghost"
               size="sm"
               icon={<ArrowCounterClockwise size={16} />}

@@ -105,7 +105,9 @@ export function fitBar(strip: HTMLElement, row: HTMLElement): BarFit {
     apply();
   }
   const actions = row.querySelector<HTMLElement>(".rd-actions");
-  if (actions && actions.offsetWidth > row.clientWidth + 0.5) {
+  // A page may send a key to the overflow on the second line even though it would fit, to give the
+  // room to words that need it (`data-phone-menu`).
+  if (actions && (actions.querySelector("[data-phone-menu]") || actions.offsetWidth > row.clientWidth + 0.5)) {
     answer.secondary = "menu";
     apply();
   }

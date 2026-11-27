@@ -150,3 +150,14 @@ test("B8: status words with no home are a failure", () => {
   m.statusLost = true;
   assert.ok(judge(m, state("devices")).some((b) => b.includes("no home")));
 });
+
+test("a phone says the unsent changes in words and keeps Revert in the overflow", () => {
+  const m = measurement();
+  m.vw = 390;
+  m.pendingWords = false;
+  m.barActions = ["Revert"];
+  m.menuActions = [];
+  const bad = judge(m, state("peripherals", "overflow"));
+  assert.ok(bad.some((b) => b.includes("not said in words")));
+  assert.ok(bad.some((b) => b.includes("not in the overflow menu on a phone")));
+});

@@ -6005,6 +6005,14 @@ button.chip:hover {
     gap: var(--s1);
   }
 
+  /* On the keys' own line the unsent changes are said in words. */
+  .strip[data-bar-rows="2"] .rd-actions .rd-peri-pending-text {
+    display: inline;
+  }
+  .strip[data-bar-rows="2"] .rd-actions .rd-peri-pending::after {
+    content: none;
+  }
+
   /* The phone has no room for the wordmark: the mark stands for the app's name. */
   .strip-brand .wordmark {
     display: none;
