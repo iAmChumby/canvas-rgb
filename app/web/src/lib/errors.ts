@@ -51,19 +51,58 @@ export function daemonFault(e: unknown): DaemonFault {
   return "down";
 }
 
-/**
- * The text of an error, in one place. A daemon message is already scrubbed at the API edge;
- * a plain `Error` is a local detail, never the text of the prefilled report (#576 R6).
- */
-/** The device-id shapes the daemon and the bundle use (P6), mirrored in Rust. */
-const ADAPTER_PREFIXES = [
-  "openrgb", "ring", "chione", "royuan", "attack-shark-x6", "8bitdo-ultimate-2", "8bitdo", "hid", "usb",
+/** What replaces a device id, as `crates/canvas-diag/src/scrub.rs` has it. */
+export const DEVICE_TOKEN = "the device";
+
+/** The adapter prefixes of a device id (P6). `scrubDeviceIds.test.ts` holds this list to Rust's. */
+export const ADAPTER_PREFIXES: readonly string[] = [
+  "openrgb", "ring", "chione", "royuan", "attack-shark-x6", "eightbitdo-ultimate-2", "hid", "usb", "fake", "cpu",
 ];
-const DEVICE_ID = new RegExp(`\\b(?:${ADAPTER_PREFIXES.join("|")}):[A-Za-z0-9#&_.\\\\-]{2,}`, "g");
+
+/** A character that makes the prefix after it part of a longer word. */
+const ID_CHAR = /[A-Za-z0-9_-]/;
+/** Rust's `is_ascii_whitespace`: no vertical tab and no Unicode space. */
+const SPACES = new Set([" ", "\t", "\n", "\f", "\r"]);
+const CLOSERS = new Set(['"', "'", ",", ";", ")", "]", "}", ">"]);
+
+/** Where the `<prefix>:<id>` starting at `at` ends, or null: Rust's `device_id_end`. */
+function deviceIdEnd(text: string, at: number): number | null {
+  if (at > 0 && ID_CHAR.test(text.charAt(at - 1))) return null;
+  for (const prefix of ADAPTER_PREFIXES) {
+    if (!text.startsWith(`${prefix}:`, at)) continue;
+    const start = at + prefix.length + 1;
+    let end = start;
+    for (; end < text.length; end += 1) {
+      const ch = text.charAt(end);
+      const next = text.charAt(end + 1);
+      if (SPACES.has(ch) || CLOSERS.has(ch)) break;
+      // A full stop that ends the sentence, and a colon before prose, stay in the text.
+      if (ch === "." && (next === "" || SPACES.has(next))) break;
+      if (ch === ":" && SPACES.has(next)) break;
+      // A backslash escaping a quote in JSON ends the id.
+      if (ch === "\\" && (next === '"' || next === "\\")) break;
+    }
+    if (end > start) return end;
+  }
+  return null;
+}
 
 /** Replaces every device fingerprint in text the editor copies or puts in a URL (P6). */
 export function scrubDeviceIds(text: string): string {
-  return text.replace(DEVICE_ID, "the device");
+  let out = "";
+  let copied = 0;
+  let at = 0;
+  while (at < text.length) {
+    const end = deviceIdEnd(text, at);
+    if (end === null) {
+      at += 1;
+      continue;
+    }
+    out += text.slice(copied, at) + DEVICE_TOKEN;
+    at = end;
+    copied = end;
+  }
+  return out + text.slice(copied);
 }
 
 /**
@@ -79,7 +118,11 @@ export function caught(e: unknown): Failure {
   return new Error("unknown error");
 }
 
-/** The words of an error, a sentence, or a daemon's `{ message }` entry. */
+/**
+ * The words of an error, a sentence, or a daemon's `{ message }` entry: the one place an error
+ * becomes text. A daemon message is already scrubbed at the API edge; a plain `Error` is a local
+ * detail, never the text of the prefilled report (#576 R6).
+ */
 export function messageOf(e: unknown): string {
   const message =
     typeof e === "string"

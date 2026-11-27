@@ -47,6 +47,15 @@ describe("the Report issue URL (#575 R7, P1)", () => {
     expect(built.url).not.toContain("SERIAL-42");
   });
 
+  it("takes every part of a many-part device id out of the URL and the copied text", () => {
+    const built = buildReportUrl(report(), "royuan:3151:4015 and eightbitdo-ultimate-2:2dc8 did not answer.");
+    expect(built.whatHappened).toContain("Error shown: the device and the device did not answer.");
+    for (const part of ["royuan", "3151", "4015", "eightbitdo", "2dc8"]) {
+      expect(built.url).not.toContain(part);
+      expect(built.clipboardText).not.toContain(part);
+    }
+  });
+
   it("measures encoded length, not characters, for CJK, newlines and emoji", () => {
     const cases = [
       buildReportUrl(report({ hardware: "設".repeat(3000) }), "x".repeat(500)),
