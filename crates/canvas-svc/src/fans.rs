@@ -113,6 +113,11 @@ pub const TICK_GAP_RESUME: Duration = Duration::from_secs(30);
 /// has no hardware watchdog (`HARDWARE_WATCHDOG`).
 pub const SUSPEND_HOLD_CAP_TICKS: u32 = 60;
 
+/// How many times the safe-start BIOS restore is retried when a header cannot be released
+/// (one a second, #577 section 4). After these, the header keeps its `manual_since` and `tick`
+/// keeps driving it, so it is never left at a fixed duty.
+pub const HOLD_RESTORE_RETRIES: u32 = 3;
+
 /// hardware_watchdog as settled from public sources (see the report): neither the nct6687d
 /// driver nor LibreHardwareMonitor's NCT677X handling reaches a chip watchdog register.
 pub const HARDWARE_WATCHDOG: Option<bool> = Some(false);
@@ -492,6 +497,16 @@ pub struct FanController {
     cpu_brand: Option<String>,
     /// Whether the one-time hot-limit line has been logged yet.
     hot_logged: bool,
+    /// Safe start (#577): while this is on, every writer saves its config and `apply_header`
+    /// refuses to drive a header. The gate sits there so profile, config, mode, override and
+    /// resume reapply all reach it.
+    hold: bool,
+    /// What the last BIOS restore for the hold achieved. `None` while unknown, `Some(false)`
+    /// while a header is still manual, `Some(true)` once every header is on BIOS control.
+    fans_on_bios: Option<bool>,
+    /// Retries of a failed restore, one a second, at most `HOLD_RESTORE_RETRIES`.
+    hold_retries: u32,
+    hold_retry_at: Option<Instant>,
 }
 
 impl FanController {
@@ -533,6 +548,10 @@ impl FanController {
             gpu_rated_max_c: None,
             cpu_brand: None,
             hot_logged: false,
+            hold: false,
+            fans_on_bios: None,
+            hold_retries: 0,
+            hold_retry_at: None,
         }
     }
 
@@ -767,6 +786,13 @@ impl FanController {
     /// Restores BIOS on every header, then applies the active profile. A `bios-state.json`
     /// left by an earlier run is logged as an unclean exit.
     pub fn startup(&mut self, now: Instant) {
+        self.startup_in_mode(now, false);
+    }
+
+    /// As [`FanController::startup`], but in safe start the profile is not applied at all and
+    /// the hold begins at once: the service decides the mode before this call, so there is no
+    /// window where a fan is driven before the hold (#577 R12).
+    pub fn startup_in_mode(&mut self, now: Instant, safe: bool) {
         let path = paths::bios_state_path(&self.home);
         match self.read_state(&path) {
             Ok(previous) if !previous.headers.is_empty() => {
@@ -782,11 +808,62 @@ impl FanController {
             tracing::error!("BIOS restore incomplete: the profile is not applied");
             return;
         }
+        if safe {
+            tracing::info!("safe start: BIOS restored, profile held until safe start ends");
+            self.enter_hold(now);
+            return;
+        }
         if !self.writes_allowed {
             tracing::warn!("channel map unconfirmed: BIOS restored, profile not applied");
             return;
         }
         self.apply_profile(now);
+    }
+
+    /// Turns the hold on and asks every header for BIOS control. A failed header keeps its
+    /// `manual_since`, so `tick` still drives it and it is never left at a fixed duty; the
+    /// restore is retried here once a second, at most [`HOLD_RESTORE_RETRIES`] times.
+    pub fn enter_hold(&mut self, now: Instant) {
+        self.hold = true;
+        self.hold_retries = 0;
+        self.hold_retry_at = None;
+        self.try_release(now);
+    }
+
+    /// Turns the hold off and applies the saved profile, which every writer path has kept
+    /// current while it was on (#577 section 4).
+    pub fn leave_hold(&mut self, now: Instant) {
+        self.hold = false;
+        self.fans_on_bios = None;
+        self.hold_retry_at = None;
+        self.hold_retries = 0;
+        self.apply_profile(now);
+    }
+
+    pub fn hold_active(&self) -> bool {
+        self.hold
+    }
+
+    pub fn fans_on_bios(&self) -> Option<bool> {
+        self.fans_on_bios
+    }
+
+    /// One restore attempt, due when `now` reaches the retry time. The result is what the
+    /// banner reports: `Some(true)` only when every controllable header went back to BIOS.
+    fn try_release(&mut self, now: Instant) {
+        if self.hold_retry_at.is_some_and(|at| now < at) {
+            return;
+        }
+        self.hold_retry_at = None;
+        if self.restore_all("safe start: BIOS for every header") {
+            self.fans_on_bios = Some(true);
+        } else {
+            self.fans_on_bios = Some(false);
+            self.hold_retries += 1;
+            if self.hold_retries <= HOLD_RESTORE_RETRIES {
+                self.hold_retry_at = Some(now + Duration::from_secs(1));
+            }
+        }
     }
 
     /// Returns every controllable header to BIOS control, then clears the saved state.
@@ -796,13 +873,17 @@ impl FanController {
     /// `bios-state.json` stays on disk and the result is false.
     pub fn restore_all(&mut self, reason: &str) -> bool {
         let mut any_failed = self.chip.is_none();
+        let mut released = Vec::new();
         if let Some(chip) = self.chip.as_mut() {
             for (ch, spec) in chip.channels().iter().enumerate() {
                 if !spec.controllable() {
                     continue;
                 }
                 match chip.set_manual(ch, false) {
-                    Ok(()) => tracing::info!(header = spec.id, reason, "header returned to BIOS control"),
+                    Ok(()) => {
+                        released.push(ch);
+                        tracing::info!(header = spec.id, reason, "header returned to BIOS control");
+                    }
                     Err(e) => {
                         any_failed = true;
                         tracing::error!(header = spec.id, error = %e, reason, "could not return header to BIOS");
@@ -810,8 +891,10 @@ impl FanController {
                 }
             }
         }
-        for slot in &mut self.slots {
-            slot.manual_since = None;
+        // #577: a header that could not be released keeps `manual_since`. Clearing it on
+        // failure would stop `tick` from driving it and leave it stuck at its last duty.
+        for ch in released {
+            self.slots[ch].manual_since = None;
         }
         if any_failed {
             // A header may still be manual: keep bios-state.json so the next start restores it.
@@ -878,6 +961,12 @@ impl FanController {
                 tracing::info!(header = id, "header not on this board: skipped");
                 return;
             }
+        }
+        if self.hold {
+            // #577: every writer saves its config before it reaches this gate. Nothing is
+            // written to the chip until safe start ends, and the status says so.
+            tracing::info!(header = header.as_deref().unwrap_or("?"), "edit saved; applies when safe start ends");
+            return;
         }
         if self.sleep.in_window(now) {
             // Issue #29: a write during the resume transition is exactly what failed. The config is
@@ -1082,6 +1171,16 @@ impl FanController {
             return;
         }
         self.refresh_temps(now);
+        if self.hold {
+            // Retry a failed BIOS restore on the 1 s tick; a header that is still manual keeps
+            // `manual_since` and is driven below, so it is never left at a fixed duty.
+            if self.hold_retry_at.is_some() {
+                self.try_release(now);
+            }
+            if self.fans_on_bios == Some(true) {
+                return;
+            }
+        }
         if !self.writes_allowed {
             return;
         }

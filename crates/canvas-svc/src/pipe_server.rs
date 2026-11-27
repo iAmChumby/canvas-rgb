@@ -407,6 +407,30 @@ pub async fn handle_client(
                     }
                 }
             }
+            Ok(PipeRequest::EnterSafeStart) | Ok(PipeRequest::LeaveSafeStart) => {
+                // #577: only the daemon this service launched may change its own start mode.
+                // The same pid check as `DaemonQuitting` (a daemon from another install, or a
+                // console client while no daemon runs, must not be able to do it).
+                let what = if matches!(request, Ok(PipeRequest::EnterSafeStart)) {
+                    "EnterSafeStart"
+                } else {
+                    "LeaveSafeStart"
+                };
+                let launched = core.lock().await.daemon.daemon_pid();
+                let readmit = admit_daemon(peer.as_ref(), launched, what);
+                match readmit {
+                    Ok(_) => core.lock().await.handle(request.unwrap(), Instant::now()),
+                    Err(rejected) => {
+                        tracing::warn!(
+                            pid = ?rejected.pid,
+                            session = ?rejected.session,
+                            reason = %rejected.reason,
+                            "refused a safe-start mode change: the client is not the launched daemon"
+                        );
+                        error(error_codes::UNAUTHORIZED, rejected.reason)
+                    }
+                }
+            }
             Ok(request) => core.lock().await.handle(request, Instant::now()),
             Err(e) => error(error_codes::VALIDATION, format!("invalid request: {e}")),
         };
@@ -1008,6 +1032,71 @@ pub(crate) mod tests {
             1,
             "the daemon that quit was started again"
         );
+    }
+
+    // ---- safe-start mode changes over a real pipe (#577 section 6) ----
+
+    /// While no daemon runs, any console client is admitted for ordinary requests. It must not
+    /// be able to change the start mode: that would flip the fans of a daemon that is starting.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_safe_start_mode_change_from_another_client_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, processes) = test_core_with_processes(dir.path().to_path_buf());
+        core.daemon.start(Instant::now());
+        processes.exit_last_with(SESSION_END_CODE);
+        core.daemon.tick(Instant::now());
+        assert_eq!(core.daemon.daemon_pid(), None, "the relaunch is held after the session end");
+        let core = Arc::new(Mutex::new(core));
+        let name = unique_name("safe-refused");
+        let first = create_instance(&name, true).unwrap();
+        tokio::spawn(serve(Arc::clone(&core), name.clone(), first, peers(peer(CONSOLE, 77))));
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        let response = round_trip(&mut client, &PipeRequest::LeaveSafeStart).await;
+        assert!(
+            matches!(&response, PipeResponse::Error { code, .. } if code == error_codes::UNAUTHORIZED),
+            "{response:?}"
+        );
+        assert_eq!(core.lock().await.daemon.start_decision().0, canvas_proto::api::SafeStartMode::Normal);
+    }
+
+    /// The launched daemon may leave safe start. The service kills it on purpose and relaunches
+    /// it; no `DaemonQuitting` is sent, so the relaunch cannot be blocked by the quitting flag.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_launched_daemon_may_leave_safe_start_and_is_relaunched() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let (mut core, processes) = test_core_with_processes(home.clone());
+        let state = crate::safe_start::Persisted {
+            unclean_streak: 2,
+            mode: canvas_proto::api::SafeStartMode::Safe,
+            reason: Some(canvas_proto::api::SafeStartReason::CrashLoop),
+            since: Some("t0".into()),
+        };
+        crate::safe_start::save(&home, &state).unwrap();
+        core.daemon.set_book(crate::safe_start::Book::open(&home, crate::safe_start::load(&home, |_| true)));
+        core.daemon.start(Instant::now());
+        let daemon = core.daemon.daemon_pid().unwrap();
+        let core = Arc::new(Mutex::new(core));
+        let name = unique_name("safe-leave");
+        let first = create_instance(&name, true).unwrap();
+        tokio::spawn(serve(Arc::clone(&core), name.clone(), first, peers(peer(CONSOLE, daemon))));
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        assert_eq!(round_trip(&mut client, &PipeRequest::LeaveSafeStart).await, PipeResponse::Ok);
+
+        let guard = core.lock().await;
+        assert_eq!(processes.spawns().len(), 2, "the daemon was relaunched once");
+        assert_eq!(guard.daemon.start_decision().0, canvas_proto::api::SafeStartMode::Normal);
+        let saved = crate::safe_start::load(&home, |_| true).persisted;
+        assert_eq!(saved.unclean_streak, 0, "a leave resets the streak");
+        assert_eq!(saved.mode, canvas_proto::api::SafeStartMode::Normal);
+        drop(guard);
+
+        // The new daemon is supervised normally: a crash relaunches it (no quitting block).
+        processes.exit_last();
+        core.lock().await.daemon.tick(Instant::now() + Duration::from_secs(1));
+        assert_eq!(processes.spawns().len(), 3, "the relaunch was blocked by DaemonQuitting");
     }
 
     #[test]

@@ -18,6 +18,7 @@ use crate::openrgb::{AdapterFactory, OpenRgbSupervisor};
 use crate::paths;
 use crate::pipe_server;
 use crate::process::{ProcessSpawner, StdSpawner};
+use crate::safe_start::{self, Book};
 use crate::secure::{windows_acl, SecureDir};
 use crate::service::{Core, PowerEvent};
 use crate::store::{self, ChipState};
@@ -168,9 +169,27 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
             }
         }
     }
+    // #577: the mode is decided before fans.startup, so a safe start never applies a profile
+    // and there is no window where a header is driven before the hold begins.
+    let loaded = if boot.secured() {
+        let l = safe_start::load(home, |p| boot.trusted(p));
+        if l.untrusted_run {
+            tracing::error!(path = %safe_start::svc_run_path(home).display(), "svc-run.json is not trusted; leaving it alone");
+        }
+        if l.untrusted_state {
+            tracing::error!(path = %safe_start::safe_start_path(home).display(), "safe-start.json is not trusted; reading streak 0 and leaving it alone");
+        }
+        if let Err(e) = safe_start::write_svc_run(home) {
+            tracing::error!(path = %safe_start::svc_run_path(home).display(), error = %e, "could not write the service-run marker");
+        }
+        l
+    } else {
+        safe_start::Loaded::default()
+    };
+    let safe = loaded.persisted.mode == canvas_proto::api::SafeStartMode::Safe;
     if boot.secured() {
         fans.set_state_trusted(trusted_file(boot, &paths::bios_state_path(home)));
-        fans.startup(now);
+        fans.startup_in_mode(now, safe);
     }
 
     let config_dir = paths::openrgb_config_dir(home);
@@ -189,9 +208,15 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
     }
 
     let mut daemon = DaemonSupervisor::new(deps.install_dir.join(DAEMON_EXE), deps.launcher);
+    if boot.secured() {
+        daemon.set_book(Book::open(home, loaded));
+    } else {
+        daemon.set_book(Book::disabled(home));
+    }
     daemon.start(now);
     let mut core = Core::new(fans, openrgb, daemon);
     if boot.secured() {
+        core.home = Some(home.to_path_buf());
         core.updates = Some(deps.updates.unwrap_or_else(|| Arc::new(UpdateInstaller::production(home.to_path_buf(), deps.install_dir.clone()))));
     }
     core

@@ -23,6 +23,9 @@ pub struct Core {
     pub daemon: DaemonSupervisor,
     /// Installs signed updates (#43). `None` when the machine home is not secured: updates are refused.
     pub updates: Option<Arc<UpdateInstaller>>,
+    /// The fail-closed machine home, when the service has one. Its `svc-run.json` marker is
+    /// removed on Stop, Shutdown and PreShutdown (all three reach [`Core::shutdown`]).
+    pub home: Option<std::path::PathBuf>,
 }
 
 fn error(code: &str, message: impl Into<String>) -> PipeResponse {
@@ -48,7 +51,7 @@ fn ok_or(result: Result<(), FanError>) -> PipeResponse {
 
 impl Core {
     pub fn new(fans: FanController, openrgb: OpenRgbSupervisor, daemon: DaemonSupervisor) -> Self {
-        Self { fans, openrgb, daemon, updates: None }
+        Self { fans, openrgb, daemon, updates: None, home: None }
     }
 
     /// One pass per second. The fan loop and the OpenRGB supervisor run whether or not a
@@ -90,6 +93,13 @@ impl Core {
         self.fans.restore_all(reason);
         self.daemon.stop();
         self.openrgb.stop(reason, self.daemon.before_openrgb_stop());
+        if let Some(home) = &self.home {
+            // A clean SCM stop leaves no marker, so the next start does not read a false
+            // Unknown. Never touched when the home is not secured.
+            if let Err(e) = crate::safe_start::remove_svc_run(home) {
+                tracing::error!(path = %crate::safe_start::svc_run_path(home).display(), error = %e, "could not remove the service-run marker");
+            }
+        }
     }
 
     /// Answers one request. Every fan value is validated before anything is written.
@@ -102,12 +112,12 @@ impl Core {
                         format!("protocol {protocol} is not supported; the service speaks {PROTOCOL_VERSION}"),
                     );
                 }
+                let (start_mode, last_exit) = self.daemon.start_decision();
                 PipeResponse::Hello {
                     protocol: PROTOCOL_VERSION,
                     service_version: env!("CARGO_PKG_VERSION").into(),
-                    // #577 fills these from the service's verdict; until then the daemon starts normally.
-                    start_mode: Default::default(),
-                    last_exit: Default::default(),
+                    start_mode,
+                    last_exit,
                 }
             }
             PipeRequest::Heartbeat => {
@@ -145,9 +155,25 @@ impl Core {
                 self.daemon.on_quitting();
                 PipeResponse::Ok
             }
-            // #577 builds safe start; until then the service refuses both, so nothing changes mode.
+            // #577: the pipe server has already checked that this came from the launched
+            // daemon. The mode is persisted, the fan hold is set or cleared, and the daemon is
+            // killed on purpose and relaunched in the new mode. It never sends DaemonQuitting.
             PipeRequest::EnterSafeStart | PipeRequest::LeaveSafeStart => {
-                error(error_codes::VALIDATION, "safe start is not built yet (#577)")
+                let mode = if matches!(request, PipeRequest::EnterSafeStart) {
+                    canvas_proto::api::SafeStartMode::Safe
+                } else {
+                    canvas_proto::api::SafeStartMode::Normal
+                };
+                if let Some(book) = self.daemon.book_mut() {
+                    book.set_user_choice(mode, &crate::safe_start::stamp_now());
+                }
+                if mode == canvas_proto::api::SafeStartMode::Safe {
+                    self.fans.enter_hold(now);
+                } else {
+                    self.fans.leave_hold(now);
+                }
+                self.daemon.restart_in_new_mode(now);
+                PipeResponse::Ok
             }
             // The pipe server answers this one itself: it reads a file as the client and blocks, which
             // must not happen under the core lock.

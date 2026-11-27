@@ -48,6 +48,9 @@ struct Sim {
     manual: [bool; CHANNELS],
     drop_duty_writes: bool,
     drop_commands: bool,
+    /// Fan-mode writes are ignored while this is set, so a restore to BIOS cannot be read
+    /// back (the safe-start retry case).
+    drop_mode_writes: bool,
     /// The duty write is accepted by the EC, but the duty the chip reports never moves
     /// (the fan is stuck): readbacks stay at the BIOS value. Per header.
     stuck_duty: [bool; CHANNELS],
@@ -120,6 +123,7 @@ impl FakeChip {
             manual: [false; CHANNELS],
             drop_duty_writes: false,
             drop_commands: false,
+            drop_mode_writes: false,
             stuck_duty: [false; CHANNELS],
             stuck_zero_duty: [false; CHANNELS],
             firmware_owned: false,
@@ -159,6 +163,11 @@ impl FakeChip {
     /// Simulates a chip that never acknowledges the command handshake.
     pub fn set_drop_commands(&self, drop: bool) {
         lock(&self.sim).drop_commands = drop;
+    }
+
+    /// Simulates a chip that ignores fan-mode writes, so a restore to BIOS fails its readback.
+    pub fn set_drop_mode_writes(&self, drop: bool) {
+        lock(&self.sim).drop_mode_writes = drop;
     }
 
     /// Simulates a resume (issue #29): every header drops out of manual mode, every duty is back at
@@ -350,7 +359,7 @@ impl Sim {
         // A fan-mode register (0xA00, or 0x80F for MSI AM5 system fans): each header follows
         // its own bit in its own register.
         if self.map.channels.iter().any(|c| c.mode_reg == reg) {
-            if self.owned() {
+            if self.owned() || self.drop_mode_writes {
                 return;
             }
             for (ch, c) in self.map.channels.iter().enumerate() {

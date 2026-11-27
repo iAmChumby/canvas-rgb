@@ -40,6 +40,8 @@ pub enum EndCause {
     StaleAtStart,
     /// A heartbeat budget ran out.
     MissedHeartbeat,
+    /// The service could not start a daemon at all: it never got going.
+    LaunchFailure,
     /// The process exited and the service reaped it.
     Exited,
 }
@@ -83,6 +85,9 @@ pub fn verdict(cause: EndCause, code: Option<i32>, beat: Beat) -> LastExit {
     }
     if code.is_some_and(is_crash_code) {
         return LastExit::Unclean;
+    }
+    if cause == EndCause::LaunchFailure {
+        return LastExit::StartupFailure;
     }
     if cause == EndCause::MissedHeartbeat {
         return match beat {
@@ -190,7 +195,7 @@ pub fn load(home: &Path, trusted: impl Fn(&Path) -> bool) -> Loaded {
 }
 
 /// What the fail-closed read found. Both untrusted flags name a file the service leaves alone.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Loaded {
     pub persisted: Persisted,
     /// `svc-run.json` survived, so the previous service did not stop cleanly.
@@ -205,6 +210,8 @@ pub struct Book {
     pub persisted: Persisted,
     pub last_exit: LastExit,
     home: PathBuf,
+    /// False when the machine home is not secured: no file in it may be written at all.
+    writable: bool,
 }
 
 impl Book {
@@ -214,7 +221,12 @@ impl Book {
         // There is no daemon run in this service instance yet. A leftover marker says the
         // previous service did not stop cleanly, but that still reads Unknown, never Unclean.
         let last_exit = LastExit::Unknown;
-        Self { persisted: loaded.persisted, last_exit, home: home.to_path_buf() }
+        Self { persisted: loaded.persisted, last_exit, home: home.to_path_buf(), writable: true }
+    }
+
+    /// A book for an unsecured home: the decision stays Normal and nothing is ever written.
+    pub fn disabled(home: &Path) -> Self {
+        Self { persisted: Persisted::default(), last_exit: LastExit::Unknown, home: home.to_path_buf(), writable: false }
     }
 
     pub fn mode(&self) -> SafeStartMode {
@@ -294,7 +306,11 @@ impl Book {
     }
 
     fn flush(&self) -> Result<(), StoreError> {
-        save(&self.home, &self.persisted)
+        if self.writable {
+            save(&self.home, &self.persisted)
+        } else {
+            Ok(())
+        }
     }
 
     fn flush_ok_or_log(&self) {
