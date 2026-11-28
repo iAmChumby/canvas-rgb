@@ -60,7 +60,7 @@ export function isDemo(): boolean {
  * them answers as it does in a plain browser.
  */
 function trayHost(): TauriGlobal | null {
-  return previewActive() ? null : tauriHost();
+  return tauriHost();
 }
 
 export async function fetchApiConfig(): Promise<ApiConfig> {
@@ -174,7 +174,7 @@ export async function setUpdateChannel(channel: UpdateChannel): Promise<TrayPref
  * other one, on the same page. Only an experimental build has the choice: a stable tray refuses.
  */
 export async function setEditor(editor: EditorChoice): Promise<TrayPrefs> {
-  const host = trayHost();
+  const host = tauriHost();
   if (!host) return demoSetEditor(editor);
   return (await host.core.invoke(CMD_SET_EDITOR, { editor })) as TrayPrefs;
 }

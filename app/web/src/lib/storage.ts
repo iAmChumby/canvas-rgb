@@ -6,13 +6,13 @@
 import { previewActive } from "@/lib/previewMode";
 
 export function storeLocal(key: string, value: string): void {
-  if (!previewActive()) window.localStorage.setItem(key, value);
+  window.localStorage.setItem(key, value);
 }
 
 export function removeLocal(key: string): void {
-  if (!previewActive()) window.localStorage.removeItem(key);
+  window.localStorage.removeItem(key);
 }
 
 export function storeSession(key: string, value: string): void {
-  if (!previewActive()) window.sessionStorage.setItem(key, value);
+  window.sessionStorage.setItem(key, value);
 }

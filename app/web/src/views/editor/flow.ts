@@ -79,7 +79,6 @@ export function launchId(): string {
 export function laterThisLaunch(): boolean {
   if (memoryLater) return true;
   // A preview's "Later" is its own: what the real launch put off says nothing here.
-  if (previewActive()) return false;
   try {
     return window.localStorage.getItem(LATER_KEY) === launchId();
   } catch {
