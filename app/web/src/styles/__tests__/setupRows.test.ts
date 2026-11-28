@@ -11,11 +11,17 @@ const css = readFileSync(resolve(process.cwd(), "src/views/setup/setup.module.cs
   "",
 );
 
+const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => {
+  const [whole, selectors, body] = m;
+  if (selectors === undefined || body === undefined) throw new Error(`unread rule: ${whole}`);
+  return { selectors: selectors.trim(), body };
+});
+
 /** The declarations of every rule whose selector list is exactly `selector`. */
 const rule = (selector: string) =>
-  [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
-    .filter((m) => m[1].trim() === selector)
-    .map((m) => m[2])
+  rules
+    .filter((r) => r.selectors === selector)
+    .map((r) => r.body)
     .join("");
 
 describe("the setup checklist's text", () => {
