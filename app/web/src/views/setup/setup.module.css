@@ -210,6 +210,12 @@ button.pill {
   height: 44px;
 }
 
+/* A sheet or a takeover has the screen: the pill is on the body and would sit on top of it. */
+:global(body:has([role="dialog"])) button.pill,
+:global(body:has(.app[data-takeover="on"])) button.pill {
+  display: none;
+}
+
 .pillLeds {
   display: inline-flex;
   gap: var(--s2);
