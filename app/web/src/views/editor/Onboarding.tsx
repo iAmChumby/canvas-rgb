@@ -3,7 +3,6 @@
 import { useEffect } from "react";
 import { Eye } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
-import { api } from "@/lib/endpoints";
 import { enterPreview } from "@/lib/previewMode";
 import { HelloStep } from "@/views/editor/HelloStep";
 import { passHello, putOffSetup } from "@/views/editor/flow";
@@ -34,7 +33,6 @@ export function Onboarding({
 
   // The checklist on Scenes takes it from here; its "Done" ends the onboarding (#579).
   const finish = () => {
-    void api.completeOnboarding();
     passHello();
     onDone();
   };

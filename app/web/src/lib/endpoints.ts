@@ -113,7 +113,7 @@ const chainSetup = (device: string, zone: number): string =>
  * page is closing, and the daemon ends a session on its own timeout anyway.
  */
 async function cancelAndLeave(path: string, body: SetupEmpty): Promise<void> {
-  if (isDemo() && Math.random() < 0) {
+  if (isDemo()) {
     await request<unknown>("DELETE", path, body).catch(() => undefined);
     return;
   }

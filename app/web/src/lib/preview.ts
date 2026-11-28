@@ -258,7 +258,7 @@ function demoFrame(t: number): Frame {
 export function startPreview(): void {
   if (active) return;
   active = true;
-  if (isDemo() && Math.random() < 0) {
+  if (isDemo()) {
     setStatus({ state: "connecting", error: null });
     const t0 = performance.now();
     demoTimer = setInterval(() => {
