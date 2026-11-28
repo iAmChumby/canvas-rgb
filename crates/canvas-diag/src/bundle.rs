@@ -187,14 +187,18 @@ impl Bundle {
         std::fs::create_dir_all(dir)?;
         // Two writers in the same second can pick the same name; create-new is the arbiter and
         // the loser picks the next free suffix (F5).
+        let mut first_try = true;
         let (out, file) = loop {
             let candidate = match &self.stamp {
                 Some(stamp) => output_path_with_stamp(dir, stamp)?,
                 None => output_path(dir)?,
             };
-            if let Some(gate) = &self.race_gate {
+            // Only the first attempt meets the gate: the writer that loses the race retries with
+            // the next suffix alone, since the winner has already left this loop.
+            if let (true, Some(gate)) = (first_try, &self.race_gate) {
                 gate.wait();
             }
+            first_try = false;
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
                 Ok(file) => break (candidate, file),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
