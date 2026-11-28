@@ -626,7 +626,6 @@ describe("the Scenes page", () => {
       openrgb: "connected",
       conflicts: [],
     } as unknown as Status;
-    window.sessionStorage.clear();
     api.status.mockResolvedValue(firstRun);
     api.completeOnboarding.mockResolvedValue(undefined);
     api.activateEffect.mockResolvedValue(undefined);
@@ -662,6 +661,7 @@ describe("the Scenes page", () => {
     });
 
     expect(api.completeOnboarding).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("canvas-rgb.hello-seen")).toBe("1");
     expect(screen.getByRole("complementary", { name: "Setup checklist" })).toBeTruthy();
     // The greeting is gone and the page behind it is Scenes: its rows are what it leads to.
     expect(screen.queryByRole("region", { name: "Hello" })).toBeNull();

@@ -4,15 +4,17 @@
 // what it leads to is the Scenes page (#310: Layout, its case and its part-placing setup are
 // gone; a first run makes a scene of every light).
 //
-// The window opens while the daemon's `Status.onboarding_complete` is false. The hello leads to
-// Scenes, where the setup checklist (#579) stands beside the page; its "Done" sets the flag. What
-// is remembered outside it belongs to one launch: that the hello is behind the owner, that the
-// checklist was asked for again, and the two "Later"s (the checklist's, which is the hello's too,
-// and the chain takeover's header setup), each put off until the next app start.
+// The app opens on Scenes while the daemon's `Status.onboarding_complete` is false: on the hello
+// the first time, and from then on on the setup checklist (#579) beside the page, whose "Done" or
+// "Hide checklist" sets the flag. No tick is stored. Outside that flag are only the editor's own
+// UI marks: the hello has been seen (once per install), and, for one launch each, that Help asked
+// for the checklist again and the two "Later"s (the checklist's, which is the hello's too, and the
+// chain takeover's header setup).
 //
 // A "launch" is one webview session. `sessionStorage` lives exactly that long (it survives a
 // reload and dies with the window), so the launch has an id kept there, and "Later" writes the
-// id it was said in to `localStorage`. The same id next time means the same launch.
+// id it was said in to `localStorage`. The same id next time means the same launch. Help's ask
+// for the checklist is kept the same way.
 
 import { useSyncExternalStore } from "react";
 import { previewActive } from "@/lib/previewMode";
@@ -27,11 +29,16 @@ export function buildSteps(): Step[] {
   return [{ kind: "hello" }];
 }
 
-/** The window opens by itself while the owner has not finished the onboarding. */
-export function shouldOpen(status: Status | null): boolean {
-  // A preview opens on the page and its checklist: the hello is where it was asked for.
+/** The app opens on Scenes by itself while the owner has not finished the onboarding. */
+export function opensOnScenes(status: Status | null): boolean {
+  // A preview stays on the page it was loaded on.
   if (previewActive()) return false;
-  return status !== null && !status.onboarding_complete && !laterThisLaunch() && !helloPassed();
+  return status !== null && !status.onboarding_complete && !laterThisLaunch();
+}
+
+/** The hello opens by itself once per install: the first time Scenes is reached that way. */
+export function shouldOpen(status: Status | null): boolean {
+  return opensOnScenes(status) && !helloSeen();
 }
 
 const LAUNCH_KEY = "canvas-rgb.launch";
@@ -166,40 +173,66 @@ export function offerChainsAgain(): void {
 //
 // No tick and no step is stored: the rows are read from the daemon (`@/lib/setup`).
 
-const HELLO_KEY = "canvas-rgb.hello-passed";
+const HELLO_SEEN_KEY = "canvas-rgb.hello-seen";
 const SETUP_KEY = "canvas-rgb.setup-offered";
 
-/** The page's own copy of a flag the session storage does not hold (a preview, a refused write). */
-const flags = new Map<string, boolean>();
-const setupListeners = new Set<() => void>();
-let setupVersion = 0;
+/** The page's own copies, for a preview and for a write the storage refused. */
+let memoryHelloSeen = false;
+let memorySetup = false;
 
-function readFlag(key: string): boolean {
-  const own = flags.get(key);
-  if (own !== undefined) return own;
-  // A preview's flags are its own: what the real launch did says nothing here.
-  if (previewActive()) return false;
+function storedHelloSeen(): boolean {
   try {
-    return window.sessionStorage.getItem(key) === "1";
+    return window.localStorage.getItem(HELLO_SEEN_KEY) === "1";
   } catch {
     return false;
   }
 }
 
-function writeFlag(key: string, on: boolean): void {
-  if (previewActive()) {
-    flags.set(key, on);
-    return;
-  }
+/**
+ * Whether the hello was already behind the owner when this page was loaded, read before the page
+ * can write it. A preview's page is its own: it starts with nothing seen.
+ */
+const helloSeenAtLoad = typeof window !== "undefined" && !previewActive() && storedHelloSeen();
+
+/** True once the hello has been left, in this launch or an earlier one. */
+export function helloSeen(): boolean {
+  if (memoryHelloSeen) return true;
+  return !previewActive() && storedHelloSeen();
+}
+
+/** The hello was left, by "Continue" or by "Set up later": it does not open by itself again. */
+export function markHelloSeen(): void {
+  if (previewActive()) memoryHelloSeen = true;
   try {
-    storeSession(key, on ? "1" : "0");
-    // Written: the session storage is the truth, so a new launch (an empty one) starts clean.
-    flags.delete(key);
+    storeLocal(HELLO_SEEN_KEY, "1");
   } catch {
     // Kept in memory for this page only.
-    flags.set(key, on);
+    memoryHelloSeen = true;
+  }
+  setupChanged();
+}
+
+/**
+ * "Welcome back" heads the checklist when the owner had seen the hello before this page, the
+ * onboarding is not finished and something is done. A first launch never reads it.
+ */
+export function welcomeBack(status: Status | null, rows: readonly SetupRow[]): boolean {
+  return helloSeenAtLoad && status?.onboarding_complete === false && rows.some((r) => r.state === "done");
+}
+
+/** True while Help's ask for the checklist holds: for the launch it was made in. */
+function setupOffered(): boolean {
+  if (memorySetup) return true;
+  if (previewActive()) return false;
+  try {
+    return window.localStorage.getItem(SETUP_KEY) === launchId();
+  } catch {
+    return false;
   }
 }
+
+const setupListeners = new Set<() => void>();
+let setupVersion = 0;
 
 function setupChanged(): void {
   setupVersion += 1;
@@ -213,25 +246,14 @@ function subscribeSetup(listener: () => void): () => void {
   };
 }
 
-/** True once the hello is behind the owner in this launch. */
-export function helloPassed(): boolean {
-  return readFlag(HELLO_KEY);
-}
-
-/** The hello's way on: Scenes and the checklist. */
-export function passHello(): void {
-  writeFlag(HELLO_KEY, true);
-  setupChanged();
-}
-
 /** The checklist is on the page: asked for from Help, or not finished and not put off. */
 export function setupVisible(status: Status | null): boolean {
   if (!status) return false;
   // `=== false`: a status that does not carry the field is not an unfinished onboarding.
-  return readFlag(SETUP_KEY) || (status.onboarding_complete === false && !laterThisLaunch());
+  return setupOffered() || (status.onboarding_complete === false && !laterThisLaunch());
 }
 
-/** `setupVisible`, drawn again when a flag changes. */
+/** `setupVisible`, drawn again when a mark changes. */
 export function useSetupVisible(status: Status | null): boolean {
   useSyncExternalStore(
     subscribeSetup,
@@ -244,19 +266,25 @@ export function useSetupVisible(status: Status | null): boolean {
 /** Help's "Setup checklist": the checklist stands on Scenes again, finished or put off. */
 export function offerSetupAgain(): void {
   memoryLater = false;
+  if (previewActive()) memorySetup = true;
   try {
     removeLocal(LATER_KEY);
+    storeLocal(SETUP_KEY, launchId());
   } catch {
-    // Nothing was remembered, so there is nothing to forget.
+    // Kept in memory for this page only.
+    memorySetup = true;
   }
-  writeFlag(HELLO_KEY, true);
-  writeFlag(SETUP_KEY, true);
   setupChanged();
 }
 
-/** "Done": the daemon holds the fact from here; the page forgets that it asked. */
+/** "Done" or "Hide checklist": the daemon holds the fact from here; the ask is forgotten. */
 export function closeSetup(): void {
-  writeFlag(SETUP_KEY, false);
+  memorySetup = false;
+  try {
+    removeLocal(SETUP_KEY);
+  } catch {
+    // Nothing was remembered, so there is nothing to forget.
+  }
   setupChanged();
 }
 
@@ -264,17 +292,4 @@ export function closeSetup(): void {
 export function putOffSetup(): void {
   putOffUntilNextLaunch();
   closeSetup();
-}
-
-let welcomeAtLaunch: boolean | null = null;
-
-/**
- * "Welcome back": the onboarding is not finished and a row was already done when the app was
- * first read. Decided once per page load and stored nowhere.
- */
-export function noteLaunch(status: Status | null, rows: readonly SetupRow[]): boolean {
-  if (welcomeAtLaunch === null && status !== null) {
-    welcomeAtLaunch = status.onboarding_complete === false && rows.some((r) => r.state === "done");
-  }
-  return welcomeAtLaunch ?? false;
 }

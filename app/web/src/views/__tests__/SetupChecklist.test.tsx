@@ -24,7 +24,7 @@ const { api } = vi.hoisted(() => ({ api: { completeOnboarding: vi.fn(), status: 
 vi.mock("@/lib/endpoints", () => ({ api }));
 
 import { patchSnap } from "@/lib/store";
-import { offerSetupAgain, shouldOpen } from "@/views/editor/flow";
+import { markHelloSeen, offerSetupAgain, shouldOpen } from "@/views/editor/flow";
 import { SetupHelpRow } from "@/views/setup/SetupHelpRow";
 import { SetupLayout } from "@/views/setup/SetupLayout";
 import type { Status } from "@/proto/Status";
@@ -77,14 +77,17 @@ afterEach(() => {
   patchSnap({ status: null, fans: null });
 });
 
-// In order: "Welcome back" is decided once per page, and "Set up later" holds for the page's life
-// until Help asks again.
+// In order: "Set up later" holds for the page's life until Help asks again. This page was loaded
+// with no hello seen, so it is a first launch throughout (`SetupReturning.test.tsx` is the next one).
 describe("the setup checklist", () => {
-  it("says Welcome back when something was already done, with the count and four rows", () => {
+  it("never says Welcome back on a first launch, even once the hello is left", async () => {
     patchSnap({ status: status() });
     mount();
+    await act(async () => {
+      markHelloSeen();
+    });
     const aside = panel()!;
-    expect(within(aside).getByRole("heading", { name: "Welcome back" })).toBeTruthy();
+    expect(within(aside).getByRole("heading", { name: "Setup checklist" })).toBeTruthy();
     expect(within(aside).getAllByRole("listitem")).toHaveLength(4);
     expect(within(aside).getByTestId("setup-count").textContent).toBe("2/4");
     expect(within(aside).queryByRole("button", { name: "Done" })).toBeNull();
@@ -110,6 +113,23 @@ describe("the setup checklist", () => {
     expect(panel()).toBeNull();
   });
 
+  // Every state that keeps "Done" away still has a way to end the onboarding.
+  it.each([
+    ["no lights", { devices_connected: 0, devices_total: 0, active_effects: ["fire"] }],
+    ["safe start", { safe_start: { active: true, reason: "user_chose" as const, unclean_streak: 0 } }],
+    ["Aurora kept", {}],
+  ])("offers Hide checklist and no Done with %s", async (_name, over) => {
+    patchSnap({ status: status(over) });
+    api.status.mockResolvedValue(status({ ...over, onboarding_complete: true }));
+    mount();
+    expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Hide checklist" }));
+    });
+    expect(api.completeOnboarding).toHaveBeenCalledTimes(1);
+    expect(panel()).toBeNull();
+  });
+
   it("offers the way out of an empty PC on the lights row", () => {
     patchSnap({ status: status({ devices_connected: 0 }) });
     mount();
@@ -125,7 +145,8 @@ describe("the setup checklist", () => {
     const pill = screen.getByTestId("setup-pill");
     expect(pill.textContent).toContain("2/4");
     fireEvent.click(pill);
-    expect(screen.getByRole("dialog", { name: "Setup checklist" })).toBeTruthy();
+    const sheet = screen.getByRole("dialog", { name: "Setup checklist" });
+    expect(within(sheet).getByRole("button", { name: "Hide checklist" })).toBeTruthy();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     fireEvent.click(screen.getByTestId("setup-pill"));
@@ -149,8 +170,6 @@ describe("the setup checklist", () => {
   });
 
   it("is absent once the onboarding is finished, until Help asks for it", () => {
-    // The launch above asked for it; a new launch starts with nothing asked.
-    window.sessionStorage.clear();
     patchSnap({ status: status({ onboarding_complete: true }) });
     mount();
     expect(panel()).toBeNull();

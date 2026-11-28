@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
-- First run now leads to a setup checklist on Scenes that ticks itself off and can be reopened from Help, and "See it without hardware" shows the editor on sample data without touching your PC. (#579)
+- First run now leads to a setup checklist on Scenes that ticks itself off, can be hidden at any time and reopened from Help, and "See it without hardware" shows the editor on sample data without touching your PC. (#579)
 - Hardware notes: when OpenRGB is down or the fan chip cannot be reached, Devices, Fans and the status strip say what is affected, why, how to fix it and when to ignore it. The page notes can be dismissed; they come back when the problem clears and returns. Help & About gains a "Why isn't my device here?" checklist. (#580)
 - Editor: a Credits page at /credits/ credits the people and projects canvas-rgb builds on and lists the third-party licences behind Rust and npm packages, grouped by licence with the full texts behind one disclosure each. It is linked from Settings > Version. (#578)
 - Help & About: a new page with the app's version, build, Windows edition and service version, a scrubbed copy of the support report, and links to the docs, source, release notes, privacy and credits. (#574)

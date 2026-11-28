@@ -42,7 +42,7 @@ import { ChainSetup } from "@/views/chain/ChainSetup";
 import { chainKey, markChainOffered, offeredChains } from "@/views/chain/offered";
 import { chainSetupRequest, consumeChainSetupRequest, useChainSetupVisit } from "@/views/chain/request";
 import s from "@/views/chain/wiring.module.css";
-import { chainLaterThisLaunch, putOffChainsUntilNextLaunch, helloPassed } from "@/views/editor/flow";
+import { chainLaterThisLaunch, helloSeen, putOffChainsUntilNextLaunch } from "@/views/editor/flow";
 import { setTakeover } from "@/views/editor/takeover";
 
 /** One header's identity in the daemon's list. */
@@ -69,7 +69,7 @@ function offerableFor(
   wanted: string | null,
   offered: ReadonlySet<string>,
 ): ChainView[] {
-  if (!status || (!status.onboarding_complete && !helloPassed()) || chainLaterThisLaunch()) return [];
+  if (!status || (!status.onboarding_complete && !helloSeen()) || chainLaterThisLaunch()) return [];
   if (!chains) return [];
   return chains.filter((chain) => {
     // A header with a record (set up or empty) was already answered: never offer it again (#380).

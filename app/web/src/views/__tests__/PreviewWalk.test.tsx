@@ -57,6 +57,7 @@ import { DevicesView } from "@/views/DevicesView";
 import { DisplaysView } from "@/views/DisplaysView";
 import {
   launchId,
+  markHelloSeen,
   markRedirected,
   offerChainsAgain,
   offerSetupAgain,
@@ -166,6 +167,7 @@ describe("a preview inside the tray", () => {
       markChainOffered("demo#z0");
       launchId();
       markRedirected();
+      markHelloSeen();
       putOffSetup();
       offerSetupAgain();
       putOffChainsUntilNextLaunch();
@@ -176,10 +178,11 @@ describe("a preview inside the tray", () => {
 
     view.rerender(page("/", <ScenesView />));
     await settle();
-    const done = screen.queryByRole("button", { name: "Done" });
-    if (done) {
+    // The key that ends the onboarding: the demo's, never the real one.
+    const end = screen.queryByRole("button", { name: /^(Done|Hide checklist)$/ });
+    if (end) {
       await act(async () => {
-        fireEvent.click(done);
+        fireEvent.click(end);
       });
     }
     await settle();
@@ -187,10 +190,11 @@ describe("a preview inside the tray", () => {
     // One comparison, so a failure shows every way out at once.
     expect({
       checklist,
+      endKey: end !== null,
       requests: world.fetched.filter((u) => u.includes(DAEMON)),
       sockets: world.sockets,
       trayCommands: world.invoked,
       storageWrites: world.writes,
-    }).toEqual({ checklist: true, requests: [], sockets: [], trayCommands: [], storageWrites: [] });
+    }).toEqual({ checklist: true, endKey: true, requests: [], sockets: [], trayCommands: [], storageWrites: [] });
   });
 });

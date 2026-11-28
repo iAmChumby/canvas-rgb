@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check } from "@phosphor-icons/react";
+import { Check, EyeSlash } from "@phosphor-icons/react";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { Button } from "@/components/Button";
 import { notify } from "@/components/Notify";
@@ -10,7 +10,7 @@ import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { doneCount, setupFinished, setupRows, type SetupRow } from "@/lib/setup";
 import { refreshStatus, useSnap } from "@/lib/store";
-import { closeSetup, noteLaunch, putOffSetup } from "@/views/editor/flow";
+import { closeSetup, putOffSetup, welcomeBack } from "@/views/editor/flow";
 import s from "@/views/setup/setup.module.css";
 
 /** The rows as the latest answers have them. */
@@ -66,8 +66,10 @@ function Row({ row, onTroubleshoot }: { row: SetupRow; onTroubleshoot?: () => vo
 }
 
 /**
- * The checklist: a heading, the count, four rows that never move or change height, and the two
- * ways out. "Set up later" shuts it for this launch; "Done" ends the onboarding for good.
+ * The checklist: a heading, the count, four rows that never move or change height, and the ways
+ * out. "Set up later" shuts it for this launch. The other key ends the onboarding for good: "Done"
+ * once every row that can be done is done, and "Hide checklist" until then, so it is never out of
+ * reach.
  */
 export function SetupChecklist({
   onTroubleshoot,
@@ -81,12 +83,10 @@ export function SetupChecklist({
   const status = useSnap((st) => st.status);
   const rows = useSetupRows();
   const [busy, setBusy] = useState(false);
-  // What was already done when the app was opened decides the greeting.
-  const welcome = noteLaunch(status, rows);
   const finished = setupFinished(rows);
-  const title = finished ? "Set up." : welcome ? "Welcome back" : "Setup checklist";
+  const title = finished ? "Set up." : welcomeBack(status, rows) ? "Welcome back" : "Setup checklist";
 
-  const done = async () => {
+  const complete = async () => {
     setBusy(true);
     try {
       await api.completeOnboarding();
@@ -113,7 +113,7 @@ export function SetupChecklist({
           <Row key={row.id} row={row} onTroubleshoot={onTroubleshoot} />
         ))}
       </ol>
-      {/* One row of fixed height: "Done" arriving moves nothing. */}
+      {/* One row of fixed height, one key on the right in every state: "Done" arriving moves nothing. */}
       <div className={s.keys}>
         <Button
           size="sm"
@@ -125,11 +125,15 @@ export function SetupChecklist({
         >
           Set up later
         </Button>
-        {finished && (
-          <Button variant="primary" busy={busy} icon={<Check size={16} weight="bold" />} onClick={() => void done()}>
-            Done
-          </Button>
-        )}
+        <Button
+          size="sm"
+          variant={finished ? "primary" : "default"}
+          busy={busy}
+          icon={finished ? <Check size={14} weight="bold" /> : <EyeSlash size={14} />}
+          onClick={() => void complete()}
+        >
+          {finished ? "Done" : "Hide checklist"}
+        </Button>
       </div>
     </div>
   );

@@ -5,7 +5,7 @@ import { Eye } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { enterPreview } from "@/lib/previewMode";
 import { HelloStep } from "@/views/editor/HelloStep";
-import { passHello, putOffSetup } from "@/views/editor/flow";
+import { markHelloSeen, putOffSetup } from "@/views/editor/flow";
 import { useOnboardEffects } from "@/views/editor/onboardEffects";
 import { setTakeover } from "@/views/editor/takeover";
 import s from "@/views/editor/onboarding.module.css";
@@ -31,13 +31,15 @@ export function Onboarding({
     return () => setTakeover(false);
   }, []);
 
-  // The checklist on Scenes takes it from here; its "Done" ends the onboarding (#579).
+  // The checklist on Scenes takes it from here; its "Done" ends the onboarding (#579). Either
+  // way out, the hello has been seen and does not open by itself again.
   const finish = () => {
-    passHello();
+    markHelloSeen();
     onDone();
   };
 
   const later = () => {
+    markHelloSeen();
     putOffSetup();
     onDone();
   };
