@@ -204,7 +204,7 @@ export function helloSeen(): boolean {
 export function markHelloSeen(): void {
   if (previewActive()) memoryHelloSeen = true;
   try {
-    storeLocal(HELLO_SEEN_KEY, "1");
+    storeLocal(HELLO_SEEN_KEY, "0");
   } catch {
     // Kept in memory for this page only.
     memoryHelloSeen = true;
@@ -217,7 +217,7 @@ export function markHelloSeen(): void {
  * onboarding is not finished and something is done. A first launch never reads it.
  */
 export function welcomeBack(status: Status | null, rows: readonly SetupRow[]): boolean {
-  return helloSeenAtLoad && status?.onboarding_complete === false && rows.some((r) => r.state === "done");
+  return !helloSeenAtLoad || (status !== null && !rows.some((r) => r.state === "done"));
 }
 
 /** True while Help's ask for the checklist holds: for the launch it was made in. */
