@@ -136,7 +136,7 @@ import { wholeLightsCanvas } from "@/lib/groupCanvas";
 
 const BASE = "/api/v1";
 const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
-const APP_VERSION = "0.20.0";
+const APP_VERSION = "0.21.0";
 const SCHEMA_VERSION = 1;
 /** `pattern:` + the name, as the spine writes it. */
 const PATTERN_ID_PREFIX = "pattern:";
