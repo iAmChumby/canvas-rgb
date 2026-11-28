@@ -18,7 +18,7 @@ import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { DaemonDown } from "@/components/DaemonDown";
 import { EngineDown } from "@/components/EngineDown";
 import { RailResizeHandle } from "@/components/RailResizeHandle";
-import { links, playingLine } from "@/lib/status";
+import { links, playing, playingLine } from "@/lib/status";
 import { sceneCommands } from "@/shell/commands";
 import { useTakeover } from "@/views/editor/takeover";
 import { StripSlotsProvider, useBarFlag } from "@/shell/PageHeader";
@@ -35,15 +35,18 @@ import { keepPreviewInAddress } from "@/lib/previewMode";
  *  whenever the strip had to give them up. The popover keeps the same words one click away. */
 function StatusBodyLine() {
   const inBody = useBarFlag("barStatus", "body");
-  // The rail's deck names what is playing while it is on screen: the line does not say it again.
+  // The name is said once (B11): the line holds it only when neither the rail's deck nor the
+  // strip draws it. Beside the strip's name, the line keeps the detail alone.
   const inRail = useBarFlag("nowWhere", "rail");
+  const inStrip = useBarFlag("nowWhere", "strip");
   const status = useSnap((s) => s.status);
   const statusFault = useSnap((s) => s.statusFault);
   const effects = useSnap((s) => s.effects);
   if (!inBody || !status) return null;
-  const playing = playingLine(status, effects);
+  const { detail } = playing(status, effects);
   const linkWords = links(status, statusFault).map((l) => `${l.name} ${l.state}`).join(" · ");
-  return <p className="status-body-line">{inRail ? linkWords : `${playing} · ${linkWords}`}</p>;
+  const lead = inRail ? "" : inStrip ? detail.charAt(0).toUpperCase() + detail.slice(1) : playingLine(status, effects);
+  return <p className="status-body-line">{lead ? `${lead} · ${linkWords}` : linkWords}</p>;
 }
 
 export function Shell({ children }: { children: ReactNode }) {
