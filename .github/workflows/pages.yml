@@ -76,7 +76,8 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      # Whichever deploy went out (see the deploy steps at the end of this job).
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment-retry.outputs.page_url }}
     concurrency:
       group: pages
       cancel-in-progress: false
@@ -119,5 +120,25 @@ jobs:
         with:
           path: site/out
 
+      # deploy-pages looks the artifact up once, under a second after the upload above, and does
+      # not look again: when the run's artifact list has not caught up with the upload yet, it
+      # fails with 'No artifacts named "github-pages" were found for this workflow run' and
+      # deploys nothing (actions/deploy-pages#451). That is what failed every push run from 22
+      # November 2026 (runs 202 and 203): the upload had succeeded, and the artifact was in the
+      # run's list when it was read again later. So the first deploy may fail, and the job goes
+      # on: after a pause the second deploy finds the same artifact, and its failure fails the
+      # job. A first deploy that found no artifact created no deployment, so the second one is
+      # the only one; a first deploy that failed for another reason is tried once more on the
+      # same artifact, as a re-run of the deploy would. The job stays one job, so a run still
+      # joins the pages group once.
       - id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      - name: Wait for the artifact list to catch up
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+
+      - id: deployment-retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
