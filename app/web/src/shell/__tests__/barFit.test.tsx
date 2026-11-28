@@ -48,8 +48,8 @@ afterEach(() => {
   delete document.documentElement.dataset.barSecondary;
 });
 
-/** Title 100, context 300, secondary key 90, primary 80: 570 in all. */
-function fit(width: number, wraps = false, phoneMenu = false) {
+/** Title 100, context 300, secondary key 90, primary 80: 570 in all. `now` adds what is playing. */
+function fit(width: number, wraps = false, phoneMenu = false, now = 0) {
   rowWidth = width;
   const { container } = render(
     <div className="strip">
@@ -60,6 +60,7 @@ function fit(width: number, wraps = false, phoneMenu = false) {
             <span className="rd-context" data-w="300" />
           </span>
         </span>
+        {now > 0 && <span className="strip-now" data-w={now} />}
         <span className="strip-page-actions">
           <span className="rd-actions">
             <button className="rd-secondary" data-w="90" data-phone-menu={phoneMenu ? "" : undefined} />
@@ -74,27 +75,40 @@ function fit(width: number, wraps = false, phoneMenu = false) {
 
 describe("the strip's fit", () => {
   it("keeps everything that fits in the bar", () => {
-    expect(fit(600)).toEqual({ context: "bar", secondary: "bar", rows: "1" });
+    expect(fit(600)).toEqual({ context: "bar", secondary: "bar", rows: "1", now: "first" });
   });
 
   it("gives up the context before a key", () => {
-    expect(fit(400)).toEqual({ context: "body", secondary: "bar", rows: "1" });
+    expect(fit(400)).toEqual({ context: "body", secondary: "bar", rows: "1", now: "first" });
   });
 
   it("moves the secondary key to the overflow only when it still does not fit", () => {
-    expect(fit(200)).toEqual({ context: "body", secondary: "menu", rows: "1" });
+    expect(fit(200)).toEqual({ context: "body", secondary: "menu", rows: "1", now: "first" });
   });
 
   it("takes a second line only for a primary key that cannot fit, and asks both lines again", () => {
-    expect(fit(175, true)).toEqual({ context: "body", secondary: "bar", rows: "2" });
+    expect(fit(175, true)).toEqual({ context: "body", secondary: "bar", rows: "2", now: "first" });
   });
 
   it("sends a phone-menu key to the overflow on the second line even where it fits", () => {
-    expect(fit(175, true, true)).toEqual({ context: "body", secondary: "menu", rows: "2" });
+    expect(fit(175, true, true)).toEqual({ context: "body", secondary: "menu", rows: "2", now: "first" });
+  });
+
+  it("moves now playing to the keys' line when the first line cannot hold it", () => {
+    expect(fit(200, true, false, 110)).toEqual({ context: "body", secondary: "menu", rows: "2", now: "second" });
+  });
+
+  it("keeps only the swatch when the name fits on neither line", () => {
+    expect(fit(200, true, false, 150)).toEqual({ context: "body", secondary: "menu", rows: "2", now: "gone" });
+  });
+
+  it("never draws now playing over a neighbour on a one-line bar", () => {
+    expect(fit(175, false, false, 100)).toEqual({ context: "body", secondary: "menu", rows: "1", now: "gone" });
+    expect(document.querySelector<HTMLElement>(".strip")?.dataset.barNow).toBe("gone");
   });
 
   it("stays on one line where the stylesheet does not wrap the row", () => {
-    expect(fit(175)).toEqual({ context: "body", secondary: "menu", rows: "1" });
+    expect(fit(175)).toEqual({ context: "body", secondary: "menu", rows: "1", now: "first" });
   });
 });
 

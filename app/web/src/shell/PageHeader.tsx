@@ -103,8 +103,12 @@ function roomFor(heading: HTMLElement, row: HTMLElement, titleBox: HTMLElement):
   const wraps =
     row.closest<HTMLElement>(".strip")?.dataset.barRows === "2" &&
     getComputedStyle(row).getPropertyValue("--bar-wraps").trim() === "1";
+  const secondLine = [
+    "strip-page-actions",
+    ...(row.closest<HTMLElement>(".strip")?.dataset.barNow === "second" ? ["strip-now"] : []),
+  ];
   const others = rowItems(row).filter(
-    (el) => el !== titleBox && el.offsetWidth > 0 && !(wraps && el.classList.contains("strip-page-actions")),
+    (el) => el !== titleBox && el.offsetWidth > 0 && !(wraps && secondLine.some((c) => el.classList.contains(c))),
   );
   const beside = ([...titleBox.children] as HTMLElement[]).filter((el) => !el.contains(heading) && el.offsetWidth > 0);
   const px = (value: string) => parseFloat(value) || 0;

@@ -70,7 +70,8 @@ export function StatusStrip({
   //  - the context and the secondary keys stay in the bar while they fit; otherwise the page draws
   //    the context at the head of its body and the keys in the overflow (CSS shows one copy);
   //  - a second row appears only when a primary action cannot fit beside the other controls;
-  //  - now playing lives in the strip only while the rail's deck is collapsed, never twice.
+  //  - now playing lives in the strip only while the rail's deck is collapsed, never twice; a name
+  //    the row cannot hold is said at the head of the page body instead.
   // All of it is decided from the strip's box, never from a viewport guess.
   useEffect(() => {
     const strip = stripRef.current;
@@ -91,6 +92,9 @@ export function StatusStrip({
       root.dataset.barContext = fit.context;
       root.dataset.barSecondary = fit.secondary;
       strip.dataset.barRows = fit.rows;
+      strip.dataset.barNow = fit.now;
+      // B11: one place says the name. The page's copies read this and leave it out.
+      if (root.dataset.nowWhere === "strip" && fit.now === "gone") root.dataset.nowWhere = "body";
       // B8: the status words and the now-playing detail step down by the strip's own container
       // rules. Whenever one of them is not drawn, the page body gets its home.
       const gone = (selector: string) => {
@@ -98,7 +102,8 @@ export function StatusStrip({
         return el !== null && getComputedStyle(el).display === "none";
       };
       const detailGone = root.dataset.nowWhere === "strip" && gone(".strip-now-detail");
-      root.dataset.barStatus = gone(".strip-mark-text") || detailGone ? "body" : "bar";
+      const nameGone = root.dataset.nowWhere === "body";
+      root.dataset.barStatus = gone(".strip-mark-text") || detailGone || nameGone ? "body" : "bar";
       publishHeight();
       row.dispatchEvent(new Event("barfit"));
     };

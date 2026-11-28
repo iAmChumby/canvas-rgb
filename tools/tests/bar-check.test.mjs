@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { judge, SIZES, ROUTES, STATES, LONG_NAME, USER_TITLE_FLOOR } from "../bar-check.mjs";
+import { judge, SIZES, ROUTES, STATES, LONG_NAME, LONG_SCENE, USER_TITLE_FLOOR } from "../bar-check.mjs";
 
 const source = (p) => readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", p), "utf8");
 
@@ -86,11 +86,34 @@ test("B6: a builder fixture that shows the error panel is a failure", () => {
   assert.ok(judge(m, state("builder", "long-name")).some((b) => b.includes("fixture did not load")));
 });
 
-test("B11: the scene name is drawn once on a narrow strip", () => {
+test("B11: the playing name is on screen exactly once where the rail is collapsed", () => {
   const m = measurement();
   m.vw = 390;
-  m.forms = { nowName: false, railValue: true };
-  assert.ok(judge(m, state("scenes")).some((b) => b.includes("drawn once")));
+  m.playing = "Gaming";
+  m.nameCopies = ["span.strip-effect-name"];
+  assert.deepEqual(judge(m, state("devices")), []);
+  m.nameCopies = ["span.strip-effect-name", "p.status-body-line"];
+  assert.ok(judge(m, state("devices")).some((b) => b.includes("on screen 2 times")));
+  m.nameCopies = [];
+  assert.ok(judge(m, state("devices")).some((b) => b.includes("on screen 0 times")));
+});
+
+test("B11: the long scene name state must be on screen", () => {
+  assert.ok(STATES.some((s) => s.state === "long-scene"));
+  const m = measurement();
+  m.playing = "Gaming";
+  assert.ok(judge(m, state("scenes", "long-scene")).some((b) => b.includes("not the one playing")));
+  m.playing = LONG_SCENE;
+  assert.deepEqual(judge(m, state("scenes", "long-scene")), []);
+});
+
+test("B12: Pause and search off the title's line is a failure on a phone", () => {
+  const m = measurement();
+  m.vw = 360;
+  m.controlsOff = 27;
+  assert.ok(judge(m, state("builder")).some((b) => b.includes("left the title's line")));
+  m.vw = 1440;
+  assert.ok(!judge(m, state("builder")).some((b) => b.includes("left the title's line")));
 });
 
 test("B9/B13: context and row count come from one measured rule, not the window", () => {
