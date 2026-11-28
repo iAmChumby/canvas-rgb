@@ -63,6 +63,15 @@ describe("the setup rows", () => {
     }
   });
 
+  it("does not tick a stale device count while the light engine is not answering", () => {
+    for (const openrgb of ["connecting", "down"] as const) {
+      // The fake OpenRGB server can send no packets at all while the daemon still holds the
+      // devices it saw earlier: a number that is not fresh is not a tick (#579).
+      const stale = status({ openrgb, devices_connected: 3, devices_total: 4 });
+      expect(row(read({ status: stale }), "lights").state).toBe("unknown");
+    }
+  });
+
   it("holds the lights row back while SignalRGB runs", () => {
     const rows = read({ status: status({ conflicts: [{ kind: "signal_rgb", process: true, service: false }] }) });
     expect(row(rows, "lights").state).toBe("todo");

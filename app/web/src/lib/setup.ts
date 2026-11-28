@@ -78,15 +78,16 @@ function lights(status: Status | null): Read {
   if ((status.conflicts?.length ?? 0) > 0) {
     return { state: "todo", value: "SignalRGB has your lights. Quit it from the tray." };
   }
+  // An engine that is not answering has no fresh device count: a number it still holds from
+  // before the fake server went quiet must not tick the row (#579).
+  if (status.openrgb === "connecting") return { state: "unknown", value: "Waking up your lights" };
+  if (status.openrgb !== "connected") return { state: "unknown", value: "The light engine is not answering" };
   const found = status.devices_connected;
   if (typeof found !== "number") return NOT_READ;
   if (found >= 1) {
     const total = status.devices_total;
     return { state: "done", value: total >= found ? `${found} of ${total}` : `${found} found` };
   }
-  // A zero from a light engine that is not up is no answer.
-  if (status.openrgb === "connecting") return { state: "unknown", value: "Waking up your lights" };
-  if (status.openrgb !== "connected") return { state: "unknown", value: "The light engine is not answering" };
   return { state: "todo", value: "No lights found" };
 }
 

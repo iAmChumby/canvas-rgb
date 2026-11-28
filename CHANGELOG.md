@@ -25,6 +25,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Preview: Help & About now says the app's identity and system report are available in the tray app only, instead of showing a failed read on sample data. (#579)
+- Setup checklist: "Lights found" no longer ticks from a device count the light engine left behind when it stopped answering. (#579)
 - Credits: expanded licence texts reflow into paragraphs that wrap at any window width, keeping notice numbers, headings and copyright lines on their own lines. (#584)
 - Credits: the installer now ships the page's third-party notices, each notice carries its copyright holder, and credited links open in your browser instead of the editor window. (#578)
 - Help & About: the report now scrubs the real 8.3 short name of the profile and only whole user or machine names, free-text device names cannot add rows or cells to the report, a disconnected service is no longer shown as connected, "Last run" reads in plain words, and the page's links and receipt no longer overlap or move as they load. Go-to addresses stay on one line with the full URL on hover, and release notes are linked once, in the identity panel. (#583)
