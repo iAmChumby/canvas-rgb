@@ -5,8 +5,6 @@ import { CheckCircle, CircleDashed, MagnifyingGlass, Pause, Play, Warning, Warni
 import { Button, IconButton, Swap } from "@/components/Button";
 import { IconSwap } from "@/components/IconSwap";
 import { Crossfade } from "@/components/Crossfade";
-import { useMediaQuery } from "@/components/MediaQuery";
-import { PHONE_QUERY } from "@/lib/MediaQuery";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { Popover } from "@/components/Popover";
 import { notify } from "@/components/Notify";
@@ -17,6 +15,7 @@ import { patchSnap, refreshStatus, useSnap } from "@/lib/store";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { RunningPresetName, useTrackRunningPreset } from "@/shell/RunningPresetName";
 import { StripSlot } from "@/shell/PageHeader";
+import { fitBar } from "@/shell/barFit";
 
 /** What the strip says when nothing is wrong. */
 const ALL_GOOD = "All connected";
@@ -64,20 +63,62 @@ export function StatusStrip({
   const scenesError = useSnap((s) => s.scenesError);
   const [busy, setBusy] = useState(false);
   const stripRef = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
   const markRef = useRef<HTMLButtonElement>(null);
 
-  // The height of the strip, published for the overlays that sit under it.
+  // One rule, measured from the strip's own content box (#586 fix pass 1 B9, B10, B12, B13):
+  //  - the context and the secondary keys stay in the bar while they fit; otherwise the page draws
+  //    the context at the head of its body and the keys in the overflow (CSS shows one copy);
+  //  - a second row appears only when a primary action cannot fit beside the other controls;
+  //  - now playing lives in the strip only while the rail's deck is collapsed, never twice.
+  // All of it is decided from the strip's box, never from a viewport guess.
   useEffect(() => {
-    const el = stripRef.current;
-    if (!el) return;
-    const publish = () => {
-      document.documentElement.style.setProperty("--strip-h", `${el.offsetHeight}px`);
+    const strip = stripRef.current;
+    const row = rowRef.current;
+    if (!strip || !row) return;
+    const publishHeight = () => {
+      document.documentElement.style.removeProperty("--strip-h");
+      document.documentElement.style.setProperty("--strip-h", `${strip.offsetHeight}px`);
     };
-    publish();
-    const ro = new ResizeObserver(publish);
-    ro.observe(el);
+    const update = () => {
+      const root = document.documentElement;
+      const deck = document.querySelector<HTMLElement>(".rail-deck");
+      root.dataset.nowWhere = deck && getComputedStyle(deck).display !== "none" ? "rail" : "strip";
+      // `data-measure` stops everything shrinking, so what is measured is what each part needs.
+      strip.dataset.measure = "";
+      const fit = fitBar(strip, row);
+      delete strip.dataset.measure;
+      root.dataset.barContext = fit.context;
+      root.dataset.barSecondary = fit.secondary;
+      strip.dataset.barRows = fit.rows;
+      // B8: the status words and the now-playing detail step down by the strip's own container
+      // rules. Whenever one of them is not drawn, the page body gets its home.
+      const gone = (selector: string) => {
+        const el = row.querySelector(selector);
+        return el !== null && getComputedStyle(el).display === "none";
+      };
+      const detailGone = root.dataset.nowWhere === "strip" && gone(".strip-now-detail");
+      root.dataset.barStatus = gone(".strip-mark-text") || detailGone ? "body" : "bar";
+      publishHeight();
+      row.dispatchEvent(new Event("barfit"));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(row);
+    ro.observe(strip);
+    const mo = new MutationObserver(update);
+    mo.observe(strip, { childList: true, subtree: true, characterData: true });
+    // The faces arrive after the first measurement and change every width.
+    let gone = false;
+    void document.fonts?.ready.then(() => {
+      if (!gone) update();
+    });
     return () => {
+      gone = true;
       ro.disconnect();
+      mo.disconnect();
+      // A window with no strip (the onboarding) has nothing that moved out of it.
+      for (const key of ["barContext", "barSecondary", "barStatus", "nowWhere"]) delete document.documentElement.dataset[key];
       document.documentElement.style.removeProperty("--strip-h");
     };
   }, []);
@@ -102,9 +143,6 @@ export function StatusStrip({
   );
   const list = problems(status, statusFault, faults);
   const tone: Tone = list[0]?.tone ?? "ok";
-  // On a phone the row has room for the link's name, not for the whole sentence. The full
-  // words are the button's own label, so nothing is lost.
-  const phone = useMediaQuery(PHONE_QUERY);
   // #580 R2, R14, C1, C2: the mark counts every note, dismissed or not, and says so when the
   // counted notes are all hidden. The count does not swallow the first problem: the popover shows
   // the whole list whenever the mark shows a count.
@@ -112,11 +150,9 @@ export function StatusStrip({
   const warnings = faultEntries.length;
   const allDismissed = warnings > 0 && faultEntries.every((p) => p.dismissed);
   const countText = `${warnings} warning${warnings === 1 ? "" : "s"}${allDismissed ? ", dismissed" : ""}`;
-  const markText = warnings > 0
-    ? (phone ? String(warnings) : countText)
-    : list[0]
-      ? (phone ? (list[0].short ?? list[0].text) : list[0].text)
-      : ALL_GOOD;
+  // The words are always the full sentence; the container rules drop them when the strip is too
+  // narrow, and the button's own label still carries them (#586 R4).
+  const markText = warnings > 0 ? countText : (list[0]?.text ?? ALL_GOOD);
   // The accessible name is always the full sentence, including ", dismissed" (fix pass 2): the
   // phone's visible number is short, but the button must still say what the count means.
   const fullText = warnings > 0 ? countText : (list[0]?.text ?? ALL_GOOD);
@@ -166,6 +202,7 @@ export function StatusStrip({
   return (
     <div className="strip" role="status" aria-label="Status" ref={stripRef}>
       <div className="strip-inner">
+        <div className="strip-row" ref={rowRef}>
         <span className="strip-brand">
           <BrandMark size={16} />
           <Wordmark />
@@ -219,9 +256,14 @@ export function StatusStrip({
           </Crossfade>
         </button>
 
-        <span className="strip-controls">
-          {/* The page's own actions, before Pause and Search (R2, R4). */}
+        {/* The page's keys own their slot: on a phone only a primary action that cannot fit in
+            the first row moves to the second. Pause and search stay in the same place on every
+            page (B12). */}
+        <span className="strip-page-actions">
           <StripSlot kind="actions" />
+        </span>
+
+        <span className="strip-controls">
           {known ? (
             <Button
               size="sm"
@@ -256,6 +298,7 @@ export function StatusStrip({
             />
           )}
         </span>
+        </div>
       </div>
 
       <Popover
@@ -267,6 +310,9 @@ export function StatusStrip({
       >
         <div className="strip-details-head">Details</div>
         <dl className="strip-details-list">
+          {/* R10: the now-playing detail leaves the row before its name does, so the popover
+              keeps the whole sentence one click from the mark. */}
+          <Detail label="Now playing" value={now.detail ? `${nowName} ${now.detail}` : nowName} />
           <Detail label="Frame rate" value={status ? <><AnimatedNumber value={status.fps_measured} decimals={1} /> / <AnimatedNumber value={status.fps_target} /> fps</> : "—"} />
           <Detail label="Frame time" value={status ? <><AnimatedNumber value={status.frame_time_ms} decimals={1} /> ms</> : "—"} />
           <Detail label="Lights" value={status ? (paused ? "paused" : status.parked ? "idle" : "running") : "—"} />

@@ -105,7 +105,7 @@ afterEach(() => {
 describe("AudioSourcePanel (#166)", () => {
   it("renders the grouped picker and sends PUT /audio/source on a pick", async () => {
     render(<AudioSourcePanel />);
-    const trigger = await screen.findByRole("combobox", { name: "Audio source" });
+    const trigger = await screen.findByRole("combobox", { name: /^Audio source/ });
     expect(trigger.textContent).toContain("Follow Windows default output: Speakers (Realtek Audio)");
     fireEvent.click(trigger);
     expect(await screen.findByText("Outputs (loopback)")).toBeTruthy();
@@ -119,7 +119,7 @@ describe("AudioSourcePanel (#166)", () => {
   it("shows Listen only for inputs", async () => {
     // A follow-default output: no Listen.
     render(<AudioSourcePanel />);
-    await screen.findByRole("combobox", { name: "Audio source" });
+    await screen.findByRole("combobox", { name: /^Audio source/ });
     expect(screen.queryByRole("switch", { name: "Listen to this input" })).toBeNull();
     cleanup();
     // A pinned input: Listen appears.
@@ -228,7 +228,7 @@ describe("AudioSourcePanel (#166)", () => {
       }),
     );
     render(<AudioSourcePanel />);
-    await screen.findByRole("combobox", { name: "Audio source" });
+    await screen.findByRole("combobox", { name: /^Audio source/ });
     expect(screen.getByText(/Audio effects read this input whenever an audio effect is active/)).toBeTruthy();
   });
 
@@ -239,7 +239,7 @@ describe("AudioSourcePanel (#166)", () => {
       }),
     );
     render(<AudioSourcePanel />);
-    const trigger = await screen.findByRole("combobox", { name: "Audio source" });
+    const trigger = await screen.findByRole("combobox", { name: /^Audio source/ });
     const visible = trigger.querySelector('[data-on="true"]');
     expect(visible?.textContent).toBe("Follow Windows default output");
   });
@@ -269,7 +269,7 @@ describe("AudioSourcePanel (#166)", () => {
   it("compact form: select in the head, state and a Button 'Show readings' on one row (UI 2, 4)", async () => {
     compact.value = true;
     render(<AudioSourcePanel />);
-    const trigger = await screen.findByRole("combobox", { name: "Audio source" });
+    const trigger = await screen.findByRole("combobox", { name: /^Audio source/ });
     // The select sits in the panel head's action slot.
     expect(trigger.closest(".panel-head")).toBeTruthy();
     const button = screen.getByRole("button", { name: "Show readings" });
@@ -294,7 +294,7 @@ describe("AudioSourcePanel (#166)", () => {
       }),
     );
     const { container } = render(<AudioSourcePanel />);
-    await screen.findByRole("combobox", { name: "Audio source" });
+    await screen.findByRole("combobox", { name: /^Audio source/ });
     // An input picked and Listen off: the state slot is the disclosure, the
     // whole of it (never a suffix after the state words), the full sentence in
     // its title.
@@ -306,7 +306,7 @@ describe("AudioSourcePanel (#166)", () => {
     cleanup();
     mocks.audioSources.mockResolvedValue(sources());
     const out = render(<AudioSourcePanel />);
-    await screen.findByRole("combobox", { name: "Audio source" });
+    await screen.findByRole("combobox", { name: /^Audio source/ });
     const outLine = out.container.querySelector(".audio-state-compact");
     expect(outLine?.getAttribute("data-note")).toBeNull();
     expect(outLine?.textContent).not.toContain("Audio effects");
@@ -314,7 +314,7 @@ describe("AudioSourcePanel (#166)", () => {
 
   it("group headings reach assistive tech as groups (S10)", async () => {
     render(<AudioSourcePanel />);
-    const trigger = await screen.findByRole("combobox", { name: "Audio source" });
+    const trigger = await screen.findByRole("combobox", { name: /^Audio source/ });
     fireEvent.click(trigger);
     const outputs = await screen.findByRole("group", { name: "Outputs (loopback)" });
     expect(outputs).toBeTruthy();

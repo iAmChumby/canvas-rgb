@@ -107,11 +107,11 @@ describe("the stack builder's states", () => {
       expect(await screen.findByText("The stack could not be read")).toBeTruthy();
       expect(document.querySelector(".rd-stack-main")?.textContent).toContain("The stack could not be read");
       // A failed read never becomes an empty save.
-      expect(screen.getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
+      expect(screen.getByRole("button", { name: /^Save the stack/ })).toHaveProperty("disabled", true);
       fireEvent.click(screen.getByRole("button", { name: "Try again" }));
       await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
       await waitFor(() => expect(layerNames()).toContain("Sparkles"));
-      expect(screen.getByRole("button", { name: "Save" })).toHaveProperty("disabled", false);
+      expect(screen.getByRole("button", { name: /^Save the stack/ })).toHaveProperty("disabled", false);
     } finally {
       read.mockRestore();
     }
@@ -125,7 +125,7 @@ describe("the stack builder's states", () => {
       new ApiFailure(500, "internal", "could not write stacks.json: the file is locked"),
     );
     try {
-      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Save the stack/ }));
       expect(await screen.findByText("The stack could not be saved")).toBeTruthy();
       expect(screen.getByText(/the file is locked/)).toBeTruthy();
       expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
@@ -145,7 +145,7 @@ describe("the stack builder's states", () => {
       new ApiFailure(503, "service_unavailable", "the effect could not start: the engine is busy"),
     );
     try {
-      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Save the stack/ }));
       expect(await screen.findByText("Saved, but it did not start")).toBeTruthy();
       expect(screen.queryByText("The stack could not be saved")).toBeNull();
       expect(screen.getByText(/the engine is busy/)).toBeTruthy();
@@ -175,7 +175,7 @@ describe("the stack builder's states", () => {
       new ApiFailure(503, "service_unavailable", "the effect could not start: the engine is busy"),
     );
     try {
-      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Save the stack/ }));
       expect(await screen.findByText("Saved, but it did not start")).toBeTruthy();
       // An unsaved fifth layer: the saved stack is no longer what is on screen.
       fireEvent.click(screen.getByRole("button", { name: "Add Solid" }));
@@ -212,7 +212,7 @@ describe("the stack builder's states", () => {
       const heat = last?.stack?.layers.find((layer) => layer.id === "l2");
       expect(heat?.props.intensity?.value).toBe(90);
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save the stack/ }));
     await waitFor(() => expect(saveCalls()).toHaveLength(1));
     const saved = await api.stack("Sunset glow");
     const heat = saved.stack.layers.find((layer) => layer.id === "l2");

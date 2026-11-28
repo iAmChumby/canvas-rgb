@@ -198,6 +198,14 @@ export function seededStacks(scenario: Set<string>, effects: Record<string, Demo
     [eight.id]: eight,
     [warmFlame.id]: warmFlame,
   };
+  // `?stack-name=` lets a check open the seeded stack under a name a person typed, without the
+  // error panel that a missing stack would show. Only the demo backend reads this query.
+  const typedName = typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("stack-name");
+  if (typedName && typedName !== "Sunset glow") {
+    const renamed: Stack = { ...sunsetGlow, id: `stack:${typedName}` };
+    delete stacks[sunsetGlow.id];
+    stacks[renamed.id] = renamed;
+  }
   // `?state=stack-nested`: a hand-edited stack whose middle layer is another stack, so the row's
   // `Nested stack` and the picked layer's explanation can be seen (D95.4.8).
   if (scenario.has("stack-nested")) {

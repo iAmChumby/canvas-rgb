@@ -394,10 +394,22 @@ html[data-motion="reduced"] *::after {
 .strip-inner {
   display: flex;
   align-items: center;
-  gap: var(--s2) var(--s4);
   height: 54px;
   padding: 0 var(--s6);
   white-space: nowrap;
+}
+
+/* The strip's own row is the container for the priority rules (#586). The rail's width is not
+   known to the window, so every step below is measured against this content box, not the viewport.
+   A container cannot style itself, so the row owns the gap and all responsive rules target its
+   children or later descendants. */
+.strip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2) var(--s4);
+  flex: 1 1 auto;
+  min-width: 0;
+  container: strip / inline-size;
 }
 
 /* The mark the phone has instead of the rail's. It is the app's name, not a status, so it
@@ -449,14 +461,14 @@ html[data-motion="reduced"] *::after {
 
 .strip-effect-name {
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: none;
+  white-space: nowrap;
 }
 
 .strip-now-detail {
   color: var(--mute);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: none;
+  white-space: nowrap;
 }
 
 /* How it is going: the mark is quiet when all is well and says the fault when there is one. */
@@ -510,10 +522,9 @@ html[data-motion="reduced"] *::after {
 }
 
 .strip-mark-text {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* The whole sentence or no sentence: the container rule hides it when there is no room. */
+  flex: none;
+  white-space: nowrap;
 }
 
 /* A dismissed note is still active, but its count is muted rather than shouted (#580 C2). */
@@ -523,6 +534,12 @@ html[data-motion="reduced"] *::after {
 
 /* The controls sit at the end of the row. The mark's text grows into the space beside them and
    they do not move. */
+.strip-page-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
 .strip-controls {
   display: inline-flex;
   align-items: center;
@@ -531,23 +548,34 @@ html[data-motion="reduced"] *::after {
   margin-left: auto;
 }
 
-/* R3: now playing appears once. With the rail deck on screen (1280 px and up) the strip names
-   the page instead; below that the deck is hidden and the strip carries it. */
-@media (min-width: 1280px) {
-  .strip-now {
-    display: none;
-  }
+/* One priority order, from the strip's own content box (#586). A page's own title is flex:none
+   everywhere and appears in none of these rules: it never gives way.
+   The context (1) and the secondary keys (5) have no fixed width at which they leave: the strip
+   measures what each page needs (shell/barFit.ts) and they stay whenever they fit.
+   1150 px: the now-playing detail (2), the status words (3) and the power words (7) step down,
+   and the primary key keeps only its verb. 900 px: a segmented switch (6) becomes a dropdown of
+   its active value. */
+/* B11: one rule. The rail deck owns now playing while it is on screen; the strip owns it while
+   the deck is collapsed. The two are never drawn together. */
+:root[data-now-where="rail"] .strip-now {
+  display: none;
 }
 
-/* Below 1280 the strip also carries now playing and the page's own actions: the state mark
-   keeps its icon (its tooltip and accessible name say the state) and drops its words, so
-   nothing truncates. */
-@media (max-width: 1279px) {
-  .strip-mark-text {
+/* B9: the context leaves only when the strip's own measurement says it does not fit (the JS sets
+   the attribute), and CSS uses the very same attribute, so there is no 1150/1151 gap. */
+:root[data-bar-context="body"] .rd-context {
+  display: none;
+}
+
+@container strip (max-width: 1150px) {
+  .strip-now-detail,
+  .strip-mark-text,
+  .strip-power-text {
     display: none;
   }
-  /* #580: the words are dropped at this width, so the count sits beside the mark's icon as a
-     short number. The badge takes no extra row and the button's label carries the full words. */
+
+  /* #580: the words are gone, so the count sits beside the icon as a short number. The button's
+     own label still carries the full sentence. */
   .strip-mark-icon[data-count] {
     display: inline-flex;
     align-items: center;
@@ -558,28 +586,42 @@ html[data-motion="reduced"] *::after {
     font-family: var(--fm);
     font-size: var(--t14);
   }
-  /* #580 fix pass 2: the phone drops the words, so a hidden fault keeps its own quiet edge and a
-     muted badge instead of looking the same as an active one. */
+  /* A hidden note keeps its own quiet edge and a muted badge. */
   .strip-mark[data-dismissed="true"] {
     border-color: var(--mute);
   }
   .strip-mark[data-dismissed="true"] .strip-mark-icon[data-count]::after {
     color: var(--mute);
   }
-}
 
-/* A page with its own strip actions (Apply, Save layout, the fan profiles) needs the room
-   below 1280: now playing shrinks to its colour swatch (the effect's name stays its tooltip
-   and the rail's value), and below 1100 the page's context line goes too. */
-@media (max-width: 1279px) {
-  .strip-inner:has(.rd-actions) .strip-now-text {
+  /* Rank 3: the pending words become their count beside the warning mark. */
+  .rd-actions .rd-peri-pending-text {
     display: none;
+  }
+  .rd-actions .rd-peri-pending::after {
+    content: attr(data-count);
+  }
+
+  /* Rank 8: the primary key keeps only its verb. */
+  .rd-actions [data-bar-primary] .rd-btn-text {
+    font-size: 0;
+  }
+  .rd-actions [data-bar-primary] .rd-btn-text::after {
+    content: attr(data-short);
+    font-size: var(--t14);
   }
 }
 
-@media (max-width: 1099px) {
-  .strip-inner:has(.rd-actions) .rd-context {
+@container strip (max-width: 900px) {
+  /* The scene's name stays visible at 768 and on a phone (B11); only the detail steps down. */
+
+  /* Rank 6: the profile switch becomes a dropdown whose visible text is the active value and
+     whose accessible name names the control ("Fan profile: Quiet"). */
+  .rd-actions .rd-profile-segments {
     display: none;
+  }
+  .rd-actions .rd-profile-dropdown {
+    display: inline-flex;
   }
 }
 
@@ -797,19 +839,31 @@ html[data-motion="reduced"] *::after {
 }
 
 .rd-title h1 {
+  /* #586: a page's own name is identity. It is reserved before anything else is placed. */
+  flex: none;
   margin: 0;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
   white-space: nowrap;
   font: 600 var(--t20) / 1 var(--fu);
   color: var(--ink);
   letter-spacing: -0.01em;
 }
 
+/* A name a person typed gives way in the middle; the JS keeps twelve characters and the full
+   words in title/aria-label. */
+.rd-title h1[data-bar-user-title] {
+  /* B7: the JS cuts on code points from the bar's room, so the heading itself never ellipsizes. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: clip;
+}
+
 .rd-context {
   font: var(--t14) / 1 var(--fm);
   color: var(--mute);
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -820,6 +874,37 @@ html[data-motion="reduced"] *::after {
   font-weight: 500;
 }
 
+/* The same content, shown at the head of the page body when the strip gives it up (#586 R3). It
+   wraps; it is never ellipsized. */
+.bar-context-mirror {
+  display: none;
+  margin: 0;
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  white-space: normal;
+}
+
+:root[data-bar-context="body"] .bar-context-mirror {
+  display: block;
+}
+
+/* The status words and the now-playing detail, under the strip whenever it gave them up (#586
+   B8). It wraps; it is never ellipsized. */
+.status-body-line {
+  flex: none;
+  margin: 0;
+  padding: var(--s2) var(--s6) 0;
+  color: var(--mute);
+  font: var(--t14) / 1.4 var(--fm);
+}
+
+@media (max-width: 720px) {
+  .status-body-line {
+    padding: var(--s2) var(--s3) 0;
+  }
+}
+
 /* The page's own actions, on the strip's right, before Pause and Search. */
 .rd-actions {
   display: flex;
@@ -828,6 +913,71 @@ html[data-motion="reduced"] *::after {
   padding-right: var(--s3);
   margin-right: var(--s1);
   border-right: 1px solid var(--line);
+}
+
+/* The forms the strip switches between: one is drawn at a time by the container rules above. */
+.rd-profile-dropdown {
+  display: none;
+}
+
+/* B10: one attribute, set by the strip's measurement, moves the secondary keys: they are in the
+   bar, or their overflow key is. Never both. */
+.rd-actions .rd-overflow {
+  display: none;
+}
+
+:root[data-bar-secondary="menu"] .rd-actions .rd-overflow {
+  display: inline-flex;
+}
+
+:root[data-bar-secondary="menu"] .rd-actions .rd-secondary {
+  display: none;
+}
+
+.bar-overflow-menu {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s2);
+}
+
+/* The bar's keys and the menu's keep their words at every width: a key that does not fit moves,
+   it is not reduced to its icon. */
+.rd-actions .rd-btn-text,
+.bar-overflow-menu .rd-btn-text {
+  display: inline;
+}
+
+/* While the strip measures, nothing shrinks or wraps: each part reports what it needs. */
+.strip[data-measure] .strip-row {
+  flex-wrap: nowrap;
+}
+
+.strip[data-measure] .strip-row > *,
+.strip[data-measure] .strip-now-text,
+.strip[data-measure] .rd-title,
+.strip[data-measure] .rd-title > *,
+.strip[data-measure] .rd-actions,
+.strip[data-measure] .rd-actions > * {
+  flex-shrink: 0;
+}
+
+.strip[data-measure] .strip-controls {
+  margin-left: 0;
+}
+
+/* Beside a name a person typed, only the name gives way. */
+.strip-row:has([data-bar-user-title]) > :not(.strip-slot),
+.rd-title:has([data-bar-user-title]) > :not(h1) {
+  flex-shrink: 0;
+}
+
+/* The pending count keeps its warning glyph when its words step down; the words stay in the
+   span's own accessible name. */
+.rd-peri-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
 }
 
 /* The strip's slots: an empty slot takes no room at all. */
@@ -1685,6 +1835,30 @@ button.chip:hover {
 
 .audio-picker .select-trigger {
   width: 100%;
+  height: auto;
+  min-height: var(--control-h);
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+/* #586 R8: a sentence is never ellipsized. The chosen value wraps inside the trigger wherever
+   the column is narrow, and its accessible name carries the value ("Audio source: ..."). */
+.audio-picker .select-value > * {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+
+@container page (max-width: 640px) {
+  .audio-picker-row {
+    flex-wrap: wrap;
+  }
+
+  .audio-picker {
+    flex: 1 1 100%;
+  }
+
 }
 
 .audio-state {
@@ -5760,28 +5934,59 @@ button.chip:hover {
     flex: 0 0 auto;
   }
 
-  /* The phone strip: one row. The brand, the page's title, what is playing, how it is going,
-     the page's own actions and the control. Now playing is the one that gives way: its name
-     shrinks to its colour when the row is full (R3: the strip carries it below 1280). */
-  .rd-context,
-  .strip-mark-text {
-    display: none;
+  /* #586 R8: the strip seeds its own height from the row count the page passes at render, so the
+     notice and the overlays below it do not jump on the first frame or between page states. */
+  :root {
+    --strip-h: 48px;
+  }
+  /* Two rows sit in a band tall enough to hold them whole. The count is set at render, so the
+     page below does not move between pages or states. */
+  :root:has(.strip[data-bar-rows="2"]) {
+    --strip-h: 92px;
   }
 
-  .strip-now {
-    display: inline-flex;
-    overflow: hidden;
+  .strip {
+    height: var(--strip-h);
   }
 
-  /* The name shows on every page here, whatever the page's own actions leave room for. */
-  .strip-inner:has(.rd-actions) .strip-now-text {
-    display: inline-flex;
+  .strip-inner {
+    height: 100%;
+    padding: 0 var(--s2);
+    box-sizing: border-box;
   }
 
-  /* The page's title and its actions keep their words; the brand mark makes room when the page
-     brings actions of its own. */
-  .strip-inner:has(.rd-actions) .strip-brand {
-    display: none;
+  .strip-row {
+    gap: var(--s1) var(--s2);
+    min-width: 0;
+  }
+
+  /* Pages with actions own two rows: the title above, the controls below. Both rows are fixed
+     for the page, whatever state it is in, and nothing in either row is ellipsized. */
+  .strip[data-bar-rows="2"] .strip-row {
+    /* The strip's measurement reads this: only here can the keys take a line of their own. */
+    --bar-wraps: 1;
+    flex-wrap: wrap;
+    align-content: center;
+    row-gap: 2px;
+  }
+  .strip[data-bar-rows="2"] .strip-brand,
+  .strip[data-bar-rows="2"] .rd-title {
+    order: 1;
+  }
+  .strip[data-bar-rows="2"] .strip-now {
+    order: 2;
+  }
+  .strip[data-bar-rows="2"] .strip-mark {
+    order: 3;
+  }
+  .strip[data-bar-rows="2"] .strip-controls {
+    order: 4;
+    margin-left: auto;
+  }
+  .strip[data-bar-rows="2"] .strip-page-actions {
+    order: 5;
+    flex-basis: 100%;
+    margin-left: 0;
   }
 
   .rd-title,
@@ -5789,13 +5994,6 @@ button.chip:hover {
   .strip-controls,
   .strip-mark {
     flex: none;
-  }
-
-  /* The profile picker and the like are tighter in the strip on a phone. */
-  .rd-actions,
-  .strip-controls,
-  .strip-inner:has(.rd-actions) {
-    gap: var(--s1);
   }
 
   .rd-title {
@@ -5811,35 +6009,23 @@ button.chip:hover {
     border-right: 0;
     padding-right: 0;
     margin-right: 0;
+    gap: var(--s1);
   }
 
-  /* The strip publishes its height for the floating notice. Before it does, the phone value is the
-     one it will publish, so the notice is not moved on the first frame. */
-  :root {
-    --strip-h: 48px;
+  .strip-controls {
+    gap: var(--s1);
   }
 
-  /* The phone strip: one row. The brand, what is playing, how it is going, and the control.
-     The row is the same height in every state, and the mark's text grows into the space beside
-     it, so nothing moves when the daemon answers or something breaks. */
-  .strip {
-    height: 48px;
+  /* On the keys' own line the unsent changes are said in words. */
+  .strip[data-bar-rows="2"] .rd-actions .rd-peri-pending-text {
+    display: inline;
+  }
+  .strip[data-bar-rows="2"] .rd-actions .rd-peri-pending::after {
+    content: none;
   }
 
-  .strip-inner {
-    gap: var(--s2);
-    height: 100%;
-    padding: 0 var(--s2);
-    box-sizing: border-box;
-  }
-
-  /* The phone has no room for the word: the mark stands for the name. */
+  /* The phone has no room for the wordmark: the mark stands for the app's name. */
   .strip-brand .wordmark {
-    display: none;
-  }
-
-  /* All is well is a tick on a phone: the words of a fault still have to fit beside it. */
-  .strip-mark[data-tone="ok"] .strip-mark-text {
     display: none;
   }
 
@@ -5848,20 +6034,8 @@ button.chip:hover {
     flex: none;
   }
 
-  /* The phone has room for the effect's name, not for the device count with it. */
-  .strip-now-detail[data-count="true"] {
-    display: none;
-  }
-
-  /* The power control is an icon on a phone: the row has no room for the words, and the
-     button's own label says what it does. */
-  .strip-power-text {
-    display: none;
-  }
-
   /* The state's icon never gives up width: it is the one status the phone row keeps. */
   .strip-mark {
-    flex: none;
     padding-left: var(--s1);
     padding-right: var(--s1);
   }
@@ -6555,19 +6729,6 @@ button.chip:hover {
     flex-wrap: wrap;
     gap: var(--s3);
     justify-content: flex-end;
-  }
-}
-
-/* The strip is outside the content box, so it follows the window, like the shell's own strip
-   rules do: the pending count and the Revert label give way to the title and Apply, which
-   have to fit at 390 px. */
-@media (max-width: 720px) {
-  .rd-peri-pending {
-    display: none;
-  }
-
-  .rd-peri-revert-label {
-    display: none;
   }
 }
 
@@ -7669,6 +7830,8 @@ button.chip:hover {
 
 /* The value at the end of a row: the page's own state, in figures. */
 .rail-value {
+  /* #586 R5: a user-named value is shown whole or not at all. RailValue measures it in JS and
+     hides it when it does not fit; title and the accessible name keep the full value. */
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -7676,8 +7839,11 @@ button.chip:hover {
   font-family: var(--fm);
   font-size: var(--t14);
   text-align: right;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.rail-value[data-fits="false"] {
+  visibility: hidden;
 }
 
 /* The connected devices are the one figure that is good news, so it is the one in colour. */
@@ -8066,22 +8232,9 @@ button.chip:hover {
 
 /* A very narrow phone (360 px): the profile picker and the strip's edges give a little more, and
    now playing (which has no room left) leaves the row. */
-@media (max-width: 430px) {
-  .rd-actions .seg-item {
-    padding-left: 6px;
-    padding-right: 6px;
-  }
-}
-
-@media (max-width: 380px) {
-  .strip-inner:has(.rd-actions) {
-    padding: 0 var(--s1);
-  }
-
-  .strip-inner:has(.rd-actions) .strip-now {
-    display: none;
-  }
-
+/* The tightest strip measures its own content box, not the window; the padding is the same in
+   every page state so nothing shifts when actions appear. */
+@container strip (max-width: 430px) {
   .rd-actions .seg-item {
     padding-left: 6px;
     padding-right: 6px;
@@ -8118,12 +8271,6 @@ button.chip:hover {
 /* Build mode keeps `Stack Â· N layers` beside the title at every desktop size: it is the one
    line that says what is open. The strip's own rule gives the context up below 1100 for the
    pages whose actions need the room; this page's actions are two keys. */
-@media (max-width: 1099px) {
-  .strip-inner:has(.rd-actions) .rd-context:has(.rd-stacks-context) {
-    display: inline;
-  }
-}
-
 .rd-stack-main,
 .rd-stack-side {
   min-width: 0;
@@ -9685,6 +9832,15 @@ button.chip:hover {
   border-color: var(--a2);
 }
 
+.rd-stack-strip-save[data-dirty="true"]::after {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
 .rd-unsaved {
   font-size: var(--t14);
   white-space: nowrap;
@@ -9726,18 +9882,7 @@ button.chip:hover {
   /* The builder's title yields to its one key: a long stack name ellipsises instead of pushing
      Save off the strip. The `Stack Â· N layers` context is a desktop line: the mockup's phone
      strip is the back key, the name and Save (D95.5.7). */
-  .strip-inner:has(.rd-stack-strip-save) .rd-title {
-    flex: 0 1 auto;
-    min-width: 0;
-  }
-
-  .strip-inner:has(.rd-stack-strip-save) .rd-title h1 {
-    max-width: 46vw;
-  }
-
-  .strip-inner:has(.rd-actions) .rd-context:has(.rd-stacks-context) {
-    display: none;
-  }
+  /* The builder's user-named title uses the shared middle-truncation rule; Save stays visible. */
 
   .app:has(.rd-stacks-phone) .main {
     height: 100dvh;

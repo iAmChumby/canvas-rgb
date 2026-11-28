@@ -142,12 +142,16 @@ describe("a dismissed fault says so and can be shown again (C2)", () => {
     expect(mark().textContent).not.toContain("All connected");
   });
 
-  it("keeps the full words and the dismissed mark on a phone", () => {
+  it("keeps the full words in the mark on a narrow strip, with the count in the badge", () => {
+    // #586 R4: the strip's own content box, not the window, decides whether the words are drawn.
+    // The same full sentence is always in the DOM; CSS hides it when the strip is narrow and the
+    // icon carries the short count.
     phoneRef.current = true;
     patchSnap({ status: status({ faults: [fault("1111111111111111", true)] }) });
     openStrip();
     const m = mark();
-    expect(m.textContent).toBe("1");
+    expect(m.textContent).toBe("1 warning, dismissed");
+    expect(m.querySelector("[data-count='1']")).toBeTruthy();
     expect(m.getAttribute("aria-label")).toBe("1 warning, dismissed");
     expect(m.getAttribute("title")).toBe("1 warning, dismissed");
     expect(m.getAttribute("data-dismissed")).toBe("true");

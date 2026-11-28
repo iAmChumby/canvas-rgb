@@ -187,7 +187,7 @@ describe("the stack builder", () => {
     // A layer change first, so the Save has something to write.
     fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
     await waitFor(() => expect(layerNames()).toHaveLength(4));
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save the stack/ }));
     await waitFor(() => expect(saveCalls()).toHaveLength(1));
     expect(saveCalls()[0]?.id).toBe("stack:Sunset glow");
     expect(saveCalls()[0]?.layers).toBe(4);
@@ -216,7 +216,7 @@ describe("the stack builder", () => {
       fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
       await waitFor(() => expect(layerNames()).toHaveLength(1));
 
-      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Save the stack/ }));
       const naming = await screen.findByRole("dialog", { name: "Name the stack" });
       fireEvent.change(within(naming).getByRole("textbox", { name: "Stack name" }), {
         target: { value: "sunset glow" },
@@ -468,7 +468,7 @@ describe("the stack builder", () => {
     expect(screen.getByText("No layers yet. Pick an effect from the library, or start with a stack.")).toBeTruthy();
     expect(screen.queryByText(/painted first/)).toBeNull();
     expect(document.querySelector(".rd-layers-empty ul")).toBeNull();
-    const save = screen.getByRole("button", { name: "Save" });
+    const save = screen.getByRole("button", { name: /^Save the stack/ });
     expect(save).toHaveProperty("disabled", true);
     const tryOn = screen.getByRole("button", { name: "Try on the lights" });
     expect(tryOn).toHaveProperty("disabled", true);
@@ -479,7 +479,7 @@ describe("the stack builder", () => {
   it("changes the picked layer's opacity, and the preview carries it", async () => {
     await openBuilder();
     await waitFor(() => expect(layerNames()).toContain("Sparkles"));
-    const row = screen.getByText("Sparkles").closest("li");
+    const row = screen.getAllByText("Sparkles")[0]?.closest("li");
     expect(row).not.toBeNull();
     if (row) fireEvent.click(row);
     previewCalls().length = 0;
@@ -539,7 +539,7 @@ describe("the stack builder", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
     await waitFor(() => expect(layerNames()).toHaveLength(1));
 
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save the stack/ }));
     const naming = await screen.findByRole("dialog", { name: "Name the stack" });
     fireEvent.change(within(naming).getByRole("textbox", { name: "Stack name" }), {
       target: { value: "Probe glow" },

@@ -47,7 +47,7 @@ import { api } from "@/lib/endpoints";
 import { ApiFailure, caught, toastText, type Failure } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
 import { SLOW_POLL_MS, getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
-import { PageActions, PageTitle } from "@/shell/PageHeader";
+import { BarContextMirror, BarOverflow, PageActions, PageTitle } from "@/shell/PageHeader";
 import { Popover } from "@/components/Popover";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
 import { requestNavigation } from "@/lib/navigationGuard";
@@ -1383,9 +1383,13 @@ export function EffectsView() {
           </span>
         }
       />
+      <BarContextMirror className="fig">
+        {effects === null || listStale ? "Effects could not be read" : `${list.length} effects`}
+      </BarContextMirror>
       <PageActions>
         {groupHref && (
           <ButtonLink
+            className="rd-secondary"
             href={groupHref}
             variant="ghost"
             size="sm"
@@ -1397,6 +1401,8 @@ export function EffectsView() {
         )}
         <span ref={newRef} className="row-wrap">
           <Button
+            data-bar-primary=""
+            data-short="New"
             size="sm"
             variant="primary"
             icon={<Plus size={15} />}
@@ -1408,9 +1414,10 @@ export function EffectsView() {
             title={editing ? "Finish editing first" : "A stack, a pattern, or an HTML effect"}
             onClick={() => setNewMenu((open) => !open)}
           >
-            <span className="rd-btn-text">New effect</span>
+            <span className="rd-btn-text" data-short="New">New effect</span>
           </Button>
         </span>
+        <span className="rd-secondary">
         <FileButton
           accept=".html,text/html"
           icon={<UploadSimple size={16} />}
@@ -1421,6 +1428,18 @@ export function EffectsView() {
         >
           <span className="rd-btn-text">Import</span>
         </FileButton>
+        </span>
+        {/* B10: the keys that do not fit the bar are in the one overflow menu. */}
+        <BarOverflow>
+          {groupHref && (
+            <ButtonLink href={groupHref} variant="ghost" size="sm" icon={<CaretLeft size={15} />} label={groupName ? `Back to ${groupName}` : "Back to the scene"}>
+              <span className="rd-btn-text">{groupName ? `Back to ${groupName}` : "Back to the scene"}</span>
+            </ButtonLink>
+          )}
+          <FileButton accept=".html,text/html" icon={<UploadSimple size={16} />} disabled={editing} busy={importing} label="Import" onFile={(file) => void sendImport(file, false)}>
+            <span className="rd-btn-text">Import</span>
+          </FileButton>
+        </BarOverflow>
       </PageActions>
 
       {/* New effect's three ways in. The menu is a popover, so opening it takes no room in the

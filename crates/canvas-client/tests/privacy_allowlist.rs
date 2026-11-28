@@ -444,8 +444,8 @@ fn every_outbound_host_and_client_is_in_the_privacy_table() {
     // #579 added lib/previewMode.ts, lib/storage.ts, lib/setup.ts, shell/PreviewMarker.tsx and
     // three files in views/setup: seven files, with no new network access.
     // #575/#576 added the diagnostics bundle, the report and the error anatomy: thirteen
-    // files, with no new network access. 490 on main + 7 (#579) + 13 (#575/#576).
-    assert_eq!(files.len(), 510, "the set of scanned source files moved");
+    // files, with no new network access. 490 on main + 7 (#579) + 13 (#575/#576), +1 (#586, shell/barFit.ts).
+    assert_eq!(files.len(), 511, "the set of scanned source files moved");
     assert_eq!(found_hosts.len(), 4, "the set of outbound hosts moved");
     assert_eq!(found_tokens.len(), 8, "the set of connection constructors moved");
     assert!(

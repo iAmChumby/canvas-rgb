@@ -18,6 +18,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Docs: `docs/privacy.md` lists, in plain words and with file-by-file evidence, the app's network requests — the daily update check (including a probe of a failed feed), the optional experimental feed, the signed installer, the OpenRGB download during setup and a shipped setup helper that downloads only when run by hand — and everything that stays local. The site is out of scope. (#581)
 - Safe start: after a run that crashed, the app starts with fans on BIOS control, user effects and the saved scene off, and every light on (at least 20% bright) playing the built-in Breathing effect. A banner, the status strip, the tray, `canvas-rgb status` and Help & About show the state and offer Start normally. (#577)
 
+### Changed
+
+- Editor: the page bar, the status strip and the rail now follow one priority order measured from their own width. A page's title never shrinks, the profile switch becomes a dropdown and secondary keys move to the overflow when space is short, the rail shows a value whole or not at all, pages with actions get a fixed two-row bar on a phone, and the audio-source value wraps instead of being cut. (#586)
+
 ### Fixed
 
 - Credits: expanded licence texts reflow into paragraphs that wrap at any window width, keeping notice numbers, headings and copyright lines on their own lines. (#584)
