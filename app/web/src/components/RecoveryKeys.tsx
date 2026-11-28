@@ -7,7 +7,7 @@ import { ErrorState, KeyRow } from "@/components/ErrorState";
 import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { ReportIssue } from "@/components/ReportIssue";
-import { openLogsFolder, openServiceLogsFolder, reportPrefill, tauriHost } from "@/lib/host";
+import { isDemo, openLogsFolder, openServiceLogsFolder, reportPrefill } from "@/lib/host";
 import { caught, type Failure } from "@/lib/errors";
 import type { AboutReport } from "@/proto/AboutReport";
 
@@ -31,7 +31,7 @@ export function RecoveryKeys({
   const [report, setReport] = useState<AboutReport | null>(null);
   const [refused, setRefused] = useState<Failure | null>(null);
   const [copied, setCopied] = useState(false);
-  const tray = tauriHost() !== null;
+  const tray = !isDemo();
 
   const showReport = () => {
     setPanel("report");

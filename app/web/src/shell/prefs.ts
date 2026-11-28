@@ -1,5 +1,8 @@
 "use client";
 
+import { previewActive } from "@/lib/previewMode";
+import { storeLocal } from "@/lib/storage";
+
 /**
  * The two preferences the editor keeps for this viewer: the theme and how much
  * motion the interface uses. Both live in localStorage and are applied to the
@@ -12,8 +15,12 @@ export const THEME_KEY = "canvas-rgb.theme";
 export type MotionPref = "full" | "reduced";
 export const MOTION_KEY = "canvas-rgb.motion";
 
+/** A preview's own choices (#579): it writes nothing, so they live with the page. */
+const previewChoice: { theme?: Theme; motion?: MotionPref } = {};
+
 export function readTheme(): Theme {
   if (typeof window === "undefined") return "system";
+  if (previewChoice.theme) return previewChoice.theme;
   try {
     const v = window.localStorage.getItem(THEME_KEY);
     if (v === "light" || v === "dark") return v;
@@ -25,6 +32,7 @@ export function readTheme(): Theme {
 
 export function readMotion(): MotionPref {
   if (typeof window === "undefined") return "full";
+  if (previewChoice.motion) return previewChoice.motion;
   try {
     const v = window.localStorage.getItem(MOTION_KEY);
     if (v === "reduced") return "reduced";
@@ -63,8 +71,9 @@ export function applyTheme(theme: Theme): void {
   } else {
     set();
   }
+  if (previewActive()) previewChoice.theme = theme;
   try {
-    window.localStorage.setItem(THEME_KEY, theme);
+    storeLocal(THEME_KEY, theme);
   } catch {
     // The choice still applies for this session.
   }
@@ -75,8 +84,9 @@ export function applyMotion(pref: MotionPref): void {
   const root = document.documentElement;
   if (pref === "reduced") root.setAttribute("data-motion", "reduced");
   else root.removeAttribute("data-motion");
+  if (previewActive()) previewChoice.motion = pref;
   try {
-    window.localStorage.setItem(MOTION_KEY, pref);
+    storeLocal(MOTION_KEY, pref);
   } catch {
     // The choice still applies for this session.
   }

@@ -6,7 +6,7 @@ import { Button } from "@/components/Button";
 import { ErrorState } from "@/components/ErrorState";
 import { Panel } from "@/components/Panel";
 import { InlineSkeleton } from "@/components/Skeleton";
-import { diagBundleList, diagBundleSave, revealDiagBundle, tauriHost } from "@/lib/host";
+import { diagBundleList, diagBundleSave, isDemo, revealDiagBundle } from "@/lib/host";
 import type { DiagBundle } from "@/proto/DiagBundle";
 import s from "./DiagnosticsPanel.module.css";
 
@@ -21,7 +21,7 @@ export function DiagnosticsPanel({ compact = false }: { compact?: boolean }) {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const available = tauriHost() !== null;
+  const available = !isDemo();
 
   const load = useCallback(() => {
     diagBundleList()

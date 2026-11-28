@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect } from "react";
-import { api } from "@/lib/endpoints";
-import { refreshStatus } from "@/lib/store";
+import { Eye } from "@phosphor-icons/react";
+import { Button } from "@/components/Button";
+import { enterPreview } from "@/lib/previewMode";
 import { HelloStep } from "@/views/editor/HelloStep";
-import { putOffUntilNextLaunch } from "@/views/editor/flow";
+import { markHelloSeen, putOffSetup } from "@/views/editor/flow";
 import { useOnboardEffects } from "@/views/editor/onboardEffects";
 import { setTakeover } from "@/views/editor/takeover";
 import s from "@/views/editor/onboarding.module.css";
@@ -30,18 +31,16 @@ export function Onboarding({
     return () => setTakeover(false);
   }, []);
 
-  const finish = async () => {
-    try {
-      await api.completeOnboarding();
-      await refreshStatus();
-    } catch {
-      // The greeting closes anyway; it opens again at the next start if the daemon never heard.
-    }
+  // The checklist on Scenes takes it from here; its "Done" ends the onboarding (#579). Either
+  // way out, the hello has been seen and does not open by itself again.
+  const finish = () => {
+    markHelloSeen();
     onDone();
   };
 
   const later = () => {
-    putOffUntilNextLaunch();
+    markHelloSeen();
+    putOffSetup();
     onDone();
   };
 
@@ -50,7 +49,12 @@ export function Onboarding({
       <div className={s.main} data-solo="true">
         <section className={s.panel} aria-label="Hello">
           <div className={s.stepWrap}>
-            <HelloStep onStart={() => void finish()} onLater={later} play={play} />
+            <HelloStep onStart={finish} onLater={later} play={play} />
+          </div>
+          <div className={s.preview}>
+            <Button size="sm" variant="ghost" icon={<Eye size={16} />} onClick={enterPreview}>
+              See it without hardware
+            </Button>
           </div>
         </section>
       </div>

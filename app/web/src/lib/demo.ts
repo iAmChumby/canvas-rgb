@@ -9,6 +9,8 @@
 
 import { ApiFailure } from "@/lib/errors";
 import { driven } from "@/lib/drive";
+import { previewActive } from "@/lib/previewMode";
+import { storeLocal } from "@/lib/storage";
 import { baseFloor } from "@/lib/fan-rules";
 import { demoThumbnail, thumbnailBytes } from "@/lib/thumb-demo";
 import {
@@ -377,8 +379,9 @@ function initialState(): DemoState {
   const fanModes: Record<string, FanMode> = {};
   for (const h of FAN_HEADERS) fanModes[h.id] = profile?.headers[h.id] ?? { mode: "bios" };
   const favorites = new Set(EFFECTS.filter((e) => e.summary.favorite).map((e) => e.schema.id));
-  let onboarded = onboardingDone();
-  if (s.has("persist")) {
+  // A preview (#579) shows the checklist at work, and remembers nothing.
+  let onboarded = !previewActive() && onboardingDone();
+  if (s.has("persist") && !previewActive()) {
     try {
       if (window.localStorage.getItem(DEMO_ONBOARDED_KEY) === "1") onboarded = true;
     } catch {
@@ -2778,7 +2781,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   if (head === "onboarding" && seg[1] === "complete" && method === "POST") {
     s.onboardingComplete = true;
     try {
-      window.localStorage.setItem(DEMO_ONBOARDED_KEY, "1");
+      storeLocal(DEMO_ONBOARDED_KEY, "1");
     } catch {
       // Not remembered across a reload.
     }

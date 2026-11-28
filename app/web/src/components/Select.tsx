@@ -35,9 +35,12 @@ export function Select({
   onChange,
   disabled,
   loading = false,
+  nameIncludesValue = false,
 }: {
   value: string;
   label: string;
+  /** The accessible name says the chosen value too, when the trigger wraps it out of sight (#586 R8). */
+  nameIncludesValue?: boolean;
   options: SelectOption[];
   /** Grouped options (#166): when given, the list shows group headings and
    *  `options` is the same rows flattened. Headings are not selectable. */
@@ -211,7 +214,7 @@ export function Select({
         type="button"
         role="combobox"
         className="select-trigger"
-        aria-label={label}
+        aria-label={nameIncludesValue ? `${label}: ${flat[chosen]?.label ?? ""}` : label}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={`${id}-list`}

@@ -564,6 +564,12 @@ export function DevicesView() {
           )
         }
       />
+      {/* #586 R6: the connected count stays in the rail; the LED count belongs to the page. */}
+      {devices && (
+        <p className="bar-context-mirror fig">
+          {litCount} {litCount === 1 ? "LED" : "LEDs"}
+        </p>
+      )}
 
       {/* The list is on screen but the last read failed: the cards stay and the page says they
           may be old. */}

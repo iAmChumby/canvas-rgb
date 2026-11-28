@@ -21,6 +21,7 @@ import {
   EVT_UPDATE_STATE,
 } from "@/proto/tauri";
 import type { ApiConfig } from "@/proto/ApiConfig";
+import { previewActive } from "@/lib/previewMode";
 import type { DiagBundle } from "@/proto/DiagBundle";
 import type { EditorChoice } from "@/proto/EditorChoice";
 import type { TrayPrefs } from "@/proto/TrayPrefs";
@@ -52,17 +53,25 @@ export function tauriHost(): TauriGlobal | null {
 }
 
 export function isDemo(): boolean {
-  return tauriHost() === null;
+  return previewActive() || tauriHost() === null;
+}
+
+/**
+ * The tray, for a command that reads or changes the real PC. A preview (#579) has none: each of
+ * them answers as it does in a plain browser.
+ */
+function trayHost(): TauriGlobal | null {
+  return previewActive() ? null : tauriHost();
 }
 
 export async function fetchApiConfig(): Promise<ApiConfig> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) throw new Error("no Tauri host");
   return (await host.core.invoke(CMD_GET_API_CONFIG)) as ApiConfig;
 }
 
 export async function openLogsFolder(): Promise<void> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return;
   await host.core.invoke(CMD_OPEN_LOGS_FOLDER);
 }
@@ -82,21 +91,21 @@ export interface ReportPrefill {
 }
 
 export async function reportPrefill(): Promise<ReportPrefill> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) throw new Error("The report needs the tray app.");
   return (await host.core.invoke(CMD_REPORT_PREFILL)) as ReportPrefill;
 }
 
 /** What a diagnostics zip would hold. No daemon needed: the tray reads the files itself. */
 export async function diagBundleList(): Promise<DiagBundle> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) throw new Error("Save diagnostics is available in the tray app only.");
   return (await host.core.invoke(CMD_DIAG_LIST)) as DiagBundle;
 }
 
 /** Writes the zip and returns where it went. */
 export async function diagBundleSave(): Promise<DiagBundle> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) throw new Error("Save diagnostics is available in the tray app only.");
   // No destination argument: the tray writes to the one fixed folder (P2).
   return (await host.core.invoke(CMD_DIAG_SAVE)) as DiagBundle;
@@ -104,14 +113,14 @@ export async function diagBundleSave(): Promise<DiagBundle> {
 
 /** Reveals the saved zip in Explorer with the file selected. */
 export async function revealDiagBundle(path: string): Promise<void> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return;
   await host.core.invoke(CMD_REVEAL_DIAG, { path });
 }
 
 /** Opens the service's own log folder by its fixed path, never creating or writing to it. */
 export async function openServiceLogsFolder(): Promise<void> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return;
   await host.core.invoke(CMD_OPEN_SERVICE_LOGS);
 }
@@ -148,7 +157,7 @@ export async function onNavigate(handler: (page: string) => void): Promise<Unlis
 
 /** Listens for the daemon's state-changed event (the editor refetches). */
 export async function onStateChanged(handler: () => void): Promise<Unlisten> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return () => undefined;
   return host.event.listen(EVT_STATE_CHANGED, () => handler());
 }
@@ -163,12 +172,12 @@ function isUpdateState(v: unknown): v is UpdateState {
 
 /** True when update controls can act: inside the tray, or in a browser with a fixture. */
 export function canUpdate(): boolean {
-  return tauriHost() !== null || demoUpdateActive();
+  return trayHost() !== null || demoUpdateActive();
 }
 
 /** Runs one update command. Returns the state when the command answers with one. */
 async function updateCall(cmd: string, args?: Record<string, unknown>): Promise<UpdateState | null> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return demoUpdateActive() ? demoUpdateCommand(cmd, args) : null;
   const out = await host.core.invoke(cmd, args);
   return isUpdateState(out) ? out : null;
@@ -185,7 +194,7 @@ export const updateDismissUpdated = () => updateCall(CMD_UPDATE_DISMISS_UPDATED)
 
 /** Listens for the tray's update-state event. Returns an unlisten function. */
 export async function onUpdateState(handler: (state: UpdateState) => void): Promise<Unlisten> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return () => undefined;
   return host.event.listen(EVT_UPDATE_STATE, (e) => {
     if (isUpdateState(e.payload)) handler(e.payload);
@@ -198,14 +207,14 @@ export async function onUpdateState(handler: (state: UpdateState) => void): Prom
 
 /** The tray's preferences: which editor it opens and which update feed it reads. */
 export async function getTrayPrefs(): Promise<TrayPrefs> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return demoTrayPrefs();
   return (await host.core.invoke(CMD_TRAY_PREFS)) as TrayPrefs;
 }
 
 /** Sets the update channel. The tray keeps it and checks the feeds again. */
 export async function setUpdateChannel(channel: UpdateChannel): Promise<TrayPrefs> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return demoSetChannel(channel);
   return (await host.core.invoke(CMD_SET_CHANNEL, { channel })) as TrayPrefs;
 }
@@ -215,7 +224,7 @@ export async function setUpdateChannel(channel: UpdateChannel): Promise<TrayPref
  * other one, on the same page. Only an experimental build has the choice: a stable tray refuses.
  */
 export async function setEditor(editor: EditorChoice): Promise<TrayPrefs> {
-  const host = tauriHost();
+  const host = trayHost();
   if (!host) return demoSetEditor(editor);
   return (await host.core.invoke(CMD_SET_EDITOR, { editor })) as TrayPrefs;
 }

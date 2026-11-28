@@ -18,17 +18,37 @@ import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { DaemonDown } from "@/components/DaemonDown";
 import { EngineDown } from "@/components/EngineDown";
 import { RailResizeHandle } from "@/components/RailResizeHandle";
-import { links, playingLine } from "@/lib/status";
+import { links, playing, playingLine } from "@/lib/status";
 import { sceneCommands } from "@/shell/commands";
 import { useTakeover } from "@/views/editor/takeover";
-import { StripSlotsProvider } from "@/shell/PageHeader";
+import { StripSlotsProvider, useBarFlag } from "@/shell/PageHeader";
 import { PAGE_PATHS } from "@/shell/pagePaths";
+import { PreviewMarker } from "@/shell/PreviewMarker";
+import { keepPreviewInAddress } from "@/lib/previewMode";
 
 /**
  * The persistent frame: left rail (a bottom bar on narrow screens), the status strip, the
  * global banners, then the page. It owns the sync loop, the preview socket (open only while the
  * window is visible), the live-hue tint, and the tray's navigate event.
  */
+/** B8: the strip's status words and the now-playing detail get a visible home in the page body
+ *  whenever the strip had to give them up. The popover keeps the same words one click away. */
+function StatusBodyLine() {
+  const inBody = useBarFlag("barStatus", "body");
+  // The name is said once (B11): the line holds it only when neither the rail's deck nor the
+  // strip draws it. Beside the strip's name, the line keeps the detail alone.
+  const inRail = useBarFlag("nowWhere", "rail");
+  const inStrip = useBarFlag("nowWhere", "strip");
+  const status = useSnap((s) => s.status);
+  const statusFault = useSnap((s) => s.statusFault);
+  const effects = useSnap((s) => s.effects);
+  if (!inBody || !status) return null;
+  const { detail } = playing(status, effects);
+  const linkWords = links(status, statusFault).map((l) => `${l.name} ${l.state}`).join(" · ");
+  const lead = inRail ? "" : inStrip ? detail.charAt(0).toUpperCase() + detail.slice(1) : playingLine(status, effects);
+  return <p className="status-body-line">{lead ? `${lead} · ${linkWords}` : linkWords}</p>;
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   return (
     <StripSlotsProvider>
@@ -61,6 +81,9 @@ function Frame({ children }: { children: ReactNode }) {
   const answered = status !== null || statusError !== null;
 
   useEffect(() => startSync(), []);
+
+  // An in-app link drops the query; a reload has to find the preview flag still there (#579).
+  useEffect(() => keepPreviewInAddress());
 
   useEffect(() => {
     const stopTint = startHueTint();
@@ -263,6 +286,7 @@ function Frame({ children }: { children: ReactNode }) {
         </div>
       )}
       <div className="main">
+        <PreviewMarker />
         {!takeover && (
           <>
             <StatusStrip
@@ -278,6 +302,7 @@ function Frame({ children }: { children: ReactNode }) {
             a size container, and a size container is the containing block of a fixed box, which
             would pull the lane up under the status strip. */}
         <NotifyHost />
+        <StatusBodyLine />
         <main className="content">
           {/* canvas-rgb is up and its render engine is not answering (#241): the daemon's
               own words are shown, and starting it again would not help. */}

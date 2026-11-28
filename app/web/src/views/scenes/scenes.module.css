@@ -635,21 +635,14 @@
 }
 
 /* ---------- the status strip, while this page is open ---------- */
-/* The page's context line is the scene's name and what is in it. The name ellipsizes; the counts
-   give way first. */
+/* The page's context line is the scene's name and what is in it. Neither is ever cut: the strip
+   moves the whole line to the head of the body when it does not fit (#586), and there it wraps. */
 :global(.rd-scenes-context) {
   display: inline-flex;
   align-items: baseline;
-  min-width: 0;
-  max-width: 100%;
 }
 
 :global(.rd-scenes-context) > b {
-  display: block;
-  min-width: 0;
-  max-width: 32ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -658,31 +651,17 @@
   white-space: pre;
 }
 
-/* Between a phone and a wide window the strip has room for the scene's name and for the mark's
-   words, and the page's own keys are two icons: the context stays (the strip's rule drops it below
-   1100 for pages with more keys), and the dot that stood for "now playing" is gone, since the name
-   is already there. Nothing in the strip is a bare dot or a bare tick. */
-@media (min-width: 721px) and (max-width: 1279px) {
-  :global(.strip-inner):has(:global(.rd-scenes-context)) :global(.strip-now) {
-    display: none;
-  }
-
-  :global(.strip-inner):has(:global(.rd-scenes-context)) :global(.strip-mark-text) {
-    display: inline;
-    padding-left: var(--s1);
-  }
+:global(.scene-context-mirror .rd-scenes-context) {
+  flex-wrap: wrap;
 }
 
-@media (min-width: 721px) and (max-width: 1099px) {
-  :global(.strip-inner):has(:global(.rd-actions)) :global(.rd-context):has(:global(.rd-scenes-context)) {
-    display: block;
-  }
-
-  /* Below 1100 the counts are the first thing to go: the name and the state matter more. */
-  :global(.rd-scenes-counts) {
-    display: none;
-  }
+:global(.scene-context-mirror .rd-scenes-context) > b {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
+
+/* #586 R3: the scene line follows the strip's own content box, not the window. The strip moves
+   the name and its rename field to the body together; nothing here needs viewport guesses. */
 
 /* A phone's strip keeps the mark to its icon on this page too (#422). The scene's name beside it
    is the thing to read, and the mark's words took the room the name needed: "Evening" came out

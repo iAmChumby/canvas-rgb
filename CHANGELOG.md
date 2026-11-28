@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- First run now leads to a setup checklist on Scenes that ticks itself off, can be hidden at any time and reopened from Help, and "See it without hardware" shows the editor on sample data without touching your PC. (#579)
 - Errors: every error body is scrubbed at the API edge, so a profile path never reaches the editor, and each error carries the next step. Inline errors share one anatomy with a key row; the daemon-down and engine-down pages and the fan-service banner offer Try again, logs, diagnostics, a pre-filled report and Copy details. (#576)
 - Diagnostics: Save diagnostics lists the files before saving, then gives the zip's path, the number of names replaced and a Reveal in Explorer key. The zip scrubs every text file, replaces each device id and USB location with one stable alias across all files and logs, and includes service logs only when the folder passes the fail-closed check. The tray can save it with the daemon down. (#575)
 - Report issue: Help & About and the recovery pages preview one pre-filled issue address built from the scrubbed report; the address opens only on click and stays under 6000 encoded characters, dropping hardware first and copying the full text when it has to cut. (#575)
@@ -17,8 +18,14 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Docs: `docs/privacy.md` lists, in plain words and with file-by-file evidence, the app's network requests — the daily update check (including a probe of a failed feed), the optional experimental feed, the signed installer, the OpenRGB download during setup and a shipped setup helper that downloads only when run by hand — and everything that stays local. The site is out of scope. (#581)
 - Safe start: after a run that crashed, the app starts with fans on BIOS control, user effects and the saved scene off, and every light on (at least 20% bright) playing the built-in Breathing effect. A banner, the status strip, the tray, `canvas-rgb status` and Help & About show the state and offer Start normally. (#577)
 
+### Changed
+
+- Editor: the page bar, the status strip and the rail now follow one priority order measured from their own width. A page's title never shrinks, the profile switch becomes a dropdown and secondary keys move to the overflow when space is short, the rail shows a value whole or not at all, pages with actions get a fixed two-row bar on a phone, and the audio-source value wraps instead of being cut. The name of what is playing is shown once, moving to the keys' line or into the page when the title's line cannot hold it. (#586)
+
 ### Fixed
 
+- Preview: Help & About now says the app's identity and system report are available in the tray app only, instead of showing a failed read on sample data. (#579)
+- Setup checklist: "Lights found" no longer ticks from a device count the light engine left behind when it stopped answering. (#579)
 - Credits: expanded licence texts reflow into paragraphs that wrap at any window width, keeping notice numbers, headings and copyright lines on their own lines. (#584)
 - Credits: the installer now ships the page's third-party notices, each notice carries its copyright holder, and credited links open in your browser instead of the editor window. (#578)
 - Help & About: the report now scrubs the real 8.3 short name of the profile and only whole user or machine names, free-text device names cannot add rows or cells to the report, a disconnected service is no longer shown as connected, "Last run" reads in plain words, and the page's links and receipt no longer overlap or move as they load. Go-to addresses stay on one line with the full URL on hover, and release notes are linked once, in the identity panel. (#583)

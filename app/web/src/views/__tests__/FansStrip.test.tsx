@@ -84,7 +84,9 @@ describe("the fan profiles in the strip", () => {
     const group = await screen.findByRole("radiogroup", { name: "The fan profile" });
     expect(strip.contains(group)).toBe(true);
     expect(within(group).getByRole("radio", { name: "Default" }).getAttribute("aria-checked")).toBe("true");
+    // R7: the label says only the verb; the selected profile is the switch beside it.
     expect(strip.contains(screen.getByRole("button", { name: "Save Default" }))).toBe(true);
+    expect(strip.textContent).toContain("Save");
 
     // The menu is closed until it is asked for, and then it holds the rest.
     expect(screen.queryByRole("dialog", { name: "The fan profiles" })).toBeNull();

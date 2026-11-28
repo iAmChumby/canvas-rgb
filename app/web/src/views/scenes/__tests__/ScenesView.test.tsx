@@ -618,15 +618,15 @@ describe("the Scenes page", () => {
   });
 
   // Plan Step 2 (Task 12): the first run's hello leads to Scenes, and nothing else. The hello is
-  // the whole window until "Continue" finishes the onboarding (Onboarding.finish ->
-  // api.completeOnboarding -> refreshStatus -> onDone), and the page behind it is this one.
+  // the whole window until "Continue", and the page behind it is this one, with the setup
+  // checklist beside it (#579): the checklist's "Done" finishes the onboarding, not the hello.
   it("the first run opens Scenes after the hello step", async () => {
     const firstRun = {
       onboarding_complete: false,
       openrgb: "connected",
       conflicts: [],
     } as unknown as Status;
-    api.status.mockResolvedValue({ ...firstRun, onboarding_complete: true });
+    api.status.mockResolvedValue(firstRun);
     api.completeOnboarding.mockResolvedValue(undefined);
     api.activateEffect.mockResolvedValue(undefined);
     patchSnap({
@@ -660,8 +660,9 @@ describe("the Scenes page", () => {
       fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     });
 
-    expect(api.completeOnboarding).toHaveBeenCalledTimes(1);
-    expect(api.status).toHaveBeenCalled();
+    expect(api.completeOnboarding).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("canvas-rgb.hello-seen")).toBe("1");
+    expect(screen.getByRole("complementary", { name: "Setup checklist" })).toBeTruthy();
     // The greeting is gone and the page behind it is Scenes: its rows are what it leads to.
     expect(screen.queryByRole("region", { name: "Hello" })).toBeNull();
     expect(screen.getByTestId("unassigned-row")).toBeTruthy();
@@ -896,5 +897,69 @@ describe("the Scenes page in safe start (#577)", () => {
     mount(fake());
     expect(screen.queryByText("Off in safe start")).toBeNull();
     expect(writeListeners.size).toBe(0);
+  });
+});
+
+describe("the Scenes page beside the strip (#586 B11)", () => {
+  const playing = (name: string) =>
+    patchSnap({
+      status: {
+        active_scene: { id: "gaming", name },
+        active_effects: [],
+        devices_connected: 5,
+        devices_total: 5,
+        power: "running",
+        parked: false,
+        openrgb: "connected",
+        faults: [],
+        conflicts: [],
+        onboarding_complete: true,
+      } as unknown as Status,
+    });
+  const mirror = () => document.querySelector(".scene-context-mirror")?.textContent ?? "";
+  const flag = async (key: "nowWhere" | "barSecondary", value: string) => {
+    await act(async () => {
+      document.documentElement.dataset[key] = value;
+    });
+  };
+
+  afterEach(() => {
+    delete document.documentElement.dataset.nowWhere;
+    delete document.documentElement.dataset.barSecondary;
+  });
+
+  it("leaves the name to the strip or the body line while one of them says it", async () => {
+    const use = fake();
+    playing((use.scene as Scene).name);
+    mount(use);
+    const name = (use.scene as Scene).name;
+    await flag("nowWhere", "rail");
+    expect(mirror()).toContain(name);
+    await flag("nowWhere", "strip");
+    expect(mirror()).not.toContain(name);
+    expect(mirror()).toMatch(/groups/);
+    await flag("nowWhere", "body");
+    expect(mirror()).not.toContain(name);
+  });
+
+  it("keeps the name of a scene that is not the one playing", async () => {
+    const use = fake();
+    playing("Another scene");
+    mount(use);
+    await flag("nowWhere", "strip");
+    expect(mirror()).toContain((use.scene as Scene).name);
+  });
+
+  it("keeps Undo and Redo in the scene's menu when the bar cannot hold them", async () => {
+    const use = fake({ canUndo: true, canRedo: true });
+    mount(use);
+    await flag("barSecondary", "menu");
+    fireEvent.click(screen.getByRole("button", { name: "More about this scene" }));
+    const menu = screen.getByRole("dialog", { name: "More about this scene" });
+    fireEvent.click(within(menu).getByRole("button", { name: "Undo" }));
+    expect(use.calls.undo).toEqual([[]]);
+    fireEvent.click(screen.getByRole("button", { name: "More about this scene" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "More about this scene" })).getByRole("button", { name: "Redo" }));
+    expect(use.calls.redo).toEqual([[]]);
   });
 });

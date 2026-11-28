@@ -1,5 +1,6 @@
 "use client";
 
+import { storeLocal } from "@/lib/storage";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, FloppyDisk, ListChecks, Minus, Plus, Trash, WarningCircle, X } from "@phosphor-icons/react";
 import { Button, ButtonLink, IconButton, WaitMark } from "@/components/Button";
@@ -131,7 +132,7 @@ function readKnownHeaders(): KnownHeader[] {
 
 function writeKnownHeaders(list: KnownHeader[]): void {
   try {
-    window.localStorage.setItem(KNOWN_HEADERS_KEY, JSON.stringify(list));
+    storeLocal(KNOWN_HEADERS_KEY, JSON.stringify(list));
   } catch {
     // Storage can be blocked; the page still works without the memory.
   }
@@ -257,13 +258,22 @@ export function FansView() {
       <PageTitle
         title="Fans"
         context={
-          fans && !fansError ? (
+          fans ? (
             <>
               {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
             </>
           ) : undefined
         }
       />
+      {/* A stale read keeps the last values on screen (#576 K1), so the header blocks stay with
+          them and nothing below moves; only a failed first load (no fans yet) has none. */}
+      {/* R3: when the strip cannot hold the context, the same chip line is the first line of the
+          body. CSS shows one copy: the strip decides from its own content box. */}
+      {fans && (
+        <p className="bar-context-mirror fig">
+          {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
+        </p>
+      )}
       {chipFault && !chipFault.dismissed && (
         <FaultNote
           parts={chipFault}
@@ -274,7 +284,7 @@ export function FansView() {
           </ButtonLink>
         </FaultNote>
       )}
-      {fans && !fansError && <FanProfileActions fans={fans} />}
+      {fans && <FanProfileActions fans={fans} />}
 
       <StaleNotice
         message="The fan readings may be out of date."
@@ -679,13 +689,26 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
 
   return (
     <PageActions>
-      <Segmented
-        label="The fan profile"
-        value={fans.active_profile}
-        options={fans.profiles.map((p) => ({ value: p, label: p }))}
-        onChange={(p) => void run(() => api.switchFanProfile(p))}
-      />
+      <span className="rd-profile-segments">
+        <Segmented
+          label="The fan profile"
+          value={fans.active_profile}
+          options={fans.profiles.map((p) => ({ value: p, label: p }))}
+          onChange={(p) => void run(() => api.switchFanProfile(p))}
+        />
+      </span>
+      {/* The switch becomes a dropdown when the strip is short; the active value stays visible. */}
+      <span className="rd-profile-dropdown">
+        <Select
+          label="Fan profile"
+          nameIncludesValue
+          value={fans.active_profile}
+          options={fans.profiles.map((p) => ({ value: p, label: p }))}
+          onChange={(p) => void run(() => api.switchFanProfile(p))}
+        />
+      </span>
       <Button
+        data-bar-primary=""
         variant="primary"
         size="sm"
         icon={<FloppyDisk size={14} />}
@@ -697,7 +720,8 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
           )
         }
       >
-        <span className="rd-btn-text">Save {fans.active_profile}</span>
+        {/* "Save" says what the key does; the profile selected beside it says which one. */}
+        <span className="rd-btn-text" data-short="Save">Save</span>
       </Button>
       <span ref={moreRef} className="row-wrap">
         <IconButton

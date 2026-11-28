@@ -1,0 +1,34 @@
+/* The preview's mode marker (#579): one fixed-height row with an edge in the warning hue. */
+.marker {
+  display: none;
+}
+
+:global(html[data-preview="on"]) .marker {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--s3);
+  height: 48px;
+  padding: 0 var(--s6);
+  border-bottom: 2px solid var(--warn);
+  background: var(--warn-wash);
+  color: var(--ink);
+}
+
+.words {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font: 500 var(--t14) / 1.25 var(--fm);
+}
+
+.marker .leave {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 720px) {
+  :global(html[data-preview="on"]) .marker {
+    gap: var(--s2);
+    padding: 0 var(--s3);
+  }
+}

@@ -25,7 +25,7 @@ import {
   uacLine,
 } from "@/lib/updateWords";
 import type { UpdateState } from "@/proto/UpdateState";
-import { PageTitle } from "@/shell/PageHeader";
+import { BarContextMirror, PageTitle } from "@/shell/PageHeader";
 import { WhatsNewPanel } from "@/views/updates/ReleaseNotes";
 
 /** How long the tray has to answer before the page says that it did not. */
@@ -124,6 +124,7 @@ export function UpdatesView() {
     return (
       <div className="rd-page rd-updates">
         <PageTitle title="Updates" />
+        <BarContextMirror className="fig">Version not read yet</BarContextMirror>
         {/* The state comes from the tray, not the daemon: there is no error to show while the tray
             is still answering. When it stays quiet the page says so and offers a way to ask again. */}
         <LoadFrame
@@ -167,6 +168,10 @@ export function UpdatesView() {
           </span>
         }
       />
+      <BarContextMirror className="fig">
+        {u.current_version}
+        {avail ? ` → ${avail.version}` : ""}
+      </BarContextMirror>
 
       {/* The notes column is the pane that scrolls when the notes run past the window (R1, #124); the update card stays in view. */}
       <div className="settings-grid rd-updates-grid">

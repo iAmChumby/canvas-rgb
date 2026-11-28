@@ -72,6 +72,8 @@ jobs:
               # The editor's device-id scrub is tested against the Rust one (#576).
               - 'crates/canvas-diag/**'
               - 'tools/nav-check.mjs'
+              - 'tools/bar-check.mjs'
+              - 'tools/tests/bar-check.test.mjs'
               - 'tools/poison-compare/js/**'
             rust:
               # Every crate, the Tauri shell, the workspace's manifests and lock file, the
@@ -223,6 +225,12 @@ jobs:
       - name: Check the rail
         timeout-minutes: 5
         run: node tools/rail-check.mjs
+
+      # The page bar, the status strip and the rail are measured in the same real browser (#586):
+      # nothing in them may draw a title, a primary action, a value or a sentence short.
+      - name: Check the bar
+        timeout-minutes: 10
+        run: node tools/bar-check.mjs
 
   editor-tests:
     # The editor's own tests (vitest, jsdom), split into three shards that run side by side: one

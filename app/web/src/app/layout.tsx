@@ -13,6 +13,7 @@ import "@/styles/notify.css";
 import { Shell } from "@/shell/Shell";
 import { OnboardingGate } from "@/views/editor/OnboardingGate";
 import { RAIL_EARLY_SCRIPT } from "@/lib/railWidth";
+import { PREVIEW_EARLY_SCRIPT } from "@/lib/previewMode";
 
 export const metadata: Metadata = {
   title: "canvas-rgb",
@@ -34,6 +35,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
         <script dangerouslySetInnerHTML={{ __html: RAIL_EARLY_SCRIPT }} />
+        <script dangerouslySetInnerHTML={{ __html: PREVIEW_EARLY_SCRIPT }} />
       </head>
       <body>
         <Shell>{children}</Shell>

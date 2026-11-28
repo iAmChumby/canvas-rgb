@@ -125,7 +125,7 @@ describe("the stack builder on a phone", () => {
     // PR C's wider-window notice is gone.
     expect(screen.queryByText("Open on a wider window")).toBeNull();
     // The strip keeps one Save key, and its accessible name is its label.
-    expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Save the stack/ })).toBeTruthy();
     expect(screen.getByText("3 / 8")).toBeTruthy();
     // The picked layer is a one-line summary with Tune; the effect's name comes from the library
     // list, never from the raw id while its schema loads.
@@ -300,7 +300,7 @@ describe("the stack builder on a phone", () => {
     pick("Heat");
     focusAndClick(screen.getByRole("button", { name: "Tune Heat" }));
     const sheet = await screen.findByRole("dialog", { name: "Tune Heat" });
-    const save = screen.getByRole("button", { name: "Save" });
+    const save = screen.getByRole("button", { name: /^Save the stack/ });
     save.focus();
     expect(document.activeElement).toBe(save);
     fireEvent.keyDown(save, { key: "Tab" });

@@ -205,7 +205,7 @@ describe("Escape in the name dialog (A3)", () => {
 
   /** Name the stack from the strip's Save, and say what became of the builder. */
   async function saveNamedFromTheStrip(name: string) {
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save the stack/ }));
     const dialog = await screen.findByRole("dialog", { name: "Name the stack" });
     const field = within(dialog).getByRole("textbox", { name: "Stack name" });
     fireEvent.change(field, { target: { value: name } });

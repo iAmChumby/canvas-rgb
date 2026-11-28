@@ -1063,3 +1063,10 @@
   flex: none;
   white-space: nowrap;
 }
+
+/* The way into the preview (#579), under the step. */
+.preview {
+  display: flex;
+  justify-content: center;
+  padding: var(--s3);
+}

@@ -5,10 +5,12 @@
 // What the page has seen is kept in the browser's own storage, so a restart does not announce
 // every light again. The first visit announces nothing: every light it sees is taken as known.
 
+import { storeLocal } from "@/lib/storage";
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import type { LightView } from "@/proto/LightView";
 
 import { SEEN_LIGHTS_KEY } from "@/lib/seenLights";
+import { previewActive } from "@/lib/previewMode";
 
 export { SEEN_LIGHTS_KEY };
 
@@ -20,6 +22,8 @@ let cachedSet: Set<string> | null = null;
 
 /** The ids the page has seen, or null before the first visit. Stable while the stored text is. */
 function getSeen(): Set<string> | null {
+  // A preview (#579) announces no light: the real PC's list says nothing about the sample ones.
+  if (previewActive()) return null;
   let raw: string | null = null;
   try {
     raw = window.localStorage.getItem(SEEN_LIGHTS_KEY);
@@ -49,7 +53,7 @@ function markSeen(ids: readonly string[]): void {
   const next = new Set(getSeen() ?? []);
   for (const id of ids) next.add(id);
   try {
-    window.localStorage.setItem(SEEN_LIGHTS_KEY, JSON.stringify([...next]));
+    storeLocal(SEEN_LIGHTS_KEY, JSON.stringify([...next]));
   } catch {
     // Not remembered: the notice may come again next time.
   }

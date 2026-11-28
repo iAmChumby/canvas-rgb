@@ -11,6 +11,7 @@ import {
   GameController,
   Keyboard,
   Mouse,
+  Warning,
 } from "@phosphor-icons/react";
 import { Button, ButtonLink, Swap } from "@/components/Button";
 import { FaultNote } from "@/components/FaultNote";
@@ -58,7 +59,7 @@ import type { PropertyDef } from "@/proto/PropertyDef";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { Props } from "@/proto/props";
-import { PageActions, PageTitle } from "@/shell/PageHeader";
+import { BarContextMirror, BarOverflow, PageActions, PageTitle } from "@/shell/PageHeader";
 import { Tooltip } from "@/components/Tooltip";
 import { ErrorState } from "@/components/ErrorState";
 
@@ -681,14 +682,26 @@ export function PeripheralsView() {
   return (
     <div className="rd-page rd-peripherals">
       <PageTitle title="Peripherals" contextBusy={list === null && !listError} context={list === null && !listError ? <InlineSkeleton width="8ch" /> : <>{rows.length} found</>} />
+      {list && <BarContextMirror className="fig">{rows.length} found</BarContextMirror>}
       {/* The pending changes and the way to send them sit in the strip, beside the save (R4). */}
       <PageActions>
         {changedCount > 0 && (
           <>
-            <span className="warn-text fig rd-peri-pending">
-              {changedCount} change{changedCount === 1 ? "" : "s"} not sent
+            <span
+              className="warn-text fig rd-peri-pending"
+              aria-label={`${changedCount} change${changedCount === 1 ? "" : "s"} not sent`}
+              title={`${changedCount} change${changedCount === 1 ? "" : "s"} not sent`}
+              data-count={changedCount}
+            >
+              <Warning size={14} weight="fill" aria-hidden="true" />
+              <span className="rd-peri-pending-text">
+                {changedCount} change{changedCount === 1 ? "" : "s"} not sent
+              </span>
             </span>
             <Button
+              className="rd-secondary"
+              // On a phone the keys' line keeps the unsent words whole, so Revert is in the overflow.
+              data-phone-menu=""
               variant="ghost"
               size="sm"
               icon={<ArrowCounterClockwise size={16} />}
@@ -696,11 +709,16 @@ export function PeripheralsView() {
               aria-label="Revert"
               onClick={revert}
             >
-              <span className="rd-peri-revert-label">Revert</span>
+              <span className="rd-btn-text">Revert</span>
             </Button>
-            <Button variant="primary" size="sm" busy={saving} onClick={() => void apply()}>
+            <Button data-bar-primary="" data-short="Apply" variant="primary" size="sm" busy={saving} onClick={() => void apply()}>
               Apply
             </Button>
+            <BarOverflow>
+              <Button variant="ghost" size="sm" icon={<ArrowCounterClockwise size={16} />} disabled={saving} onClick={revert}>
+                <span className="rd-btn-text">Revert</span>
+              </Button>
+            </BarOverflow>
           </>
         )}
       </PageActions>

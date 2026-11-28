@@ -9,7 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { hintOf, messageOf } from "@/lib/errors";
-import { openLogsFolder, tauriHost } from "@/lib/host";
+import { isDemo, openLogsFolder } from "@/lib/host";
 import s from "./ErrorState.module.css";
 
 /**
@@ -95,7 +95,7 @@ export function ErrorState({
   const [copyFailed, setCopyFailed] = useState(false);
   const [logsRefused, setLogsRefused] = useState<unknown>(null);
   const [open, setOpen] = useState(false);
-  const logs = logsEnabled ?? tauriHost() !== null;
+  const logs = logsEnabled ?? !isDemo();
   const openLogs =
     onOpenLogs ??
     (() => {
