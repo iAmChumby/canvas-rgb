@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-28
+
 ### Added
 
 - First run now leads to a setup checklist on Scenes that ticks itself off, can be hidden at any time and reopened from Help, and "See it without hardware" shows the editor on sample data without touching your PC. (#579)
@@ -517,7 +519,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.0...v0.18.1
