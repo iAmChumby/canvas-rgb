@@ -94,3 +94,43 @@ describe("What's new and Settings scroll panes (#124)", () => {
     expect(hasDecl(narrow.filter((r) => r.selectors.includes(".rd-updates .rd-updates-notes")), "overflow", "visible")).toBe(true);
   });
 });
+
+describe("Credits scrolls its own pane (#596)", () => {
+  it("the view puts its panels in the pane", () => {
+    const view = read("src/views/CreditsView.tsx");
+    expect(view).toContain('className="rd-page rd-credits"');
+    expect(view).toContain('className="rd-credits-scroll"');
+  });
+
+  it("the pane scrolls on a desktop shell and hands scrolling back on a phone", () => {
+    const sel = ".rd-credits .rd-credits-scroll";
+    expect(hasDecl(forSelector(sel), "overflow-y", "auto", (a) => a === "")).toBe(true);
+    const phone = all.filter((r) => /^@media \(max-width: 720px\)$/.test(r.at) && r.selectors.includes(sel));
+    expect(hasDecl(phone, "overflow", "visible")).toBe(true);
+  });
+});
+
+describe("Help & About's keys keep a gap between them (#596)", () => {
+  it("the hero's keys sit in the shared wrapping row, which has a gap", () => {
+    expect(read("src/views/HelpView.tsx")).toContain('className="help-hero-link row-wrap"');
+    expect(hasDecl(forSelector(".row-wrap"), "gap", "var(--s2)", (a) => a === "")).toBe(true);
+  });
+});
+
+describe("Devices rows grow with their text (#597)", () => {
+  const ROWS = [".rd-devices .rd-dev-row", ".rd-devices .rd-zone"];
+
+  it.each(ROWS)("%s has a floor, never a fixed height, at any size", (sel) => {
+    const fixed = forSelector(sel).filter((r) => decl(r, "height") !== undefined && decl(r, "height") !== "auto");
+    expect(fixed.map((r) => `${r.at} ${r.selectors.join(", ")}`)).toEqual([]);
+    expect(hasDecl(forSelector(sel), "min-height", "44px", (a) => a === "")).toBe(true);
+  });
+
+  it("the header row's head has a floor, and its state words wrap", () => {
+    const wiring = rules(read("src/views/chain/wiring.module.css").replace(/\/\*[\s\S]*?\*\//g, ""));
+    const head = wiring.filter((r) => r.selectors.includes(".gridHead"));
+    expect(head.filter((r) => decl(r, "height") !== undefined && decl(r, "height") !== "auto")).toEqual([]);
+    const state = wiring.filter((r) => r.selectors.includes(".stateCell > :global(.state)"));
+    expect(hasDecl(state, "white-space", "normal")).toBe(true);
+  });
+});
