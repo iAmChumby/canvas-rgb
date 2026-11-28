@@ -3993,7 +3993,9 @@ button.chip:hover {
   grid-template-columns: var(--row-cols);
   align-items: center;
   gap: var(--s3);
-  height: 44px;
+  /* A floor, never a fixed height: a name that wraps (the wide layout, U7) grows its row
+     instead of spilling into the next one (#597). */
+  min-height: 44px;
   padding: 0 var(--s4);
 }
 
@@ -4332,11 +4334,13 @@ button.chip:hover {
   }
 }
 
-/* R5: a short window (content height under 700) tightens the rows. */
+/* R5: a short window (content height under 700) tightens the rows. A floor only: a fixed 36 px
+   here overrode the wide layout's `height: auto`, so a wrapped name overlapped the row under it
+   in a wide, short window (#597). */
 @container page (max-height: 700px) {
   .rd-devices .rd-dev-row,
   .rd-devices .rd-zone {
-    height: 36px;
+    min-height: 36px;
   }
 }
 
@@ -5593,6 +5597,7 @@ button.chip:hover {
    browser fills the columns in the order the panels are written, as evenly as it can, so the
    order is chosen for it: at two columns Rendering, Audio source and Appearance (and Lock and
    quit while the window is short) go left, the rest right (#294). */
+.rd-credits .rd-credits-scroll,
 .rd-settings .rd-settings-scroll {
   flex: 1 1 auto;
   min-height: 0;
@@ -5780,6 +5785,7 @@ button.chip:hover {
 }
 
 @media (max-width: 720px) {
+  .rd-credits .rd-credits-scroll,
   .rd-settings .rd-settings-scroll,
   .rd-updates .rd-updates-grid,
   .rd-peripherals .peripheral-detail,

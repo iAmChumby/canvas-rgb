@@ -62,7 +62,8 @@
   align-items: center;
   gap: var(--s3);
   min-width: 0;
-  height: 44px;
+  /* A floor, as on the device rows: the row grows when its name or state wraps (#597). */
+  min-height: 44px;
 }
 
 .kicker {
@@ -94,6 +95,13 @@
   align-items: flex-start;
   gap: 2px;
   min-width: 0;
+}
+
+/* The state's words ("8 LEDs · shown 8 times") wrap inside their column instead of running under
+   the key beside it (#597). */
+.stateCell > :global(.state) {
+  max-width: 100%;
+  white-space: normal;
 }
 
 /* The key keeps the right edge of the row and never moves: it holds its own width. */
@@ -256,7 +264,7 @@
 
 @container page (max-height: 700px) {
   .gridHead {
-    height: 36px;
+    min-height: 36px;
   }
 }
 

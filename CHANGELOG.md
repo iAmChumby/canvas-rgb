@@ -6,6 +6,12 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Credits: the page scrolls on a desktop window instead of cutting off everything below the first panel. (#596)
+- Help & About: the Restart in safe start and Release notes keys no longer touch. (#596)
+- Devices: in a wide, short window a long device name or sub-line grows its row instead of drawing over the row below, and an ARGB header's state ("8 LEDs · shown 8 times") wraps instead of running under its Set up key. (#597)
+
 ## [0.21.1] - 2026-11-28
 
 ### Fixed

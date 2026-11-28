@@ -200,7 +200,7 @@ export function HelpView() {
                   </div>
                 </div>
               )}
-              <div className="help-hero-link">
+              <div className="help-hero-link row-wrap">
                 <Button
                   icon={<ShieldCheck size={16} />}
                   busy={modeBusy}

@@ -58,77 +58,82 @@ export function CreditsView() {
   }, []);
 
   return (
-    <div className={`rd-page ${s.page}`} data-state={data ? "ready" : failed ? "error" : "loading"}>
+    <div className="rd-page rd-credits" data-state={data ? "ready" : failed ? "error" : "loading"}>
       <PageTitle title="Credits" context="People, projects and licences behind canvas-rgb" />
       <BarContextMirror>People, projects and licences behind canvas-rgb</BarContextMirror>
-      {!data ? (
-        failed ? (
-          <Panel title="Credits">
-            <ErrorState message="The credits could not be read. Rebuild the editor to regenerate them." />
-          </Panel>
-        ) : (
-          <Panel title="Credits">
-            <div aria-busy="true" aria-label="Reading the credits">
-              <SkeletonLines rows={10} />
-            </div>
-          </Panel>
-        )
-      ) : (
-        <>
-          <p className={s.lead}>
-            canvas-rgb stands on other people&apos;s work. These are the people and projects that made it possible,
-            and the licences behind the software shipped with the app.
-          </p>
-          <Panel title="Built on other people's work">
-            <CreditList entries={data.thanks} />
-          </Panel>
-          <Panel title="The stack canvas-rgb builds on">
-            <CreditList entries={data.foundations} />
-          </Panel>
-          <Panel
-            className="rd-credits-notices"
-            title="Third-party notices"
-            actions={
-              <span className={s.counts}>
-                {data.counts.notices} packages · {data.counts.licences} licences
-              </span>
-            }
-          >
-            <p className={s.lead}>
-              {data.counts.rustCrates} Rust crates and {data.counts.npmPackages} npm packages ship in the app. Each
-              package is named below with its version and licence; the full licence texts sit behind one disclosure
-              per licence.
-            </p>
-            {data.groups.map((group) => (
-              <section className={s.group} key={group.licence} data-licence={group.licence}>
-                <div className={s.groupHead}>
-                  <h3 className={s.licenceName}>{group.licence}</h3>
-                  <span className={s.groupCount}>
-                    {group.count} {group.count === 1 ? "package" : "packages"}
-                  </span>
+      {/* The pane the credits scroll in: the desktop shell clips the page, as on Settings (R1). */}
+      <div className="rd-credits-scroll">
+        <div className={s.page}>
+          {!data ? (
+            failed ? (
+              <Panel title="Credits">
+                <ErrorState message="The credits could not be read. Rebuild the editor to regenerate them." />
+              </Panel>
+            ) : (
+              <Panel title="Credits">
+                <div aria-busy="true" aria-label="Reading the credits">
+                  <SkeletonLines rows={10} />
                 </div>
-                <ul className={s.packages}>
-                  {group.packages.map((pkg) => (
-                    <li className={s.package} key={`${pkg.source}-${pkg.name}-${pkg.version}`}>
-                      <span className={s.packageName}>{pkg.name}</span>
-                      <span className={s.version}>{pkg.version}</span>
-                      <span className={s.source}>{pkg.source}</span>
-                    </li>
-                  ))}
-                </ul>
-                <LicenceDisclosure
-                  className={s.disclosure}
-                  caretClassName={s.caret}
-                  bodyClassName={s.disclosureBody}
-                  paragraphClassName={s.licenceParagraph}
-                  label={`Read the ${group.licence} text (${group.count} ${group.count === 1 ? "notice" : "notices"})`}
-                  text={group.texts.map((text, i) => (group.texts.length > 1 ? `[${i + 1}]\n${text}` : text)).join("\n\n---\n\n")}
-                />
-              </section>
-            ))}
-          </Panel>
-        </>
-      )}
+              </Panel>
+            )
+          ) : (
+            <>
+              <p className={s.lead}>
+                canvas-rgb stands on other people&apos;s work. These are the people and projects that made it possible,
+                and the licences behind the software shipped with the app.
+              </p>
+              <Panel title="Built on other people's work">
+                <CreditList entries={data.thanks} />
+              </Panel>
+              <Panel title="The stack canvas-rgb builds on">
+                <CreditList entries={data.foundations} />
+              </Panel>
+              <Panel
+                className="rd-credits-notices"
+                title="Third-party notices"
+                actions={
+                  <span className={s.counts}>
+                    {data.counts.notices} packages · {data.counts.licences} licences
+                  </span>
+                }
+              >
+                <p className={s.lead}>
+                  {data.counts.rustCrates} Rust crates and {data.counts.npmPackages} npm packages ship in the app. Each
+                  package is named below with its version and licence; the full licence texts sit behind one disclosure
+                  per licence.
+                </p>
+                {data.groups.map((group) => (
+                  <section className={s.group} key={group.licence} data-licence={group.licence}>
+                    <div className={s.groupHead}>
+                      <h3 className={s.licenceName}>{group.licence}</h3>
+                      <span className={s.groupCount}>
+                        {group.count} {group.count === 1 ? "package" : "packages"}
+                      </span>
+                    </div>
+                    <ul className={s.packages}>
+                      {group.packages.map((pkg) => (
+                        <li className={s.package} key={`${pkg.source}-${pkg.name}-${pkg.version}`}>
+                          <span className={s.packageName}>{pkg.name}</span>
+                          <span className={s.version}>{pkg.version}</span>
+                          <span className={s.source}>{pkg.source}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <LicenceDisclosure
+                      className={s.disclosure}
+                      caretClassName={s.caret}
+                      bodyClassName={s.disclosureBody}
+                      paragraphClassName={s.licenceParagraph}
+                      label={`Read the ${group.licence} text (${group.count} ${group.count === 1 ? "notice" : "notices"})`}
+                      text={group.texts.map((text, i) => (group.texts.length > 1 ? `[${i + 1}]\n${text}` : text)).join("\n\n---\n\n")}
+                    />
+                  </section>
+                ))}
+              </Panel>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
