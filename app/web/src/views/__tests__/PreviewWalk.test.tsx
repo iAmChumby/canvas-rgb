@@ -103,6 +103,8 @@ describe("a preview inside the tray", () => {
     const view = render(page("/", <ScenesView />));
     // Scenes on the sample data, with the checklist whatever the real launch put off.
     await waitFor(() => expect(screen.getAllByTestId("group-row").length).toBeGreaterThan(0));
+    await waitFor(() => expect(getSnap().status).not.toBeNull());
+    await settle();
     const checklist = screen.queryByTestId("setup-count") !== null;
     // An in-app link drops the query: the shell puts it back and the page stays a preview.
     window.history.replaceState({}, "", "/fans/");
