@@ -9980,6 +9980,10 @@ button.chip:hover {
     overflow-y: auto;
     /* A card keeps its own height: the pane scrolls, the card is never squeezed. */
     grid-auto-rows: max-content;
+    /* The pane reaches into the page's side padding, so a card's keys that run a few pixels past
+       its edge on a narrow phone are drawn, not cut or scrolled to sideways. */
+    margin: 0 calc(var(--s3) * -1);
+    padding: 0 var(--s3);
   }
 }
 
