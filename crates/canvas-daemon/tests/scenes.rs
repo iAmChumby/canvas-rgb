@@ -3656,7 +3656,8 @@ mod scene_ops {
         scene.groups[1].members.push("fake:a#z0".into());
         let (status, answer) = send(&rig, "PUT", routes::SCENES, Some(write(vec![(scene, 1)], None, None))).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
-        assert_eq!(answer["message"], "light fake:a#z0 is in more than one group");
+        // The response layer replaces device ids in error text with "the device" (P6/F2).
+        assert_eq!(answer["message"], "light the device is in more than one group");
         assert_eq!(all_scenes(&rig).await, before);
     }
 
@@ -3900,12 +3901,13 @@ mod scene_ops {
         ];
         let (status, answer) = create(&rig, create_body("Night", Some(twice), None, false)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
-        assert_eq!(answer["message"], "light fake:a#z0 is in more than one group");
+        // The response layer replaces device ids in error text with "the device" (P6/F2).
+        assert_eq!(answer["message"], "light the device is in more than one group");
 
         let ghost = vec![off_group("Fans", &["fake:ghost#z0"])];
         let (status, answer) = create(&rig, create_body("Night", Some(ghost), None, false)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
-        assert_eq!(answer["message"], "there is no light fake:ghost#z0");
+        assert_eq!(answer["message"], "there is no light the device");
 
         // The HTML limit is the daemon's own (two runtimes), with its own sentence.
         let count = canvas_proto::scene::SCENE_HTML_MAX + 1;

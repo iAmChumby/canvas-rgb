@@ -69,6 +69,8 @@ jobs:
               # the nav check's script and the Playwright package the nav check starts with.
               - 'app/web/**'
               - 'crates/canvas-proto/**'
+              # The editor's device-id scrub is tested against the Rust one (#576).
+              - 'crates/canvas-diag/**'
               - 'tools/nav-check.mjs'
               - 'tools/poison-compare/js/**'
             rust:

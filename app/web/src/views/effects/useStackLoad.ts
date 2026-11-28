@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { LoadState } from "@/components/Loading";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import type { Preset } from "@/proto/Preset";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { Stack } from "@/proto/Stack";
@@ -28,7 +28,7 @@ export function useStackLoad({
   pick: (id: string | null) => void;
 }) {
   const [phase, setPhase] = useState<LoadState>(isNew ? "ready" : "loading");
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<Failure | null>(null);
   const [base, setBase] = useState<Stack | null>(null);
   const [statuses, setStatuses] = useState<Record<string, StackLayerStatus>>({});
   const [schemas, setSchemas] = useState<Record<string, PropertySchema | null>>({});
@@ -103,7 +103,7 @@ export function useStackLoad({
       })
       .catch((e: unknown) => {
         if (!mountedRef.current) return;
-        setLoadError(messageOf(e));
+        setLoadError(caught(e));
         setPhase("error");
       });
   }, [initialName, isNew, loadDetails, loadPresets, mountedRef, areaDraggingRef, pick, resetDraft]);

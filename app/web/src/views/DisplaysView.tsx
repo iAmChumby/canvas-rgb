@@ -1,10 +1,12 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
+import { StaleNotice } from "@/components/StaleNotice";
 
 import { Fragment, useMemo, useState } from "react";
 import { ArrowClockwise, FloppyDisk, ThermometerSimple, WarningOctagon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
-import { ErrorPanel, Details, LoadFrame, type LoadState } from "@/components/Loading";
+import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
 import { DisplayShape } from "@/components/LoadShapes";
 import { NumberField } from "@/components/NumberField";
 import { Field, Panel, StateDot } from "@/components/Panel";
@@ -13,8 +15,8 @@ import { Select } from "@/components/Select";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Toggle } from "@/components/Toggle";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
-import { refreshDisplays, retryDisplays, useSnap } from "@/lib/store";
+import { caught, type Failure } from "@/lib/errors";
+import { SLOW_POLL_MS, refreshDisplays, retryDisplays, useSnap } from "@/lib/store";
 import type { DisplayConfig } from "@/proto/DisplayConfig";
 import type { DisplaySource } from "@/proto/DisplaySource";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
@@ -189,7 +191,7 @@ function DisplayCard({
   const [draft, setDraft] = useState<DisplayConfig>(row.config);
   const [doing, setDoing] = useState<"save" | "stop" | null>(null);
   const busy = doing !== null;
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Failure | null>(null);
 
   const boardSensors = (fans?.temps ?? []).filter((t) => t.source.type === "board");
 
@@ -234,7 +236,7 @@ function DisplayCard({
       await api.putDisplay(row.info.id, draft);
       await refreshDisplays();
     } catch (e) {
-      setError(messageOf(e));
+      setError(caught(e));
     } finally {
       setDoing(null);
     }
@@ -247,7 +249,7 @@ function DisplayCard({
       await api.deleteDisplay(row.info.id);
       await refreshDisplays();
     } catch (e) {
-      setError(messageOf(e));
+      setError(caught(e));
     } finally {
       setDoing(null);
     }
@@ -396,7 +398,7 @@ function DisplayCard({
             </span>
           </Field>
 
-          {error && <p className="error-line">{error}</p>}
+          {error && <ErrorState compact error={error} />}
         </div>
       </div>
     </Panel>
@@ -435,12 +437,12 @@ export function DisplaysView() {
     <div className="rd-page rd-displays">
       <PageTitle title="Displays" context={<>{connectedCount} connected</>} />
 
-      {stale && (
-        <div className="rule rule-warn" role="status">
-          The displays may be out of date.
-          <Details>{displaysError}</Details>
-        </div>
-      )}
+      <StaleNotice
+        message="The displays may be out of date."
+        error={stale ? displaysError : null}
+        everyMs={SLOW_POLL_MS}
+        onRetry={() => void retryDisplays()}
+      />
 
       <LoadFrame
         className="rd-displays-grid"
@@ -450,8 +452,8 @@ export function DisplaysView() {
         error={
           <ErrorPanel
             title="The displays could not be read"
-            summary="canvas-rgb could not read the displays. The lights are unaffected."
-            message={displaysError}
+            summary="canvas-rgb could not read the displays. Try the read again."
+            error={displaysError}
             onRetry={() => void retryDisplays()}
           />
         }

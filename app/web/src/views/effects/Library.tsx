@@ -13,6 +13,7 @@ import { Highlighted, matchEffect } from "@/components/Search";
 import { addLayerRefusal, isHtmlEffect, MASK_LEAD_EFFECTS } from "@/views/effects/stackDraft";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { StackLayer } from "@/proto/StackLayer";
+import { ErrorState } from "@/components/ErrorState";
 
 export type LibraryMode = "rail" | "tray" | "tab";
 type LibraryTab = "effects" | "masks";
@@ -133,9 +134,7 @@ export function Library({
         </div>
       </div>
       {problem && (
-        <p className="error-line rd-library-problem" role="alert">
-          {problem}
-        </p>
+        <ErrorState compact className="rd-library-problem" error={problem} />
       )}
     </div>
   );

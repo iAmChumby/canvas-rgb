@@ -1,4 +1,5 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight } from "@phosphor-icons/react";
@@ -7,7 +8,7 @@ import { Panel, StateDot } from "@/components/Panel";
 import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { UpdatesShape } from "@/components/LoadShapes";
 import { canUpdate, openLogsFolder, tauriHost, updateCheckNow, updateDismissUpdated, updateInstall, updateSkip } from "@/lib/host";
-import { messageOf } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import { refreshUpdate, useSnap } from "@/lib/store";
 import { sendUpdate } from "@/lib/updateActions";
 import {
@@ -33,7 +34,7 @@ export const TRAY_TIMEOUT_MS = 5000;
 
 /** The Update now key, and the 4 px slot under it that fills from real bytes. No spinner. */
 function UpdateKey({ u }: { u: UpdateState }) {
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<Failure | null>(null);
   const step = keyStep(u);
   const fill = slotFill(u);
   const busy = isInstalling(u);
@@ -67,7 +68,7 @@ function UpdateKey({ u }: { u: UpdateState }) {
           />
         </div>
       </div>
-      {err && <p className="error-line">{err}</p>}
+      {err && <ErrorState compact error={err} />}
     </>
   );
 }
@@ -89,7 +90,7 @@ function StateLine({ u }: { u: UpdateState }) {
 
 export function UpdatesView() {
   const u = useSnap((s) => s.update);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<Failure | null>(null);
   // The tray has not answered for this long: the page says so, instead of waiting for good.
   const [silent, setSilent] = useState(false);
   // How many times the page has asked the tray. Every ask gets its own deadline: a Try again
@@ -197,7 +198,7 @@ export function UpdatesView() {
                     disabled={tauriHost() === null}
                     onClick={() => {
                       setErr(null);
-                      openLogsFolder().catch((e: unknown) => setErr(messageOf(e)));
+                      openLogsFolder().catch((e: unknown) => setErr(caught(e)));
                     }}
                   >
                     Open logs folder
@@ -207,7 +208,7 @@ export function UpdatesView() {
                   <span className="mute upd-note">Tray app only</span>
                 )}
               </div>
-              {err && <p className="error-line">{err}</p>}
+              {err && <ErrorState compact error={err} />}
             </Panel>
           ) : (
             <Panel title="Up to date">
@@ -227,7 +228,7 @@ export function UpdatesView() {
                   {acts ? `Last checked ${fmtChecked(u.last_check)}` : "Tray app only"}
                 </span>
               </div>
-              {err && <p className="error-line">{err}</p>}
+              {err && <ErrorState compact error={err} />}
             </Panel>
           )}
         </div>

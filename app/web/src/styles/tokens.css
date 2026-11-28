@@ -77,6 +77,8 @@
   --warn: #e8c02c;
   --warn-wash: color-mix(in srgb, var(--warn) 8%, var(--sunk)); /* a warning note's fill */
   --down: #e5484d;
+  /* Error text on a panel: at least 4.5:1 on --panel in both themes (U9). */
+  --error-ink: #ff8085;
 
   /* spectrum: the RGB signature. Only the 2 px line across the top of the window uses it; never a
      button, a card or a background. */
@@ -235,6 +237,7 @@
   --warn: #9a6b00;
   --warn-wash: color-mix(in srgb, var(--warn) 18%, var(--panel));
   --down: #c8283a;
+  --error-ink: #a8172a;
   --live: hsl(var(--live-h) 70% 42%);
   --live-soft: hsl(var(--live-h) 60% 50% / 0.14);
   /* The light live accent is deep, so it starts on the paper ink; the script moves it to ink for
@@ -295,6 +298,7 @@
     --warn: #9a6b00;
     --warn-wash: color-mix(in srgb, var(--warn) 18%, var(--panel));
     --down: #c8283a;
+  --error-ink: #a8172a;
     --live: hsl(var(--live-h) 70% 42%);
     --live-soft: hsl(var(--live-h) 60% 50% / 0.14);
     --on-live: var(--on-live-paper);

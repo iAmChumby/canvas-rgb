@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 // The Scenes page's data: the active scene, the lights no group holds, and every way to change
 // them.
@@ -29,7 +29,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { dismissNotification, notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { ApiFailure, caught, type Failure } from "@/lib/errors";
 import { getSnap, patchSnap, refreshLights, refreshScenes, useSnap } from "@/lib/store";
 import { moveEmptiedMessage } from "@/views/scenes/groupEdit";
 import type { Group } from "@/proto/Group";
@@ -89,7 +89,7 @@ export type MoveCheck =
   /** The daemon's answer: what the move would do. */
   | { state: "answered"; answer: GroupMoved }
   /** The daemon refused it, in its own words. */
-  | { state: "refused"; message: string }
+  | { state: "refused"; error: Failure }
   /** The check could not be made: the daemon was not there, or it failed. */
   | { state: "failed" };
 
@@ -323,7 +323,7 @@ interface View {
   draft: Scene | null;
   /** The newest scene a write was answered with. */
   saved: Scene | null;
-  error: string | null;
+  error: Failure | null;
   canUndo: boolean;
   canRedo: boolean;
   /**
@@ -414,7 +414,7 @@ export interface UseScene {
   canRedo: boolean;
   /** What the Undo would take back: the label of the top step of the history, or null. */
   undoLabel: string | null;
-  error: string | null;
+  error: Failure | null;
 }
 
 /** The scene with each group's unconfirmed live values laid over it. */
@@ -524,7 +524,7 @@ export function useScene(): UseScene {
   const flushing = useRef(false);
   /** A whole-scene write is on its way, so no live write may start. */
   const writing = useRef(false);
-  const error = useRef<string | null>(null);
+  const error = useRef<Failure | null>(null);
   const live = useRef(new Map<string, GroupLive>());
   /** The live writes that are on their way. */
   const liveBusy = useRef(0);
@@ -583,8 +583,8 @@ export function useScene(): UseScene {
   }, []);
 
   const fail = useCallback(
-    (message: string | null) => {
-      error.current = message;
+    (failure: Failure | null) => {
+      error.current = failure;
       publish();
     },
     [publish],
@@ -848,7 +848,7 @@ export function useScene(): UseScene {
           past: history.current.past.filter((e) => e.changeId === undefined || !dropped.includes(e.changeId)),
         };
         await refreshScenes();
-        fail(messageOf(failure));
+        fail(caught(failure));
         return;
       }
     } finally {
@@ -1238,7 +1238,7 @@ export function useScene(): UseScene {
             delete g.shown[kind];
           }
         }
-        fail(messageOf(failure));
+        fail(caught(failure));
       }
       // The values that came while this write was out go next, one write at a time.
       kickLive();
@@ -1331,7 +1331,7 @@ export function useScene(): UseScene {
           await call();
           fail(null);
         } catch (e) {
-          fail(messageOf(e));
+          fail(caught(e));
         }
         await refreshScenes();
       })();
@@ -1346,7 +1346,7 @@ export function useScene(): UseScene {
         await call();
         fail(null);
       } catch (e) {
-        fail(messageOf(e));
+        fail(caught(e));
       }
       await refreshScenes();
     },
@@ -1467,7 +1467,7 @@ export function useScene(): UseScene {
       try {
         answer = await api.scenes.list();
       } catch (e) {
-        fail(messageOf(e));
+        fail(caught(e));
         return false;
       }
       const writes: SceneWrite[] = [];
@@ -1493,7 +1493,7 @@ export function useScene(): UseScene {
         // A 409 means another window changed the scene; anything else is the daemon's own
         // refusal. Both drop the undo and say what the daemon said.
         if (e instanceof ApiFailure && e.status === 409) fail(NOTHING_UNDONE);
-        else fail(messageOf(e));
+        else fail(caught(e));
         return false;
       } finally {
         await refreshScenes();
@@ -1532,7 +1532,7 @@ export function useScene(): UseScene {
       } catch (e) {
         // The daemon's own refusal (422) is shown on the row, in its own words.
         if (e instanceof ApiFailure && e.status === 422) {
-          return { state: "refused", message: e.message };
+          return { state: "refused", error: caught(e) };
         }
         // Another window saved first: the scenes are read again, so a retry asks with the
         // revision the daemon has now.
@@ -1593,7 +1593,7 @@ export function useScene(): UseScene {
       } catch (e) {
         // Another window saved first: nothing moved, and the page says so.
         if (e instanceof ApiFailure && e.status === 409) fail(NOTHING_MOVED);
-        else fail(messageOf(e));
+        else fail(caught(e));
         await refreshScenes();
         return null;
       }
@@ -1722,7 +1722,7 @@ export function useScene(): UseScene {
         return landed;
       } catch (e) {
         if (e instanceof ApiFailure && e.status === 409) fail(NOTHING_MOVED);
-        else fail(messageOf(e));
+        else fail(caught(e));
         await refreshScenes();
         return null;
       }

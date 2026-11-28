@@ -24,7 +24,7 @@ const { api } = vi.hoisted(() => ({
 
 vi.mock("@/lib/endpoints", () => ({ api }));
 
-import { ApiFailure } from "@/lib/errors";
+import { ApiFailure, messageOf, type Failure } from "@/lib/errors";
 import { patchSnap } from "@/lib/store";
 import type { ChainPartKind } from "@/proto/ChainPartKind";
 import type { ChainView } from "@/proto/ChainView";
@@ -32,6 +32,9 @@ import type { LightView } from "@/proto/LightView";
 import type { SetupLight } from "@/proto/SetupLight";
 import { PART_COLOURS } from "@/views/chain/partColours";
 import { TRAIL_COLOUR, useChainSetup, type IntroKind } from "@/views/chain/useChainSetup";
+
+/** The words the anatomy would show for what the hook holds; null stays null. */
+const words = (failure: Failure | null) => (failure === null ? null : messageOf(failure));
 
 const DEVICE = "openrgb:A1B2C3D4E5F6";
 const SESSION = "session-1";
@@ -614,7 +617,7 @@ describe("the header setup flow", () => {
       await result.current.confirm();
     });
     expect(result.current.step).toBe("check");
-    expect(result.current.error).toBe("the header could not be resized: no reply from OpenRGB");
+    expect(words(result.current.error)).toBe("the header could not be resized: no reply from OpenRGB");
     expect(api.chains.commit).toHaveBeenCalledTimes(1);
 
     // Retry sends the same parts once more, and this time the daemon takes them.
@@ -685,7 +688,7 @@ describe("the header setup flow", () => {
     });
     expect(ok).toBe(false);
     expect(result.current.step).toBe("nothing");
-    expect(result.current.error).toBe("the daemon could not write");
+    expect(words(result.current.error)).toBe("the daemon could not write");
     expect(api.chains.cancel).not.toHaveBeenCalled();
 
     await act(async () => {
@@ -700,7 +703,7 @@ describe("the header setup flow", () => {
     api.chains.start.mockRejectedValueOnce(new ApiFailure(503, "unavailable", "busy"));
     const { result } = await mount();
     expect(result.current.step).toBe("error");
-    expect(result.current.error).toBe("busy");
+    expect(words(result.current.error)).toBe("busy");
 
     await act(async () => {
       result.current.retry();

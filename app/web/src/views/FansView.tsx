@@ -2,13 +2,12 @@
 
 import { storeLocal } from "@/lib/storage";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
-import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, FloppyDisk, ListChecks, Minus, Plus, Trash, WarningCircle, X } from "@phosphor-icons/react";
 import { Button, ButtonLink, IconButton, WaitMark } from "@/components/Button";
 import { DismissFault, FaultNote } from "@/components/FaultNote";
 import { Checkbox } from "@/components/Checkbox";
 import { Chip } from "@/components/Chip";
 import { Popover } from "@/components/Popover";
-import { EmptyState } from "@/components/EmptyState";
 import { NumberField, TextField } from "@/components/NumberField";
 import { Panel, Field } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
@@ -19,7 +18,7 @@ import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { UnreadValue } from "@/components/UnreadValue";
 import { usePageNarrow, usePageShort } from "@/components/MediaQuery";
 import { PageActions } from "@/shell/PageHeader";
-import { Details, LoadFrame } from "@/components/Loading";
+import { LoadFrame } from "@/components/Loading";
 import { FansShape } from "@/components/LoadShapes";
 import { notify } from "@/components/Notify";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
@@ -27,8 +26,8 @@ import { FanBulkBar } from "@/views/FanBulk";
 import { TACH_ONLY_WHY, UNAVAILABLE_WHY, UNREAD_DUTY_WHY, canDrive, isHandedBack, isUnavailable, noDutyWhy, plainLabel } from "@/lib/fanBulk";
 import { api } from "@/lib/endpoints";
 import { writeFanMode } from "@/lib/fanWrites";
-import { messageOf } from "@/lib/errors";
-import { getSnap, refreshFans, refreshStatus, retryFans as retryFansNow, useSnap } from "@/lib/store";
+import { caught, type Failure, toastText } from "@/lib/errors";
+import { FAST_POLL_MS, getSnap, refreshFans, refreshStatus, retryFans as retryFansNow, useSnap } from "@/lib/store";
 import { baseFloor, CPU_IDLE_LIMIT_C, cpuLimitInIdleRange, hotRuleShortText, hotRuleText } from "@/lib/fan-rules";
 import { clamp, fmtSeconds } from "@/lib/format";
 import type { CurvePoint } from "@/proto/CurvePoint";
@@ -40,6 +39,8 @@ import type { HotLimits } from "@/proto/HotLimits";
 import type { TempSource } from "@/proto/TempSource";
 import type { TempReading } from "@/proto/TempReading";
 import { PageTitle } from "@/shell/PageHeader";
+import { ErrorState } from "@/components/ErrorState";
+import { StaleNotice } from "@/components/StaleNotice";
 
 const MAX_POINTS = 8;
 const MIN_POINTS = 2;
@@ -152,7 +153,7 @@ export function FansView() {
       await api.dismissFault(chipFault.key);
       await refreshStatus();
     } catch (e) {
-      notify(messageOf(e), "warn");
+      notify(toastText(e), "warn");
     } finally {
       setDismissingFault(false);
     }
@@ -194,21 +195,12 @@ export function FansView() {
       <div className="stack">
         {/* One card says it: the title, how long, what keeps working, and the way to try again.
             The status strip says it in its own words; this page does not repeat the strip. */}
-        <Panel>
-          <EmptyState
-            icon={<Fan size={24} />}
-            tone="warn"
-            title="The fan service is not answering"
-            action={
-              <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void retryFans()}>
-                Try again
-              </Button>
-            }
-          >
-            No answer for {downFor}. The fans stay under BIOS control; the lights are unaffected.
-            <Details>{fansError}</Details>
-          </EmptyState>
-        </Panel>
+        <ErrorState
+          message="The fan service is not answering"
+          hint={`No answer for ${downFor}. Nothing here has confirmed what the fans are doing now.`}
+          error={fansError}
+          onRetry={() => void retryFans()}
+        />
         {known.length > 0 && (
           <Panel title="Last reading">
             <ul className="known-headers" aria-label="Fan headers, last read">
@@ -285,12 +277,12 @@ export function FansView() {
       )}
       {fans && !fansError && <FanProfileActions fans={fans} />}
 
-      {stale && (
-        <div className="rule rule-warn" role="status">
-          The fan readings may be out of date.
-          <Details>{fansError}</Details>
-        </div>
-      )}
+      <StaleNotice
+        message="The fan readings may be out of date."
+        error={stale ? fansError : null}
+        everyMs={FAST_POLL_MS}
+        onRetry={() => void retryFans()}
+      />
 
       <LoadFrame
         className="stack"
@@ -657,7 +649,7 @@ function FanCard({
  * profile that is on is never more than a glance away (R4).
  */
 function FanProfileActions({ fans }: { fans: FansStatus }) {
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<Failure | null>(null);
   // The profile whose delete is waiting for an inline confirm.
   const [confirming, setConfirming] = useState<string | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -675,7 +667,7 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
       // on the keys, the copy is in the list and the deleted one is gone from it.
       if (done) notify(done);
     } catch (e) {
-      setErr(messageOf(e));
+      setErr(caught(e));
     }
   };
 
@@ -794,7 +786,7 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
                 </div>
               ))
           )}
-          {err && <p className="error-line">{err}</p>}
+          {err && <ErrorState error={err} />}
         </div>
       </Popover>
     </PageActions>
@@ -907,7 +899,7 @@ function MoreKey({ open, onToggle, fallback }: { open: boolean; onToggle: () => 
 function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
   // Which key sent the request: that key is busy (spinner, same size); the others wait shut.
   const [sent, setSent] = useState<"show" | "hide" | "list" | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<Failure | null>(null);
   const unavailable = isUnavailable(header);
   // The owner's word, when there is one: `false` "not on my board", `true` "show anyway".
   const override = header.override_available ?? null;
@@ -920,7 +912,7 @@ function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
       await api.putFanHeaderAvailability(header.id, { available });
       await refreshFans();
     } catch (e) {
-      setErr(messageOf(e));
+      setErr(caught(e));
     } finally {
       setSent(null);
     }
@@ -963,10 +955,16 @@ function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
           Use the board list
         </Button>
       )}
+      {/* Compact beside the keys (K2). No Details or Try again: the key that was refused stands
+          right here, and pressing it again is the retry. */}
       {err && (
-        <span className="error-line fan-hdr-availability-error" role="alert" title={err}>
-          {err}
-        </span>
+        <ErrorState
+          compact
+          tooltip
+          className="fan-hdr-availability-error"
+          error={err}
+          next="Press the key again to retry."
+        />
       )}
     </span>
   );
@@ -986,7 +984,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const short = usePageShort(800);
   const shorter = usePageShort(720);
   const curveAspect = shorter ? 0.4 : short ? 0.5 : 0.62;
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<Failure | null>(null);
   const [busy, setBusy] = useState(false);
   // The draft (#295): the editor's own mode, duty, points and source. What the user picked is what
   // the editor shows. A poll never writes to it; the service's mode comes in only through the
@@ -1058,7 +1056,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     setWriting((n) => n + 1);
     try {
       await writeFanMode(header.id, next, (e) => {
-        setErr(messageOf(e));
+        setErr(caught(e));
         // A refused write: the draft goes back to whatever the service says.
         setSentKey(null);
         setAdopted(null);
@@ -1112,7 +1110,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
 
   // Issue #130: the hot line for this curve's source kind. A Fixed header has no curve
   // source: its reference temperature is the CPU reading, as the service treats it.
-  const [hotErr, setHotErr] = useState<string | null>(null);
+  const [hotErr, setHotErr] = useState<Failure | null>(null);
   // Which control sent the hot limit: the figure (`set`) or Reset (`reset`). That one is busy;
   // the other waits shut.
   const [hotSent, setHotSent] = useState<"set" | "reset" | null>(null);
@@ -1143,7 +1141,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       await refreshFans();
       return true;
     } catch (e) {
-      setHotErr(messageOf(e));
+      setHotErr(caught(e));
       return false;
     } finally {
       setHotSent(null);
@@ -1178,9 +1176,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     <div className="fan-status" data-slot="fan-status">
       <StatusReason text={reasonText} warn={handedBack} quiet={quiet} />
       <div className="fan-status-line" data-slot="fan-status-line">
-        <span className="fan-status-error error-line" role="alert" title={err ?? undefined}>
-          {err ?? ""}
-        </span>
+        {/* Compact in the reserved row (K2, #109). No Details or Try again: the control that was
+            refused stands above, and changing it again is the retry. */}
+        <ErrorState compact tooltip className="fan-status-error" error={err} next="Make the change again to retry." />
         <span className="fan-status-busy mute" role="status" aria-busy={busy || undefined}>
           <WaitMark busy={busy} label="Applying" />
         </span>
@@ -1240,10 +1238,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       </span>
     </span>
   );
+  // Compact under the limit (K2). No Details or Try again: the field that was refused stands
+  // above it, and setting it again is the retry.
   const hotError = hotErr && (
-    <span className="error-line" role="alert">
-      {hotErr}
-    </span>
+    <ErrorState compact error={hotErr} next="Set the limit again to retry." />
   );
   // Issue #297: a CPU line at or under the fixed warning threshold (60 °C) keeps the closed-loop
   // hold engaged almost all the time, so the fans run hard to hold it. The sentence states the

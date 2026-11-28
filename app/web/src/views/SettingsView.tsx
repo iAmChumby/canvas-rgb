@@ -1,4 +1,6 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
+import { StaleNotice } from "@/components/StaleNotice";
 
 import { useState } from "react";
 import { DownloadSimple, FolderOpen, Info, Lifebuoy, UploadSimple } from "@phosphor-icons/react";
@@ -11,13 +13,13 @@ import { Toggle } from "@/components/Toggle";
 import { NumberField } from "@/components/NumberField";
 import { Slider } from "@/components/Slider";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import { exportConfig, importConfigFile } from "@/lib/config-transfer";
 import { BLACK_HEX } from "@/lib/color";
 import { openLogsFolder, tauriHost } from "@/lib/host";
-import { getSnap, patchSnap, refreshAll, refreshSettings, retrySettings, useSnap } from "@/lib/store";
+import { SLOW_POLL_MS, getSnap, patchSnap, refreshAll, refreshSettings, retrySettings, useSnap } from "@/lib/store";
 import { fmt1 } from "@/lib/format";
-import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
+import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { SettingsShape } from "@/components/LoadShapes";
 import {
   applyMotion,
@@ -41,8 +43,8 @@ export function SettingsView() {
   const [fps, setFps] = useState<number | null>(null);
   const [brightness, setBrightness] = useState<number | null>(null);
   const [warmth, setWarmth] = useState<number | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [renderErr, setRenderErr] = useState<string | null>(null);
+  const [err, setErr] = useState<Failure | null>(null);
+  const [renderErr, setRenderErr] = useState<Failure | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(() => readTheme());
   const [motion, setMotion] = useState<MotionPref>(() => readMotion());
@@ -61,7 +63,7 @@ export function SettingsView() {
             <ErrorPanel
               title="The settings could not be read"
               summary="canvas-rgb could not read the settings. Nothing was changed."
-              message={settingsError}
+              error={settingsError}
               onRetry={() => void retrySettings()}
             />
           }
@@ -83,7 +85,7 @@ export function SettingsView() {
       await api.putSettings(next);
       await refreshSettings();
     } catch (e) {
-      setErr(messageOf(e));
+      setErr(caught(e));
       await refreshSettings();
     }
   };
@@ -106,7 +108,7 @@ export function SettingsView() {
       await refreshSettings();
     } catch (e) {
       setBrightness(null);
-      setRenderErr(messageOf(e));
+      setRenderErr(caught(e));
     }
   };
 
@@ -120,7 +122,7 @@ export function SettingsView() {
       await refreshSettings();
     } catch (e) {
       setWarmth(null);
-      setRenderErr(messageOf(e));
+      setRenderErr(caught(e));
     }
   };
 
@@ -131,7 +133,7 @@ export function SettingsView() {
       const name = await exportConfig();
       setNote(`Downloaded ${name}`);
     } catch (e) {
-      setErr(messageOf(e));
+      setErr(caught(e));
     }
   };
 
@@ -143,7 +145,7 @@ export function SettingsView() {
       setNote(`Imported ${file.name}`);
       await refreshAll();
     } catch (e) {
-      setErr(messageOf(e));
+      setErr(caught(e));
     }
   };
 
@@ -151,15 +153,14 @@ export function SettingsView() {
     <div className="rd-page rd-settings">
       <PageTitle title="Settings" />
 
-      {settingsError && (
-        // A refresh that failed after the settings were read does not take the page away: the
-        // settings stay and the page says they may be old. The raw words are behind the
-        // disclosure.
-        <div className="rule rule-warn" role="status">
-          The settings may be out of date.
-          <Details>{settingsError}</Details>
-        </div>
-      )}
+      {/* A refresh that failed after the settings were read does not take the page away: the
+          settings stay and the page says they may be old. */}
+      <StaleNotice
+        message="The settings may be out of date."
+        error={settingsError}
+        everyMs={SLOW_POLL_MS}
+        onRetry={() => void retrySettings()}
+      />
 
       {/* The pane the panels scroll in when the window is too short for them (R1). */}
       <div className="rd-settings-scroll">
@@ -209,7 +210,7 @@ export function SettingsView() {
                 {shownWarmth === 6500 && <span className="unit">Off</span>}
               </span>
             </Field>
-            {renderErr && <p className="error-line" style={{ marginTop: 8 }}>{renderErr}</p>}
+            {renderErr && <ErrorState compact error={renderErr} style={{ marginTop: 8 }} />}
           </Panel>
 
           {/* Audio source sits under Rendering: both are what the effects draw from, and the
@@ -298,7 +299,7 @@ export function SettingsView() {
               </FileButton>
             </Field>
             {note && <StateDot tone="ok">{note}</StateDot>}
-            {err && <p className="error-line" style={{ marginTop: 8 }}>{err}</p>}
+            {err && <ErrorState compact error={err} style={{ marginTop: 8 }} />}
           </Panel>
 
           <Panel title="Version" actions={<span className="fig rd-version" aria-busy={!status || undefined}>{status ? status.version : <InlineSkeleton width="8ch" />}</span>}>
@@ -315,7 +316,7 @@ export function SettingsView() {
                 disabled={!inTray}
                 onClick={() => {
                   setErr(null);
-                  openLogsFolder().catch((e: unknown) => setErr(messageOf(e)));
+                  openLogsFolder().catch((e: unknown) => setErr(caught(e)));
                 }}
               >
                 Open logs folder

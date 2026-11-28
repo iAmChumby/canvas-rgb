@@ -130,6 +130,8 @@ const SCROLL_PANES = [
   ".rd-help .help-scroll",
   ".receipt-text",
   ".sheet", // the setup checklist's sheet on a phone (#579)
+  ".files", // the diagnostics bundle's file list (#575)
+  ".preview", // the Report issue preview of the prefilled text (#575)
 ];
 
 /**

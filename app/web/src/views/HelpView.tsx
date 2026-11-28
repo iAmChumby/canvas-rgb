@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  ArrowClockwise,
   ArrowSquareOut,
   BookOpen,
   Check,
@@ -15,12 +14,15 @@ import {
 import { Button, ButtonLink } from "@/components/Button";
 import { DeviceChecklist } from "@/components/DeviceChecklist";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
+import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
+import { ErrorState } from "@/components/ErrorState";
+import { ReportIssue } from "@/components/ReportIssue";
 import { notify } from "@/components/Notify";
 import { Panel, StateDot } from "@/components/Panel";
 import { Receipt } from "@/components/Receipt";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { toastText } from "@/lib/errors";
 import { openExternal } from "@/lib/host";
 import { useSnap } from "@/lib/store";
 import { settingsStatus } from "@/lib/updateWords";
@@ -92,7 +94,7 @@ export function HelpView() {
       await api.setSafeStart(mode);
       // The service restarts the daemon in the chosen mode. The next status poll shows it.
     } catch (e) {
-      notify(messageOf(e), "warn");
+      notify(toastText(e), "warn");
     } finally {
       setModeBusy(false);
     }
@@ -148,27 +150,31 @@ export function HelpView() {
               </div>
               <p className="help-hero-note">Facts from canvas-rgb on this PC.</p>
               {failed ? (
-                <div className="help-error">
-                  <p className="error-line">Identity and the system report could not be read.</p>
-                  <Button
-                    icon={<ArrowClockwise size={16} />}
-                    onClick={() => {
-                      setFailed(false);
-                      load();
-                    }}
-                  >
-                    Retry
-                  </Button>
-                </div>
+                <ErrorState
+                  message="Identity and the system report could not be read."
+                  hint="Check that canvas-rgb is running, then try again."
+                  onRetry={() => {
+                    setFailed(false);
+                    load();
+                  }}
+                />
               ) : (
                 <div className="help-facts">
                   <IdentityRow label="Version">{about ? shown(about.version) : undefined}</IdentityRow>
                   <IdentityRow label="Commit">{about ? shown(about.commit) : undefined}</IdentityRow>
                   <IdentityRow label="Built">{about ? shown(about.build_date) : undefined}</IdentityRow>
                   <IdentityRow label="Windows">{about ? shown(about.os) : undefined}</IdentityRow>
-                  <IdentityRow label="Service">{about ? shown(about.service_version) : undefined}</IdentityRow>
+                  <IdentityRow label="Service">
+                    {about
+                      ? about.service_version ?? "not collected: the fan service has not answered"
+                      : undefined}
+                  </IdentityRow>
                   <IdentityRow label="Last run">
-                    {about ? lastExitWords(about.last_exit) : undefined}
+                    {about
+                      ? about.last_exit === null
+                        ? "not collected: the service has not reported a last run"
+                        : lastExitWords(about.last_exit)
+                      : undefined}
                   </IdentityRow>
                   <IdentityRow label="Safe start">
                     {snap === null ? undefined : safe ? "on" : "off"}
@@ -191,7 +197,7 @@ export function HelpView() {
                   busy={modeBusy}
                   onClick={() => void setMode(safe ? "normal" : "safe")}
                 >
-                  {safe ? "Start normally" : "Start in safe start"}
+                  {safe ? "Start normally" : "Restart in safe start"}
                 </Button>
                 <ButtonLink href="/updates/" size="sm" icon={<ArrowSquareOut size={14} />}>
                   Release notes for this version
@@ -219,7 +225,14 @@ export function HelpView() {
               }
             >
               {failed ? (
-                <p className="error-line">The report could not be read. Nothing was copied.</p>
+                <ErrorState
+                  message="The report could not be read."
+                  hint="Nothing was copied. Try again, or copy the identity facts above."
+                  onRetry={() => {
+                    setFailed(false);
+                    load();
+                  }}
+                />
               ) : (
                 <>
                   <Receipt text={receipt} label="System report" loading={report === null} />
@@ -228,11 +241,18 @@ export function HelpView() {
                       This is the exact text that goes to the clipboard.
                     </span>
                   </div>
-                  {copyFailed && <p className="error-line">The clipboard refused the copy.</p>}
+                  {copyFailed && <ErrorState compact message="The clipboard refused the copy." />}
                 </>
               )}
             </Panel>
 
+            {/* One key in one place: the list before saving, the path and reveal after. */}
+            <div id="diag-panel">
+              <DiagnosticsPanel />
+            </div>
+            <Panel title="Report issue">
+              <ReportIssue report={report} />
+            </Panel>
             {/* #580: one fixed checklist, read on open and on Try again, never on the status
                 poll. It sits on Help so Devices, Fans and Peripherals can all point at it. */}
             <DeviceChecklist />

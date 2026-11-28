@@ -1,6 +1,6 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Details, ErrorPanel, LOAD_DELAY_MS, LoadFrame, stageLine, type LoadState } from "@/components/Loading";
+import { ErrorPanel, LOAD_DELAY_MS, LoadFrame, stageLine, type LoadState } from "@/components/Loading";
 import { Skeleton } from "@/components/Skeleton";
 import { readStage } from "@/lib/peripherals";
 
@@ -30,7 +30,7 @@ function frame(
     <LoadFrame
       state={state}
       shape={shape}
-      error={<ErrorPanel title="Could not read" message="the daemon said no" />}
+      error={<ErrorPanel title="Could not read" error="the daemon said no" />}
       empty={<div className="panel">Nothing here</div>}
       {...extra}
     >
@@ -183,10 +183,16 @@ describe("one frame in every state", () => {
     const { container, rerender } = render(frame("error"));
     const frameEl = root(container);
     // The note is a child of the frame, next to the shape, not a replacement for it.
-    expect(Array.from(frameEl.children).map((c) => c.className)).toEqual(["load-shape", "load-note"]);
+    expect(Array.from(frameEl.children).map((c) => c.className.split(" "))).toEqual([
+      ["load-shape"],
+      expect.arrayContaining(["load-note"]),
+    ]);
     expect(container.querySelector(".load-note")?.textContent).toContain("the daemon said no");
     rerender(frame("empty"));
-    expect(Array.from(root(container).children).map((c) => c.className)).toEqual(["load-shape", "load-note"]);
+    expect(Array.from(root(container).children).map((c) => c.className.split(" "))).toEqual([
+      ["load-shape"],
+      expect.arrayContaining(["load-note"]),
+    ]);
     expect(container.querySelector(".load-note")?.textContent).toContain("Nothing here");
   });
 
@@ -240,19 +246,23 @@ describe("the error panel", () => {
   it("offers Try again when it has a way to, and runs it", () => {
     const calls: number[] = [];
     const { getByRole } = render(
-      <ErrorPanel title="Could not read" message="no" onRetry={() => void calls.push(1)} />,
+      <ErrorPanel title="Could not read" error="no" onRetry={() => void calls.push(1)} />,
     );
     getByRole("button", { name: "Try again" }).click();
     expect(calls).toEqual([1]);
   });
 
-  it("folds the raw text of an error into a disclosure", () => {
+  it("shows the caught words under the title, in the frame, with nothing folded away", () => {
     const { container } = render(
-      <LoadFrame state="error" shape={shape} error={<Details>the service said: 500</Details>} />,
+      <LoadFrame
+        state="error"
+        shape={shape}
+        error={<ErrorPanel title="Could not read" error={new Error("the service said: 500")} />}
+      />,
     );
-    const d = container.querySelector("details.load-detail") as HTMLDetailsElement;
-    expect(d).not.toBeNull();
-    expect(d.open).toBe(false);
-    expect(d.textContent).toContain("the service said: 500");
+    const card = container.querySelector(".load-note [data-anatomy='error-state']") as HTMLElement;
+    expect(card.textContent).toContain("Could not read");
+    expect(card.textContent).toContain("the service said: 500");
+    expect(container.querySelector("details")).toBeNull();
   });
 });

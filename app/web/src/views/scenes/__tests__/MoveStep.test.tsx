@@ -410,7 +410,7 @@ describe("the move step", () => {
   it("a move the daemon refuses is disabled, with the daemon's own sentence", async () => {
     const sentence = htmlLimitSentence(3);
     const use = fakeUse({
-      dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({ state: "refused", message: sentence })),
+      dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({ state: "refused", error: sentence })),
     });
     render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
     const row = await screen.findByTestId("move-to-evening");

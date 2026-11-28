@@ -6,7 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { ApiFailure, caught, type Failure } from "@/lib/errors";
 import { onStackPreviewFeed } from "@/lib/stackPreview";
 import type { StackSession } from "@/views/effects/stackDraft";
 import type { LoadState } from "@/components/Loading";
@@ -38,7 +38,7 @@ export function usePreview({
   stackForServer: () => Stack;
   setStatuses: (next: Record<string, StackLayerStatus>) => void;
 }) {
-  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<Failure | null>(null);
   /** What the preview feed says is wrong with it: the daemon refuses a second stack socket. */
   const [feedProblem, setFeedProblem] = useState<string | null>(null);
   const previewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -92,7 +92,7 @@ export function usePreview({
         previewRetry.current = setTimeout(() => void sendPreview(true), wait);
         return;
       }
-      setPreviewError(messageOf(e));
+      setPreviewError(caught(e));
     }
   }
 

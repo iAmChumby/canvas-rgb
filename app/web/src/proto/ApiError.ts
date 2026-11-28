@@ -13,4 +13,9 @@ line?: number,
 /**
  * The column, when the runtime gave one.
  */
-column?: number, };
+column?: number, 
+/**
+ * The next step, in plain words (#576): what the person can do about it. `message` says what
+ * happened. Both are scrubbed before they leave the daemon.
+ */
+hint?: string, };

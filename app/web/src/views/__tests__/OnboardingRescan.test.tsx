@@ -61,7 +61,7 @@ describe("the onboarding's Rescan", () => {
     });
 
     const line = await screen.findByText(/Rescan failed: OpenRGB did not answer in time/);
-    expect(line.className).toBe("error-line");
+    expect(line.className).toContain("error-line");
     // The reason is said once: the daemon's text carries no "could not rescan" of its own.
     expect(line.textContent).not.toMatch(/rescan.*rescan/i);
     expect(screen.queryByText("Still no lights.")).toBeNull();

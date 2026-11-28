@@ -182,7 +182,7 @@ button.chip.chip-add:hover {
   white-space: nowrap;
 }
 
-.preset-note[data-tone="error"] {
+.preset-note.error-line {
   color: var(--down);
   font-family: inherit;
 }

@@ -298,7 +298,8 @@
   padding: var(--s2) var(--s3);
   border-radius: var(--r-sm);
   border-left: 2px solid var(--warn);
-  background: var(--warn-wash);
+  /* Neutral fill (U2): amber mixed into a panel reads beige in light and olive in dark. */
+  background: var(--raised);
 }
 
 .state-page-keeps {
@@ -331,16 +332,19 @@
   margin-top: var(--s2);
 }
 
-.state-page-detail,
-.state-detail {
+/* #576: the recovery keys on a full-page state. One row at 1440, wrapping at phone width. */
+.state-page-keys { margin-top: var(--s3); }
+.recovery-keys { display: flex; flex-direction: column; gap: var(--s3); }
+.recovery-keys-row { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.recovery-panel {
+  padding: var(--s3); border: 1px solid var(--line-2); border-radius: 8px;
+  background: var(--panel); font-size: var(--t14); color: var(--dim);
+}
+
+.state-page-detail {
   color: var(--mute);
   font-size: var(--t14);
   word-break: break-word;
-}
-
-.state-detail {
-  display: block;
-  margin-top: var(--s2);
 }
 
 /* The spinner in the daemon-down page's retry button: one turn a second, and it stops with the
@@ -522,48 +526,6 @@
 
 .load-note-action {
   margin-top: var(--s3);
-}
-
-/* The raw words of an error, folded away. */
-.load-detail {
-  margin-top: var(--s3);
-}
-
-.load-detail > summary {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  width: fit-content;
-  color: var(--mute);
-  font-size: var(--t14);
-  cursor: pointer;
-  list-style: none;
-}
-
-/* The browser's own triangle is hidden: the caret is ours. */
-.load-detail > summary::-webkit-details-marker {
-  display: none;
-}
-
-.load-detail > summary::marker {
-  content: "";
-}
-
-.load-detail-caret {
-  flex: none;
-  transition: transform var(--dur-fast) var(--ease);
-}
-
-.load-detail[open] > summary .load-detail-caret {
-  transform: rotate(90deg);
-}
-
-.load-detail > summary:hover {
-  color: var(--ink);
-}
-
-.load-detail > .state-detail {
-  margin-top: var(--s2);
 }
 
 /* Known values stay on screen while they are read again: dimmed, and not to be edited. */

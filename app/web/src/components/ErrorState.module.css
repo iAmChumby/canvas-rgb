@@ -1,0 +1,100 @@
+/* One anatomy for every error shown in the editor (#576). Tokens only; no glass, no glow. */
+
+.state {
+  min-height: 116px;
+  padding: 14px 16px;
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--down);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.lead {
+  margin: 6px 0 0;
+  color: var(--dim);
+}
+
+.detail {
+  margin: 6px 0 0;
+  color: var(--mute);
+  overflow-wrap: anywhere;
+}
+
+.keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.note {
+  margin: 8px 0 0;
+  color: var(--warn);
+}
+
+.line {
+  margin: 0;
+  color: var(--error-ink);
+  font-size: 14px;
+}
+
+.step {
+  color: var(--dim);
+}
+
+/* The Details key inside a compact line: its padding widens the target and takes no room. */
+.link {
+  appearance: none;
+  margin: -4px 0 -4px 4px;
+  padding: 4px;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--ink);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* The stale note's row (#576, K1): as tall empty as full, so a poll that fails and recovers
+   moves nothing (the #109 pattern). Its margins take back part of the page's gaps. */
+.slot {
+  position: relative;
+  flex: 0 0 auto;
+  height: 1lh;
+  margin: calc(-1 * var(--s2)) 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* The full card a Details key opens lies over the page, so opening it moves nothing either. */
+.over {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 5;
+}
+
+/* A narrow page wraps the note, so the row holds two lines there. */
+@media (max-width: 720px) {
+  .slot {
+    height: 2lh;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .state * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

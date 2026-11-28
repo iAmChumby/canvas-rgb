@@ -111,7 +111,7 @@ describe("the Help & About page", () => {
     expect(writeText.mock.calls[1]?.[0]).toBe(receipt.textContent);
   });
 
-  it("says unknown for every value the daemon did not send", async () => {
+  it("says unknown or gives a reason for every value the daemon did not send", async () => {
     api.about.mockResolvedValueOnce({
       version: "0.20.0",
       commit: null,
@@ -122,8 +122,8 @@ describe("the Help & About page", () => {
     });
     render(<HelpView />);
     await screen.findByTestId("receipt-text");
-    // Version is always sent; the five other identity rows have no value to show.
-    await waitFor(() => expect(screen.getAllByText("unknown").length).toBe(5));
+    // Version is always sent; the other identity rows say "unknown" or name why (U12).
+    await waitFor(() => expect(screen.getAllByText("unknown").length).toBe(4));
   });
 
   it("is a navigation door at every width", () => {
@@ -131,7 +131,7 @@ describe("the Help & About page", () => {
     expect(help?.label).toBe("Help & About");
   });
 
-  it("gives every Go-to row one line and the full URL in its name", async () => {
+  it("wraps every Go-to address and keeps the full URL in its name", async () => {
     render(<HelpView />);
     await screen.findByTestId("receipt-text");
     const keys = Array.from(document.querySelectorAll(".help-key"));
@@ -158,10 +158,9 @@ describe("the Help & About page", () => {
     expect(keyRule).toMatch(/white-space:\s*normal/);
     expect(keyRule).not.toMatch(/border-radius:\s*0/);
     const addressRule = css.match(/\.help-key-address\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(addressRule).toMatch(/white-space:\s*nowrap/);
-    expect(addressRule).toMatch(/overflow:\s*hidden/);
-    expect(addressRule).toMatch(/text-overflow:\s*ellipsis/);
-    expect(addressRule).not.toMatch(/overflow-wrap/);
+    expect(addressRule).toMatch(/white-space:\s*normal/);
+    expect(addressRule).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(addressRule).not.toMatch(/text-overflow:\s*ellipsis/);
   });
 
   it("keeps release notes in the identity panel and leaves only external Go-to keys", async () => {
@@ -209,7 +208,7 @@ describe("the Help & About page", () => {
     await screen.findByText("crashed");
   });
 
-  it("replaces skeletons with an error and a Retry when the fetch fails", async () => {
+  it("replaces skeletons with an error and a Try again key when the fetch fails", async () => {
     api.about.mockRejectedValueOnce(new Error("down"));
     api.aboutReport.mockRejectedValueOnce(new Error("down"));
     render(<HelpView />);
@@ -217,7 +216,7 @@ describe("the Help & About page", () => {
     expect(screen.queryByTestId("receipt-text")).toBeNull();
     expect(screen.queryAllByText("unknown")).toHaveLength(0);
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      fireEvent.click(screen.getAllByRole("button", { name: /Try again/i })[0]!);
     });
     await waitFor(() =>
       expect(screen.getByTestId("receipt-text").textContent).toBe(report.markdown),

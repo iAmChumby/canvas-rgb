@@ -1,4 +1,5 @@
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, screen, fireEvent } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonDown } from "@/components/DaemonDown";
 import { EngineDown } from "@/components/EngineDown";
@@ -32,6 +33,28 @@ describe("the daemon's two failures", () => {
     expect(page).not.toMatch(/canvas-rgb is not answering/);
     // The daemon's own words are on the page, as they are.
     expect(page).toContain("the render engine is not answering");
+  });
+
+  it("replaces the page after Try again when the daemon answers again", () => {
+    // The shell swaps this page for the real one when its next status read succeeds (#576 item 3).
+    const Harness = () => {
+      const [up, setUp] = useState(false);
+      return up ? (
+        <div data-testid="live-page">the editor is live</div>
+      ) : (
+        <DaemonDown onRetry={async () => setUp(true)} />
+      );
+    };
+    const { container } = render(<Harness />);
+    expect(container.textContent).toMatch(/canvas-rgb is not answering/);
+    // The recovery keys are on this page before the retry (#576 item 3): they failed to exist
+    // on the tree before this change.
+    expect(screen.getByRole("button", { name: /Save diagnostics/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Report issue/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Try again/i }));
+    expect(screen.getByTestId("live-page")).toBeTruthy();
+    expect(container.textContent).not.toMatch(/canvas-rgb is not answering/);
+    expect(container.textContent).not.toMatch(/unknown error/i);
   });
 
   it("says canvas-rgb, not the daemon, on both pages", () => {

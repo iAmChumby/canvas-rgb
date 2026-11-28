@@ -10,7 +10,7 @@ import { demoRequest } from "@/lib/demo";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { routes } from "@/proto/routes";
 
-export { ApiFailure, isUnreachable, messageOf } from "@/lib/errors";
+export { ApiFailure, hintOf, isScrubbedMessage, isUnreachable, messageOf } from "@/lib/errors";
 
 let cachedConfig: ApiConfig | null = null;
 let pendingConfig: Promise<ApiConfig> | null = null;
@@ -322,7 +322,8 @@ async function send<T>(
         // in the header; milliseconds everywhere in the editor.
         const retry = Number(res.headers.get("retry-after"));
         const retryAfterMs = Number.isFinite(retry) && retry > 0 ? retry * 1000 : undefined;
-        throw new ApiFailure(res.status, code, message, retryAfterMs);
+        const hint = typeof parsed.hint === "string" && parsed.hint.length > 0 ? parsed.hint : undefined;
+        throw new ApiFailure(res.status, code, message, retryAfterMs, hint);
       }
       // The body is read under the same deadline: a body that never finishes is a timeout too.
       return await read(res);

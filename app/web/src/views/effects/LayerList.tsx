@@ -18,6 +18,7 @@ import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { StackLayer } from "@/proto/StackLayer";
 import type { StackLayerStatus } from "@/proto/StackLayerStatus";
+import { ErrorState } from "@/components/ErrorState";
 
 export function LayerList({
   layers,
@@ -120,7 +121,7 @@ export function LayerList({
                 type="button"
                 className="layer-grip"
                 aria-label={`Reorder ${layer.name}`}
-                title="Drag to reorder, or press Space; Alt+↑/↓ on the keyboard"
+                title="Drag to reorder, or press Space; Alt+Γåæ/Γåô on the keyboard"
                 onPointerDown={(event) => onGripDown(layer, event)}
                 onKeyDown={(event) => {
                   if (isLifted()) return;
@@ -172,9 +173,7 @@ export function LayerList({
                       onEscape={onRenameEscape}
                     />
                     {renameProblem && (
-                      <p className="error-line" id="layer-name-error" role="alert">
-                        {renameProblem}
-                      </p>
+                      <ErrorState compact id="layer-name-error" error={renameProblem} />
                     )}
                   </div>
                 ) : (

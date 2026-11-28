@@ -22,6 +22,7 @@ import {
 } from "@/proto/tauri";
 import type { ApiConfig } from "@/proto/ApiConfig";
 import { previewActive } from "@/lib/previewMode";
+import type { DiagBundle } from "@/proto/DiagBundle";
 import type { EditorChoice } from "@/proto/EditorChoice";
 import type { TrayPrefs } from "@/proto/TrayPrefs";
 import type { UpdateChannel } from "@/proto/UpdateChannel";
@@ -73,6 +74,55 @@ export async function openLogsFolder(): Promise<void> {
   const host = trayHost();
   if (!host) return;
   await host.core.invoke(CMD_OPEN_LOGS_FOLDER);
+}
+
+// The diagnostics commands live in the tray. Their names are local here: they are not API
+// routes or spine types, and the tray owns the implementation (app/src-tauri/src/commands.rs).
+const CMD_DIAG_LIST = "diag_bundle_list";
+const CMD_DIAG_SAVE = "diag_bundle_save";
+const CMD_REVEAL_DIAG = "reveal_diag_bundle";
+const CMD_OPEN_SERVICE_LOGS = "open_service_logs_folder";
+const CMD_REPORT_PREFILL = "report_prefill";
+
+/** The two facts the tray can supply with the daemon down; everything else is "not collected". */
+export interface ReportPrefill {
+  version: string;
+  windows: string;
+}
+
+export async function reportPrefill(): Promise<ReportPrefill> {
+  const host = trayHost();
+  if (!host) throw new Error("The report needs the tray app.");
+  return (await host.core.invoke(CMD_REPORT_PREFILL)) as ReportPrefill;
+}
+
+/** What a diagnostics zip would hold. No daemon needed: the tray reads the files itself. */
+export async function diagBundleList(): Promise<DiagBundle> {
+  const host = trayHost();
+  if (!host) throw new Error("Save diagnostics is available in the tray app only.");
+  return (await host.core.invoke(CMD_DIAG_LIST)) as DiagBundle;
+}
+
+/** Writes the zip and returns where it went. */
+export async function diagBundleSave(): Promise<DiagBundle> {
+  const host = trayHost();
+  if (!host) throw new Error("Save diagnostics is available in the tray app only.");
+  // No destination argument: the tray writes to the one fixed folder (P2).
+  return (await host.core.invoke(CMD_DIAG_SAVE)) as DiagBundle;
+}
+
+/** Reveals the saved zip in Explorer with the file selected. */
+export async function revealDiagBundle(path: string): Promise<void> {
+  const host = trayHost();
+  if (!host) return;
+  await host.core.invoke(CMD_REVEAL_DIAG, { path });
+}
+
+/** Opens the service's own log folder by its fixed path, never creating or writing to it. */
+export async function openServiceLogsFolder(): Promise<void> {
+  const host = trayHost();
+  if (!host) return;
+  await host.core.invoke(CMD_OPEN_SERVICE_LOGS);
 }
 
 /**

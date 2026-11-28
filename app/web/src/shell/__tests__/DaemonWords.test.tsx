@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonDown } from "@/components/DaemonDown";
-import { GlobalBanners } from "@/shell/GlobalBanners";
+import { StandingNotices } from "@/shell/GlobalBanners";
 import { patchSnap } from "@/lib/store";
 import type { Status } from "@/proto/Status";
 
@@ -52,7 +52,7 @@ describe("the words on the page", () => {
 
   it("says canvas-rgb, not the daemon, when the fan service is away", () => {
     patchSnap({ status });
-    render(<GlobalBanners />);
+    render(<StandingNotices />);
     const banner = screen.getByText(/has not heard from the fan service/);
     expect(banner.textContent ?? "").not.toMatch(/daemon/i);
     expect(banner.textContent ?? "").toMatch(/canvas-rgb/);

@@ -39,6 +39,7 @@ import type { PropValue } from "@/proto/PropValue";
 import type { Stack } from "@/proto/Stack";
 import type { StackLayer } from "@/proto/StackLayer";
 import type { StackLayerStatus } from "@/proto/StackLayerStatus";
+import { ErrorState } from "@/components/ErrorState";
 
 export function Inspector({
   layer,
@@ -212,7 +213,7 @@ export function Inspector({
       <InspectorSection title="Properties">
         {schemas[layer.effect] === null || statuses[layer.id]?.status === "missing_effect" ? (
           <div className="rd-gone">
-            <p className="error-line">This effect is gone. Choose another.</p>
+            <ErrorState compact message="This effect is gone. Choose another." />
             <span ref={chooseRef}>
               <Button
                 size="sm"
@@ -308,9 +309,7 @@ export function Inspector({
                   onChange={onMaskEffect}
                 />
                 {maskProblem && (
-                  <p className="error-line" role="alert">
-                    {maskProblem}
-                  </p>
+                  <ErrorState compact error={maskProblem} />
                 )}
               </div>
               <div className="layer-field wide">
@@ -358,7 +357,7 @@ export function Inspector({
               </div>
             </div>
             {schemas[mask.effect] === null ? (
-              <p className="error-line">This mask effect is gone. Choose another, or remove the mask.</p>
+              <ErrorState compact message="This mask effect is gone. Choose another, or remove the mask." />
             ) : schemas[mask.effect] === undefined ? (
               <LoadFrame
                 state="loading"
@@ -404,9 +403,7 @@ export function Inspector({
         </p>
       )}
       {layerProblem && (
-        <p className="error-line" role="alert">
-          {layerProblem}
-        </p>
+        <ErrorState compact error={layerProblem} />
       )}
     </Panel>
   );
@@ -420,5 +417,3 @@ export function InspectorEmpty() {
     </Panel>
   );
 }
-
-
