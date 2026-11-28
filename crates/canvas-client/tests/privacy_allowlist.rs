@@ -441,7 +441,7 @@ fn every_outbound_host_and_client_is_in_the_privacy_table() {
     // files, with no new outbound host or connection constructor.
     // #580 added faults.rs, FaultNote.tsx, DeviceChecklist.tsx and lib/supportedDevices.ts; the
     // errors/reporting pass added its own files. Both sets are scanned, with no new network access.
-    assert_eq!(files.len(), 502, "the set of scanned source files moved");
+    assert_eq!(files.len(), 503, "the set of scanned source files moved");
     assert_eq!(found_hosts.len(), 4, "the set of outbound hosts moved");
     assert_eq!(found_tokens.len(), 8, "the set of connection constructors moved");
     assert!(
