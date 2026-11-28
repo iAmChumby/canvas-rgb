@@ -24,6 +24,7 @@ import { InlineSkeleton } from "@/components/Skeleton";
 import { api } from "@/lib/endpoints";
 import { toastText } from "@/lib/errors";
 import { openExternal } from "@/lib/host";
+import { previewActive } from "@/lib/previewMode";
 import { useSnap } from "@/lib/store";
 import { settingsStatus } from "@/lib/updateWords";
 import { PageTitle } from "@/shell/PageHeader";
@@ -101,7 +102,11 @@ export function HelpView() {
   };
 
   // Once per visit: neither the status poll nor a re-render asks again. Retry asks on purpose.
+  // A preview has no tray and no facts of this PC: asking would answer with an error, so leave
+  // both null and let the page say what is available instead (#579).
+  const preview = previewActive();
   const load = useCallback(() => {
+    if (previewActive()) return;
     void Promise.all([api.about(), api.aboutReport()])
       .then(([a, r]) => {
         if (!live.current) return;
@@ -148,8 +153,12 @@ export function HelpView() {
                 <BrandMark size={26} />
                 <Wordmark />
               </div>
-              <p className="help-hero-note">Facts from canvas-rgb on this PC.</p>
-              {failed ? (
+              <p className="help-hero-note">
+                {preview ? "Sample data: this PC's identity stays in the tray." : "Facts from canvas-rgb on this PC."}
+              </p>
+              {preview ? (
+                <ErrorState message="Identity and the system report are available in the tray app only." />
+              ) : failed ? (
                 <ErrorState
                   message="Identity and the system report could not be read."
                   hint="Check that canvas-rgb is running, then try again."
@@ -209,22 +218,28 @@ export function HelpView() {
               title="System report"
               className="help-report"
               actions={
-                <div className="help-report-head">
-                  <span className="fig help-count" aria-live="polite" aria-busy={report === null || undefined}>
-                    {report ? `${receipt.length} characters` : <InlineSkeleton width="10ch" />}
-                  </span>
-                  <Button
-                    icon={copied ? <Check size={16} /> : <Copy size={16} />}
-                    onClick={() => void copy()}
-                    disabled={!receipt}
-                    size="sm"
-                  >
-                    {copied ? "Copied" : "Copy"}
-                  </Button>
-                </div>
+                preview ? (
+                  <span className="mute help-report-note">Tray app only</span>
+                ) : (
+                  <div className="help-report-head">
+                    <span className="fig help-count" aria-live="polite" aria-busy={report === null || undefined}>
+                      {report ? `${receipt.length} characters` : <InlineSkeleton width="10ch" />}
+                    </span>
+                    <Button
+                      icon={copied ? <Check size={16} /> : <Copy size={16} />}
+                      onClick={() => void copy()}
+                      disabled={!receipt}
+                      size="sm"
+                    >
+                      {copied ? "Copied" : "Copy"}
+                    </Button>
+                  </div>
+                )
               }
             >
-              {failed ? (
+              {preview ? (
+                <ErrorState message="The system report is available in the tray app only." />
+              ) : failed ? (
                 <ErrorState
                   message="The report could not be read."
                   hint="Nothing was copied. Try again, or copy the identity facts above."
