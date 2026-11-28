@@ -270,7 +270,11 @@ function RailValue({ value, className, children }: { value: string; className?: 
     // span that is hidden from the accessibility tree.
     const link = el.closest<HTMLElement>(".rail-link");
     if (link) link.title = `${link.dataset.label ?? ""} ${value}`.trim();
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      // A value that goes away (a deleted scene) must not leave its tooltip on the row.
+      if (link) link.removeAttribute("title");
+    };
   }, [value]);
   return (
     <span

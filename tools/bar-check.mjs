@@ -305,7 +305,8 @@ export function judge(m, state) {
   for (const c of m.clip) {
     if (c.userTitle) {
       const shown = c.text.replace(/…/g, "");
-      if (shown.length < USER_TITLE_FLOOR) bad.push(`${where}: user title dropped to ${shown.length} chars, floor ${USER_TITLE_FLOOR}`);
+      const shownChars = Array.from(shown).length; // code points, as the component floors them
+      if (shownChars < USER_TITLE_FLOOR) bad.push(`${where}: user title dropped to ${shownChars} chars, floor ${USER_TITLE_FLOOR}`);
       if (!c.full || Array.from(shown).some((ch) => !c.full.includes(ch))) bad.push(`${where}: user title has no full name in its title or accessible name`);
       continue;
     }
