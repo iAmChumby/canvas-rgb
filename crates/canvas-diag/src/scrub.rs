@@ -576,11 +576,9 @@ mod tests {
                     }
                 }
                 State::Skipping(depth) => {
-                    if closes >= depth {
-                        state = State::Normal;
-                    } else {
-                        state = State::Skipping(depth + opens - closes);
-                    }
+                    // Net depth, so a line like `} else {` does not end the test block early.
+                    let depth = (depth + opens).saturating_sub(closes);
+                    state = if depth == 0 { State::Normal } else { State::Skipping(depth) };
                 }
             }
         }
