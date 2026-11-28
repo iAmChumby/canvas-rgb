@@ -20,6 +20,10 @@ export function makeWorld(address: string): World {
   const world: World = { fetched: [], sockets: [], invoked: [], writes: [] };
   window.history.replaceState({}, "", address);
 
+  // The real launch put the checklist off: a preview must show its own all the same.
+  window.sessionStorage.setItem("canvas-rgb.launch", "real-launch");
+  window.localStorage.setItem("canvas-rgb.onboarding-later", "real-launch");
+
   for (const method of ["setItem", "removeItem", "clear"] as const) {
     const real = Storage.prototype[method] as (...args: string[]) => void;
     Storage.prototype[method] = function (this: Storage, ...args: string[]) {

@@ -101,9 +101,9 @@ describe("a preview inside the tray", () => {
     expect(isDemo()).toBe(true);
 
     const view = render(page("/", <ScenesView />));
-    // Scenes, with the checklist on the sample data.
-    await screen.findByTestId("setup-count");
+    // Scenes on the sample data, with the checklist whatever the real launch put off.
     await waitFor(() => expect(screen.getAllByTestId("group-row").length).toBeGreaterThan(0));
+    const checklist = screen.queryByTestId("setup-count") !== null;
     // An in-app link drops the query: the shell puts it back and the page stays a preview.
     window.history.replaceState({}, "", "/fans/");
     for (const [at, node] of [
@@ -143,8 +143,9 @@ describe("a preview inside the tray", () => {
     });
 
     // Every tray command that reads or changes the real PC.
-    await expect(fetchApiConfig()).rejects.toThrow();
     await act(async () => {
+      // The one command that hands out the daemon's token: a preview has no tray to ask.
+      await fetchApiConfig().catch(() => undefined);
       for (const call of [getUpdateState, updateCheckNow, updateInstall, updateLater, updateSkip, updateUnskip]) {
         await call();
       }
@@ -181,9 +182,13 @@ describe("a preview inside the tray", () => {
     }
     await settle();
 
-    expect(world.fetched.filter((u) => u.includes(DAEMON))).toEqual([]);
-    expect(world.sockets).toEqual([]);
-    expect(world.invoked).toEqual([]);
-    expect(world.writes).toEqual([]);
+    // One comparison, so a failure shows every way out at once.
+    expect({
+      checklist,
+      requests: world.fetched.filter((u) => u.includes(DAEMON)),
+      sockets: world.sockets,
+      trayCommands: world.invoked,
+      storageWrites: world.writes,
+    }).toEqual({ checklist: true, requests: [], sockets: [], trayCommands: [], storageWrites: [] });
   });
 });

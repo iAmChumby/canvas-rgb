@@ -627,6 +627,7 @@ describe("the Scenes page", () => {
       conflicts: [],
     } as unknown as Status;
     window.sessionStorage.clear();
+    api.status.mockResolvedValue(firstRun);
     api.completeOnboarding.mockResolvedValue(undefined);
     api.activateEffect.mockResolvedValue(undefined);
     patchSnap({

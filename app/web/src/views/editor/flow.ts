@@ -78,6 +78,8 @@ export function launchId(): string {
 /** True when the owner said "Later" in this launch. */
 export function laterThisLaunch(): boolean {
   if (memoryLater) return true;
+  // A preview's "Later" is its own: what the real launch put off says nothing here.
+  if (previewActive()) return false;
   try {
     return window.localStorage.getItem(LATER_KEY) === launchId();
   } catch {
@@ -224,7 +226,7 @@ export function passHello(): void {
 
 /** The checklist is on the page: asked for from Help, or not finished and not put off. */
 export function setupVisible(status: Status | null): boolean {
-  if (status === null) return false;
+  if (!status) return false;
   // `=== false`: a status that does not carry the field is not an unfinished onboarding.
   return readFlag(SETUP_KEY) || (status.onboarding_complete === false && !laterThisLaunch());
 }

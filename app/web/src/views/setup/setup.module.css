@@ -92,7 +92,7 @@
   font: 600 var(--t14) / 1.2 var(--fu);
 }
 
-.rowKey {
+.row button.rowKey {
   grid-column: 3;
   grid-row: 1;
 }
@@ -200,7 +200,7 @@
 
 /* ---------- the phone: a pill above the bottom bar, and a sheet ---------- */
 
-.pill {
+button.pill {
   position: fixed;
   right: var(--s3);
   bottom: calc(60px + var(--s2));
