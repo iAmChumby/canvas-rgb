@@ -388,8 +388,12 @@ mod tests {
         })
     }
 
+    /// Each test gets its own folders under the one fake home: they run in parallel, and a shared
+    /// config.toml rewritten by one test's setup reads back empty in another's.
     fn tree() -> (PathBuf, PathBuf, FakeMachine) {
-        let root = home().clone();
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = home().join(format!("t{n}"));
         let home = root.join("home");
         let logs = root.join("logs");
         std::fs::create_dir_all(&home).unwrap();
