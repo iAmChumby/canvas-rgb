@@ -249,7 +249,8 @@ export const MEASURE = () => {
     const box = part.getBoundingClientRect();
     const out = { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
     for (const el of [part, ...part.querySelectorAll("*")]) {
-      if (!drawn(el) || !ownText(el)) continue;
+      // A tooltip or popover is meant to cover the row; it is not one of the row's parts.
+      if (!drawn(el) || !ownText(el) || el.closest('[role="tooltip"], [role="dialog"], [role="menu"]')) continue;
       let hidden = false;
       for (let a = el; a && a !== part; a = a.parentElement) {
         if (Number(getComputedStyle(a).opacity) === 0) hidden = true;
