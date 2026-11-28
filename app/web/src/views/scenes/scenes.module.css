@@ -616,7 +616,11 @@
     margin-left: calc(var(--s1) * -1);
     padding-left: var(--s1);
   }
+}
 
+/* A phone fits the window and the list scrolls in its pane (#593, app.css). Only a window too short
+   to leave that pane any room hands the list back to the document. */
+@media (max-width: 720px) and (max-height: 599.98px) {
   .frame {
     flex: 0 0 auto;
     overflow: visible;

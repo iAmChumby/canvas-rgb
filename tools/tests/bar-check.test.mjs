@@ -38,7 +38,11 @@ test("B1: sideways scroll and a page that must fit are failures", () => {
   n.vw = 390;
   n.docHidden = 7;
   assert.deepEqual(judge(n, state()), []);
-  assert.ok(judge(n, state("layout")).some((b) => b.includes("down by 7px")));
+  // #593: the phone rule names states the check really drives.
+  for (const name of ["scenes", "displays"]) {
+    assert.ok(STATES.some((s) => s.name === name), `${name} is not a state`);
+    assert.ok(judge({ ...n, playing: "" }, state(name)).some((b) => b.includes("down by 7px")), `${name} may scroll`);
+  }
 });
 
 test("a clipped page title is a failure and names the title", () => {

@@ -69,6 +69,8 @@ export const STATES = [
   { name: "scenes", url: "/", state: "renaming" },
   // B11: a scene name of any length is drawn once and over nothing.
   { name: "scenes", url: "/", state: "long-scene" },
+  // #593: Scenes with the setup finished, the page a person sees every day.
+  { name: "scenes", url: "/?state=complete", state: "complete" },
   // B7: a name cut on a narrow window is whole again on a wide one.
   { name: "builder", url: builder("long-name"), state: "regrow" },
   // B10: every secondary key has one home at every width, the bar or the overflow.
@@ -333,7 +335,7 @@ export const MEASURE = () => {
 
 export const USER_TITLE_FLOOR = 12;
 /** At 960 px and up a page must fit; at phone width only these pages fit on main (B14). */
-const NO_SCROLL_AT_PHONE = new Set(["layout"]);
+const NO_SCROLL_AT_PHONE = new Set(["scenes", "displays"]);
 /** The secondary keys each page's overflow state must find a home for. */
 const OVERFLOW_ACTIONS = { effects: ["Import", "Back to"], builder: ["Revert", "Back to"], peripherals: ["Revert"] };
 const REGROW = { narrow: { width: 390, height: 844 }, wide: { width: 1920, height: 1040 } };

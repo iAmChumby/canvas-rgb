@@ -9938,6 +9938,51 @@ button.chip:hover {
   gap: var(--s3);
 }
 
+/* ---------- Scenes and Displays on a phone: the page fits the window (#593) ---------- */
+
+/* The same shape as the stack builder below: the shell is as tall as the window and one pane
+   scrolls (the scene's rows; the display cards). A window under 600 px tall has no room for a
+   pane, so it keeps the phone's document scroll. A takeover owns the window by its own rules. */
+@media (max-width: 720px) and (min-height: 600px) {
+  .app[data-takeover="off"]:has(.rd-scenes),
+  .app[data-takeover="off"]:has(.rd-displays) {
+    height: 100dvh;
+    min-height: 0;
+  }
+
+  .app[data-takeover="off"]:has(.rd-scenes) .main,
+  .app[data-takeover="off"]:has(.rd-displays) .main {
+    height: 100dvh;
+    min-height: 0;
+  }
+
+  .app[data-takeover="off"]:has(.rd-scenes) .content,
+  .app[data-takeover="off"]:has(.rd-displays) .content {
+    /* From nothing, not from its content's height: a tall page would squeeze the title bar. */
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
+    /* The pane ends just above the dock. */
+    padding-bottom: calc(var(--dock-h) + var(--s2));
+  }
+
+  .app[data-takeover="off"]:has(.rd-scenes) .page-enter,
+  .app[data-takeover="off"]:has(.rd-displays) .page-enter,
+  .app[data-takeover="off"] .rd-scenes,
+  .app[data-takeover="off"] .rd-displays {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .app[data-takeover="off"] .rd-displays .rd-displays-grid {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    /* A card keeps its own height: the pane scrolls, the card is never squeezed. */
+    grid-auto-rows: max-content;
+  }
+}
+
 /* ---------- the stack builder on a phone (issue #95, D95.5.7, PR D) ---------- */
 
 @media (max-width: 720px) {
