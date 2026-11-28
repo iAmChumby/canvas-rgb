@@ -130,6 +130,11 @@ const MEASURE = () => {
   // The last thing on the page: scroll to the end, then find the lowest drawn element that is not
   // part of the nav, a toast or a fixed overlay.
   window.scrollTo(0, document.documentElement.scrollHeight);
+  // A page that fits the window scrolls a pane instead (#593): its end is reached the same way.
+  // A box that only clips (hidden) is not scrolled, so what it cuts off still fails.
+  for (const el of document.querySelectorAll(".content *")) {
+    if (/(auto|scroll)/.test(getComputedStyle(el).overflowY)) el.scrollTop = el.scrollHeight;
+  }
   let lowest = 0;
   let lowestName = "";
   for (const el of document.querySelectorAll("main *, .content *")) {

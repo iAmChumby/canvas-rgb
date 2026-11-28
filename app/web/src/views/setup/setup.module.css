@@ -225,8 +225,14 @@ button.pill {
 @media (max-width: 720px) {
   /* The page ends above the pill. */
   .frame[data-setup="on"] > .page {
-    flex: 0 0 auto;
     padding-bottom: 56px;
+  }
+}
+
+/* A short phone window scrolls the document (#593). */
+@media (max-width: 720px) and (max-height: 599.98px) {
+  .frame[data-setup="on"] > .page {
+    flex: 0 0 auto;
   }
 }
 

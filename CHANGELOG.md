@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Editor: on a phone, Scenes and Displays fit the window instead of scrolling the whole page; the scene's rows and the display cards scroll in their own list. (#593)
+
 ## [0.21.0] - 2026-11-28
 
 ### Added

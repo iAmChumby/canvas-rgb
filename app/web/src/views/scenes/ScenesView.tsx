@@ -400,7 +400,7 @@ export function ScenesView() {
     <>
       <ChainTakeover />
       <SetupLayout onTroubleshoot={() => setHello(true)}>
-      <div className={`rd-page ${s.page}`}>
+      <div className={`rd-page rd-scenes ${s.page}`}>
       <PageTitle
         title="Scenes"
         contextBusy={state === "loading"}
