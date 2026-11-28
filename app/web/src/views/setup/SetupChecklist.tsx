@@ -7,7 +7,7 @@ import { Button } from "@/components/Button";
 import { notify } from "@/components/Notify";
 import { Figure } from "@/components/Readout";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { toastText } from "@/lib/errors";
 import { doneCount, setupFinished, setupRows, type SetupRow } from "@/lib/setup";
 import { refreshStatus, useSnap } from "@/lib/store";
 import { closeSetup, putOffSetup, welcomeBack } from "@/views/editor/flow";
@@ -92,7 +92,7 @@ export function SetupChecklist({
       closeSetup();
       onLeave?.();
     } catch (e) {
-      notify(messageOf(e), "warn");
+      notify(toastText(e), "warn");
     } finally {
       setBusy(false);
     }

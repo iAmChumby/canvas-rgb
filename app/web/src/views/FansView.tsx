@@ -258,16 +258,18 @@ export function FansView() {
       <PageTitle
         title="Fans"
         context={
-          fans && !fansError ? (
+          fans ? (
             <>
               {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
             </>
           ) : undefined
         }
       />
+      {/* A stale read keeps the last values on screen (#576 K1), so the header blocks stay with
+          them and nothing below moves; only a failed first load (no fans yet) has none. */}
       {/* R3: when the strip cannot hold the context, the same chip line is the first line of the
           body. CSS shows one copy: the strip decides from its own content box. */}
-      {fans && !fansError && (
+      {fans && (
         <p className="bar-context-mirror fig">
           {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
         </p>
@@ -282,7 +284,7 @@ export function FansView() {
           </ButtonLink>
         </FaultNote>
       )}
-      {fans && !fansError && <FanProfileActions fans={fans} />}
+      {fans && <FanProfileActions fans={fans} />}
 
       <StaleNotice
         message="The fan readings may be out of date."
