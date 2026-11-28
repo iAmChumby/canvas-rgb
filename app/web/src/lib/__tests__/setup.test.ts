@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { doneCount, setupFinished, setupRows, type SetupFacts } from "@/lib/setup";
+import { doneCount, fitsTwoLines, setupFinished, setupRows, type SetupFacts } from "@/lib/setup";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { Status } from "@/proto/Status";
 
@@ -106,6 +106,44 @@ describe("the setup rows", () => {
     }
     expect(row(read({ status: status({ service: "down" }) }), "fans").state).toBe("unknown");
     expect(row(read({ fans: null, fansError: "503" }), "fans").state).toBe("unknown");
+  });
+
+  it("never has a value longer than the row's two lines, whatever the names are", () => {
+    const long = ["x".repeat(40), "The living room desk and shelf at night!", "灯".repeat(40)];
+    const cases: Partial<SetupFacts>[] = [
+      { status: status({ conflicts: [{}] as Status["conflicts"] }) },
+      { status: status({ devices_connected: 0, openrgb: "connecting" }) },
+      { status: status({ devices_connected: 0, openrgb: "down" as Status["openrgb"] }) },
+      { status: status({ devices_connected: 999, devices_total: 999 }) },
+      { status: status({ safe_start: { active: true, reason: "unclean_once", unclean_streak: 1 } }) },
+      { status: status({ safe_start: { active: true, reason: "crash_loop", unclean_streak: 4294967295 } }) },
+      { status: status({ service: "down" }) },
+      { fans: fans({ chip: null, chip_problem: "pawn_io_unavailable" }) },
+      { fans: fans({ chip: null, chip_problem: "chip_not_found" }) },
+      { fans: fans({ chip_checked: false }) },
+      ...long.flatMap((name) => [
+        { status: status({ active_scene: { id: "main", name } }) },
+        { status: status({ active_scene: { id: "main", name }, active_effects: [] }) },
+        {
+          status: status({ active_effects: ["mine"] }),
+          effects: [{ id: "mine", name }] as SetupFacts["effects"],
+        },
+      ]),
+    ];
+    for (const over of cases) {
+      for (const r of read(over)) expect(fitsTwoLines(r.value), r.value).toBe(true);
+    }
+  });
+
+  it("shows a name whole when it fits, and a shorter sentence when it cannot", () => {
+    const scene = (name: string) => row(read({ status: status({ active_scene: { id: "main", name } }) }), "scene").value;
+    expect(scene("Evening desk and shelf")).toBe("Evening desk and shelf");
+    expect(scene("x".repeat(40))).toBe("Your scene is playing");
+    const chosen = read({
+      status: status({ active_effects: ["mine"] }),
+      effects: [{ id: "mine", name: "An effect name that runs on far past two lines of the row" }] as SetupFacts["effects"],
+    });
+    expect(row(chosen, "effect").value).toBe("Your pick is playing");
   });
 
   it("is finished when every row that can be done is done", () => {

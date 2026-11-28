@@ -58,9 +58,7 @@ function Row({ row, onTroubleshoot }: { row: SetupRow; onTroubleshoot?: () => vo
         </Button>
       )}
       <span className={s.why}>{row.why}</span>
-      <span className={s.value} title={row.value}>
-        {row.value}
-      </span>
+      <span className={s.value}>{row.value}</span>
     </li>
   );
 }

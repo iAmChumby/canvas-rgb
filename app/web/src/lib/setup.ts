@@ -38,6 +38,41 @@ type Read = Pick<SetupRow, "state" | "value">;
 
 const NOT_READ: Read = { state: "unknown", value: "—" };
 
+/** The characters one line of a row's monospace value holds in the narrowest row. */
+export const VALUE_LINE_CHARS = 28;
+
+/** A character's width in monospace columns: the wide scripts and emoji take two. */
+function columns(word: string): number {
+  let n = 0;
+  for (const c of word) n += (c.codePointAt(0) ?? 0) >= 0x2e80 ? 2 : 1;
+  return n;
+}
+
+/** True when `text` wraps by whole words into the two lines a row has for its value. */
+export function fitsTwoLines(text: string): boolean {
+  let lines = 1;
+  let used = 0;
+  for (const word of text.split(/\s+/)) {
+    const wide = columns(word);
+    if (wide > VALUE_LINE_CHARS) return false;
+    if (used > 0 && used + 1 + wide > VALUE_LINE_CHARS) {
+      lines += 1;
+      used = wide;
+    } else {
+      used += (used > 0 ? 1 : 0) + wide;
+    }
+  }
+  return lines <= 2;
+}
+
+/**
+ * A value with a name in it, or `otherwise` when the name is too long to show whole. Nothing is
+ * cut off: the name itself stands on the Scenes page.
+ */
+function named(value: string, otherwise: string): string {
+  return fitsTwoLines(value) ? value : otherwise;
+}
+
 function lights(status: Status | null): Read {
   if (!status) return NOT_READ;
   if ((status.conflicts?.length ?? 0) > 0) {
@@ -69,15 +104,20 @@ function scene(status: Status | null): Read {
   const active = status.active_scene;
   if (active === undefined || !status.active_effects) return NOT_READ;
   if (active === null) return { state: "todo", value: "No scene is on" };
-  if (status.active_effects.length === 0) return { state: "todo", value: `${active.name}: nothing playing` };
-  return { state: "done", value: active.name };
+  if (status.active_effects.length === 0) {
+    return { state: "todo", value: named(`${active.name}: nothing playing`, "Your scene: nothing playing") };
+  }
+  return { state: "done", value: named(active.name, "Your scene is playing") };
 }
 
 function effect(status: Status | null, effects: EffectSummary[] | null): Read {
   if (!status?.active_effects) return NOT_READ;
   // The onboarding's own effects are the app's, never a choice.
   const chosen = status.active_effects.find((id) => id !== FIRST_RUN_EFFECT && !id.startsWith("onboard-"));
-  if (chosen) return { state: "done", value: effects?.find((e) => e.id === chosen)?.name ?? chosen };
+  if (chosen) {
+    const name = effects?.find((e) => e.id === chosen)?.name ?? chosen;
+    return { state: "done", value: named(name, "Your pick is playing") };
+  }
   if (status.active_effects.includes(FIRST_RUN_EFFECT)) {
     return { state: "todo", value: "Aurora, the first-run effect" };
   }

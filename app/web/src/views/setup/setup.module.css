@@ -1,6 +1,8 @@
 /*
  * The setup checklist (#579): flat rows with a lamp, a name, why it matters and what was read.
- * Every row has one height in every state, so a tick never resizes or reorders anything.
+ * Every row has one height in every state, so a tick never resizes or reorders anything. No text
+ * is cut off: the why and the value each have two lines and wrap by whole words, the strings in
+ * `lib/setup.ts` fit them in the narrowest row, and a longer name gives way to a shorter sentence.
  * Every colour is a token; nothing glows.
  */
 
@@ -62,7 +64,7 @@
 
 .rows {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--s2);
   margin: 0;
   padding: 0;
@@ -72,11 +74,11 @@
 .row {
   display: grid;
   grid-template-columns: 12px minmax(0, 1fr) auto;
-  grid-template-rows: 28px 36px 20px;
+  grid-template-rows: 28px 36px 40px;
   column-gap: var(--s3);
   align-items: center;
   box-sizing: border-box;
-  height: 104px;
+  height: 120px;
   padding: var(--s2) var(--s3);
   border-radius: 8px;
   background: var(--sunk);
@@ -85,9 +87,6 @@
 .name {
   grid-column: 2;
   grid-row: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--ink);
   font: 600 var(--t14) / 1.2 var(--fu);
 }
@@ -98,12 +97,9 @@
 }
 
 .why {
-  display: -webkit-box;
   grid-column: 2 / -1;
   grid-row: 2;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  align-self: start;
   color: var(--dim);
   font: 400 var(--t14) / 18px var(--fu);
 }
@@ -111,9 +107,7 @@
 .value {
   grid-column: 2 / -1;
   grid-row: 3;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  align-self: start;
   color: var(--mute);
   font: 400 var(--t14) / 20px var(--fm);
 }
@@ -180,6 +174,13 @@
   min-height: 40px;
 }
 
+/* A band above the page takes two rows side by side only while each stays wide enough. */
+@container page (min-width: 660px) {
+  .rows {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 /* A box wide enough for the page and a column: the checklist is the right column. */
 @container page (min-width: 1100px) {
   .frame[data-setup="on"] {
@@ -188,7 +189,7 @@
 
   .panel {
     order: 0;
-    width: 300px;
+    width: 340px;
     min-height: 0;
     overflow: auto;
   }
@@ -226,10 +227,6 @@ button.pill {
   .frame[data-setup="on"] > .page {
     flex: 0 0 auto;
     padding-bottom: 56px;
-  }
-
-  .rows {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 
