@@ -6,8 +6,6 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
-## [0.21.0] - 2026-11-27
-
 ### Added
 
 - Hardware notes: when OpenRGB is down or the fan chip cannot be reached, Devices, Fans and the status strip say what is affected, why, how to fix it and when to ignore it. The page notes can be dismissed; they come back when the problem clears and returns. Help & About gains a "Why isn't my device here?" checklist. (#580)
@@ -509,8 +507,7 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.21.0...HEAD
-[0.21.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.20.0...v0.21.0
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.20.0...HEAD
 [0.20.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.18.0...v0.18.1
