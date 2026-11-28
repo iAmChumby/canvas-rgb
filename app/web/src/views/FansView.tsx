@@ -26,7 +26,7 @@ import { TACH_ONLY_WHY, UNAVAILABLE_WHY, UNREAD_DUTY_WHY, canDrive, isHandedBack
 import { api } from "@/lib/endpoints";
 import { writeFanMode } from "@/lib/fanWrites";
 import { caught, type Failure, toastText } from "@/lib/errors";
-import { getSnap, refreshFans, refreshStatus, retryFans as retryFansNow, useSnap } from "@/lib/store";
+import { FAST_POLL_MS, getSnap, refreshFans, refreshStatus, retryFans as retryFansNow, useSnap } from "@/lib/store";
 import { baseFloor, CPU_IDLE_LIMIT_C, cpuLimitInIdleRange, hotRuleShortText, hotRuleText } from "@/lib/fan-rules";
 import { clamp, fmtSeconds } from "@/lib/format";
 import type { CurvePoint } from "@/proto/CurvePoint";
@@ -39,6 +39,7 @@ import type { TempSource } from "@/proto/TempSource";
 import type { TempReading } from "@/proto/TempReading";
 import { PageTitle } from "@/shell/PageHeader";
 import { ErrorState } from "@/components/ErrorState";
+import { StaleNotice } from "@/components/StaleNotice";
 
 const MAX_POINTS = 8;
 const MIN_POINTS = 2;
@@ -275,13 +276,12 @@ export function FansView() {
       )}
       {fans && !fansError && <FanProfileActions fans={fans} />}
 
-      {stale && (
-        <ErrorState
-          message="The fan readings may be out of date."
-          error={fansError}
-          onRetry={() => void retryFans()}
-        />
-      )}
+      <StaleNotice
+        message="The fan readings may be out of date."
+        error={stale ? fansError : null}
+        everyMs={FAST_POLL_MS}
+        onRetry={() => void retryFans()}
+      />
 
       <LoadFrame
         className="stack"
@@ -954,8 +954,16 @@ function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
           Use the board list
         </Button>
       )}
+      {/* Compact beside the keys (K2). No Details or Try again: the key that was refused stands
+          right here, and pressing it again is the retry. */}
       {err && (
-        <ErrorState compact tooltip className="fan-hdr-availability-error" error={err} />
+        <ErrorState
+          compact
+          tooltip
+          className="fan-hdr-availability-error"
+          error={err}
+          next="Press the key again to retry."
+        />
       )}
     </span>
   );
@@ -1167,7 +1175,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     <div className="fan-status" data-slot="fan-status">
       <StatusReason text={reasonText} warn={handedBack} quiet={quiet} />
       <div className="fan-status-line" data-slot="fan-status-line">
-        <ErrorState compact tooltip className="fan-status-error" error={err} />
+        {/* Compact in the reserved row (K2, #109). No Details or Try again: the control that was
+            refused stands above, and changing it again is the retry. */}
+        <ErrorState compact tooltip className="fan-status-error" error={err} next="Make the change again to retry." />
         <span className="fan-status-busy mute" role="status" aria-busy={busy || undefined}>
           <WaitMark busy={busy} label="Applying" />
         </span>
@@ -1227,8 +1237,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       </span>
     </span>
   );
+  // Compact under the limit (K2). No Details or Try again: the field that was refused stands
+  // above it, and setting it again is the retry.
   const hotError = hotErr && (
-    <ErrorState compact error={hotErr} />
+    <ErrorState compact error={hotErr} next="Set the limit again to retry." />
   );
   // Issue #297: a CPU line at or under the fixed warning threshold (60 °C) keeps the closed-loop
   // hold engaged almost all the time, so the fans run hard to hold it. The sentence states the

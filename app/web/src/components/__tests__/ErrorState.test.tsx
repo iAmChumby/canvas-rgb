@@ -38,6 +38,24 @@ describe("the error anatomy takes the caught value (#576, F8/F9)", () => {
     expect(screen.getByRole("alert").getAttribute("title")).toBe("the daemon said no");
   });
 
+  it("says the next step after the words of a compact line that has no key row (K2)", () => {
+    render(<ErrorState compact tooltip error="unknown header" next="Press the key again to retry." />);
+    const line = screen.getByRole("alert");
+    expect(line.textContent).toBe("unknown header. Press the key again to retry.");
+    expect(line.getAttribute("title")).toBe("unknown header. Press the key again to retry.");
+    expect(screen.getByText("unknown header")).toBeTruthy();
+  });
+
+  it("says the error's own hint over the view's next step", () => {
+    render(<ErrorState compact error={refusal} next="Set it again." />);
+    expect(screen.getByRole("alert").textContent).toBe("the daemon said no. Try again in a moment.");
+  });
+
+  it("says no next step on an empty reserved line", () => {
+    render(<ErrorState compact error={null} next="Set it again." />);
+    expect(screen.getByRole("alert").textContent).toBe("");
+  });
+
   it("offers no logs key outside the tray", () => {
     render(<ErrorState error={refusal} />);
     expect((screen.getByRole("button", { name: "Tray app only" }) as HTMLButtonElement).disabled).toBe(true);

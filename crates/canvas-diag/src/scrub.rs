@@ -527,6 +527,58 @@ mod tests {
         }
     }
 
+    /// The source with comments and string and char literals taken out, line breaks kept, so a
+    /// `"{"` cannot shift the brace depth (K3).
+    fn code_only(text: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while i < len {
+            let c = chars[i];
+            let next = chars.get(i + 1).copied();
+            // Where the comment or literal that starts here ends.
+            let end = if c == '/' && next == Some('/') {
+                Some((i..len).find(|&j| chars[j] == '\n').unwrap_or(len))
+            } else if c == '/' && next == Some('*') {
+                Some((i + 3..len).find(|&j| chars[j - 1] == '*' && chars[j] == '/').map_or(len, |j| j + 1))
+            } else if c == 'r' && (i == 0 || chars[i - 1] == 'b' || !ident(chars[i - 1])) {
+                let hashes = chars[i + 1..].iter().take_while(|&&h| h == '#').count();
+                let quote = i + 1 + hashes;
+                (chars.get(quote) == Some(&'"')).then(|| {
+                    let closes = |j: usize| {
+                        chars[j] == '"' && chars[j + 1..].iter().take_while(|&&h| h == '#').count() >= hashes
+                    };
+                    (quote + 1..len).find(|&j| closes(j)).map_or(len, |j| j + 1 + hashes)
+                })
+            } else if c == '"' {
+                let mut j = i + 1;
+                while j < len && chars[j] != '"' {
+                    j += if chars[j] == '\\' { 2 } else { 1 };
+                }
+                Some((j + 1).min(len))
+            } else if c == '\'' && next == Some('\\') {
+                Some((i + 3..len).find(|&j| chars[j] == '\'').map_or(len, |j| j + 1))
+            } else if c == '\'' && chars.get(i + 2) == Some(&'\'') {
+                Some(i + 3)
+            } else {
+                None // code, or the quote of a lifetime
+            };
+            match end {
+                Some(end) => {
+                    out.extend(chars[i..end].iter().filter(|&&ch| ch == '\n'));
+                    i = end;
+                }
+                None => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
     /// Scans one file, skipping only items marked `#[cfg(test)]` (a `mod` or `fn` block, brace
     /// matched), so a `#[cfg(test)]` early in a file cannot hide the production ids after it (H3).
     fn production_prefixes(text: &str) -> std::collections::BTreeSet<String> {
@@ -539,22 +591,32 @@ mod tests {
             Seeking,
             Skipping(usize),
         }
+        /// Where a test item stands after a line of its head: inside its block, over (a block
+        /// closed on the line, or a braceless `mod x;`), or still before its `{`.
+        fn after_head(code: &str, opens: usize, closes: usize) -> State {
+            if opens > closes {
+                State::Skipping(opens - closes)
+            } else if opens > 0 || code.trim_end().ends_with(';') {
+                State::Normal
+            } else {
+                State::Seeking // a signature that spans lines
+            }
+        }
         let mut state = State::Normal;
-        for line in text.lines() {
-            let trimmed = line.trim_start();
-            let opens = line.matches('{').count();
-            let closes = line.matches('}').count();
+        let code = code_only(text);
+        for (line, code) in text.lines().zip(code.split('\n')) {
+            let trimmed = code.trim_start();
+            let opens = code.matches('{').count();
+            let closes = code.matches('}').count();
             match state {
-                State::Normal => {
-                    if trimmed.starts_with("#[cfg(test)]") {
-                        state = State::Pending;
-                    } else {
-                        prefixes_on_line(line, &consts, &mut found);
-                    }
-                }
+                State::Normal => match trimmed.strip_prefix("#[cfg(test)]") {
+                    Some(rest) if rest.trim().is_empty() => state = State::Pending,
+                    Some(rest) => state = after_head(rest, opens, closes),
+                    None => prefixes_on_line(line, &consts, &mut found),
+                },
                 State::Pending => {
-                    if trimmed.starts_with('#') {
-                        continue; // another attribute on the same test item
+                    if trimmed.trim_end().is_empty() || trimmed.starts_with('#') {
+                        continue; // a comment, or another attribute on the same test item
                     }
                     let is_test_item = trimmed.starts_with("mod ")
                         || trimmed.starts_with("fn ")
@@ -564,17 +626,11 @@ mod tests {
                     if !is_test_item {
                         state = State::Normal;
                         prefixes_on_line(line, &consts, &mut found);
-                    } else if opens > closes {
-                        state = State::Skipping(opens - closes);
                     } else {
-                        state = State::Seeking; // a signature that spans lines
+                        state = after_head(trimmed, opens, closes);
                     }
                 }
-                State::Seeking => {
-                    if opens > closes {
-                        state = State::Skipping(opens - closes);
-                    }
-                }
+                State::Seeking => state = after_head(trimmed, opens, closes),
                 State::Skipping(depth) => {
                     // Net depth, so a line like `} else {` does not end the test block early.
                     let depth = (depth + opens).saturating_sub(closes);
@@ -614,6 +670,30 @@ mod tests {
         for prefix in found {
             assert!(ADAPTER_PREFIXES.contains(&prefix.as_str()), "missing adapter prefix {prefix:?}");
         }
+    }
+
+    #[test]
+    fn a_braceless_test_item_does_not_hide_the_lines_after_it() {
+        for item in ["#[cfg(test)]\nmod x;\n", "#[cfg(test)] mod x;\n"] {
+            let text = format!("{item}fn real(id: &str) -> DeviceId {{ DeviceId(format!(\"openrgb:{{id}}\")) }}\n");
+            assert!(production_prefixes(&text).contains("openrgb"), "{item:?}");
+        }
+    }
+
+    #[test]
+    fn a_brace_inside_a_test_literal_does_not_hide_the_lines_after_it() {
+        let text = r##"#[cfg(test)]
+fn only_in_tests<'a>(name: &'a str) {
+    let open = "{";
+    let more = ('{', '\'', "\"{", r#"{"#); // {
+    /* { */
+    let id = DeviceId("testonly:1".into());
+}
+fn real() -> DeviceId { DeviceId("openrgb:1".into()) }
+"##;
+        let found = production_prefixes(text);
+        assert!(found.contains("openrgb"));
+        assert!(!found.contains("testonly"));
     }
 
     #[test]

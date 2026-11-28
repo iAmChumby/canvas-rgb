@@ -21,6 +21,11 @@ import s from "./ErrorState.module.css";
  * the view wants over it, and the error's own words then stand under it as the detail. A daemon or
  * tray message is already scrubbed before it reaches the editor; `detail` is never used as the
  * report's `what-happened`.
+ *
+ * The compact exception (K2): a line that stands where the card cannot (a reserved row, a header,
+ * a note over content the page kept) has no key row. It still says the next step in words
+ * (`next`: the error's hint, else the view's own sentence), and its full anatomy is one tap away
+ * (`details`), or the view says in a comment why none applies.
  */
 export function ErrorState({
   message,
@@ -39,6 +44,8 @@ export function ErrorState({
   compact = false,
   context,
   tooltip = false,
+  next,
+  details = false,
   className,
   style,
   id,
@@ -70,6 +77,10 @@ export function ErrorState({
   context?: string;
   /** Compact only: the whole line is also the tooltip, for a row that cuts it short. */
   tooltip?: boolean;
+  /** Compact only: the next step said after the words, unless the error carries its own hint. */
+  next?: string;
+  /** Compact only: a Details key that opens the full card over what is below the line. */
+  details?: boolean;
   className?: string;
   style?: CSSProperties;
   id?: string;
@@ -83,6 +94,7 @@ export function ErrorState({
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [logsRefused, setLogsRefused] = useState<unknown>(null);
+  const [open, setOpen] = useState(false);
   const logs = logsEnabled ?? tauriHost() !== null;
   const openLogs =
     onOpenLogs ??
@@ -110,16 +122,44 @@ export function ErrorState({
     // reserved row keeps its room.
     const body = message ?? said;
     const line = body !== null && context ? `${context} ${String(body)}` : body;
+    const step = line !== null && next !== undefined ? (lead ?? next) : null;
+    // The words end in a full stop before the next step starts.
+    const stop = step !== null && typeof line === "string" && !/[.!?…]$/.test(line) ? "." : "";
+    const whole = typeof line === "string" ? (step === null ? line : `${line}${stop} ${step}`) : undefined;
     return (
-      <ErrorLine
-        className={className}
-        style={style}
-        id={id}
-        role="alert"
-        title={tooltip && typeof line === "string" ? line : undefined}
-      >
-        {line ?? ""}
-      </ErrorLine>
+      <>
+        <ErrorLine
+          className={className}
+          style={style}
+          id={id}
+          role="alert"
+          title={tooltip ? whole : undefined}
+        >
+          {step === null ? (
+            (line ?? "")
+          ) : (
+            <>
+              <span>{line}</span>
+              {stop} <span className={s.step}>{step}</span>
+            </>
+          )}
+          {details && line !== null ? (
+            <button type="button" className={s.link} aria-expanded={open} onClick={() => setOpen(!open)}>
+              {open ? "Hide details" : "Details"}
+            </button>
+          ) : null}
+        </ErrorLine>
+        {details && open ? (
+          <ErrorState
+            message={message}
+            error={error}
+            hint={lead ?? next}
+            onRetry={onRetry}
+            busy={busy}
+            className={s.over}
+          />
+        ) : null}
+      </>
     );
   }
 

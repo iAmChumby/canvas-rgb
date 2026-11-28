@@ -1,5 +1,6 @@
 "use client";
 import { ErrorState } from "@/components/ErrorState";
+import { StaleNotice } from "@/components/StaleNotice";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -45,7 +46,7 @@ import { BLANK_EFFECT, blankFileName, copyFileName, titleOf, withTitle } from "@
 import { api } from "@/lib/endpoints";
 import { ApiFailure, caught, toastText, type Failure } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
-import { getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
+import { SLOW_POLL_MS, getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
 import { PageActions, PageTitle } from "@/shell/PageHeader";
 import { Popover } from "@/components/Popover";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
@@ -1545,15 +1546,14 @@ export function EffectsView() {
         </div>
       )}
 
-      {listStale && (
-        // The list is on screen but the last refresh failed: the cards may be old, and the count
-        // is a dash until the list is read again.
-        <ErrorState
-          message="The effect list may be out of date."
-          error={effectsError}
-          onRetry={() => void retryEffects()}
-        />
-      )}
+      {/* The list is on screen but the last refresh failed: the cards may be old, and the count
+          is a dash until the list is read again. */}
+      <StaleNotice
+        message="The effect list may be out of date."
+        error={listStale ? effectsError : null}
+        everyMs={SLOW_POLL_MS}
+        onRetry={() => void retryEffects()}
+      />
 
       {narrow ? (
         <div

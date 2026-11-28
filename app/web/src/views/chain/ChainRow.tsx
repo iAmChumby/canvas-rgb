@@ -1,5 +1,4 @@
 "use client";
-import { ErrorState } from "@/components/ErrorState";
 
 // One resizable ARGB header on the Devices page: what state it is in, the one key that starts or
 // redoes its setup, and every device's own controls once it is set up.
@@ -14,6 +13,7 @@ import { ErrorState } from "@/components/ErrorState";
 // and has no second device to edit. Those edits go straight to `PATCH /api/v1/lights/{id}` and read
 // both lists back; the flow is not run for them.
 
+import { ErrorState } from "@/components/ErrorState";
 import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { PencilSimple } from "@phosphor-icons/react";

@@ -31,7 +31,7 @@ import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
 import { api } from "@/lib/endpoints";
 import { caught, type Failure, toastText } from "@/lib/errors";
-import { refreshLights, refreshStatus, retryDevices, useSnap } from "@/lib/store";
+import { SLOW_POLL_MS, refreshLights, refreshStatus, retryDevices, useSnap } from "@/lib/store";
 import type { LightPatch } from "@/proto/LightPatch";
 import type { LightView } from "@/proto/LightView";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -43,6 +43,7 @@ import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { ChainRow } from "@/views/chain/ChainRow";
 import { PageTitle } from "@/shell/PageHeader";
 import { ErrorState } from "@/components/ErrorState";
+import { StaleNotice } from "@/components/StaleNotice";
 
 const KIND_ICON: Record<DeviceKind, Icon> = {
   motherboard: Cpu,
@@ -564,15 +565,14 @@ export function DevicesView() {
         }
       />
 
-      {devicesError && devices !== null && (
-        // The list is on screen but the last read failed: the cards stay and the page says they
-        // may be old.
-        <ErrorState
-          message="The device list may be out of date."
-          error={devicesError}
-          onRetry={() => void retryDevices()}
-        />
-      )}
+      {/* The list is on screen but the last read failed: the cards stay and the page says they
+          may be old. */}
+      <StaleNotice
+        message="The device list may be out of date."
+        error={devices !== null ? devicesError : null}
+        everyMs={SLOW_POLL_MS}
+        onRetry={() => void retryDevices()}
+      />
       {openrgb === "down" && openrgbFault && !openrgbFault.dismissed && (
         <FaultNote
           parts={openrgbFault}

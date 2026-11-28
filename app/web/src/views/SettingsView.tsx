@@ -1,5 +1,6 @@
 "use client";
 import { ErrorState } from "@/components/ErrorState";
+import { StaleNotice } from "@/components/StaleNotice";
 
 import { useState } from "react";
 import { DownloadSimple, FolderOpen, Info, Lifebuoy, UploadSimple } from "@phosphor-icons/react";
@@ -16,7 +17,7 @@ import { caught, type Failure } from "@/lib/errors";
 import { exportConfig, importConfigFile } from "@/lib/config-transfer";
 import { BLACK_HEX } from "@/lib/color";
 import { openLogsFolder, tauriHost } from "@/lib/host";
-import { getSnap, patchSnap, refreshAll, refreshSettings, retrySettings, useSnap } from "@/lib/store";
+import { SLOW_POLL_MS, getSnap, patchSnap, refreshAll, refreshSettings, retrySettings, useSnap } from "@/lib/store";
 import { fmt1 } from "@/lib/format";
 import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { SettingsShape } from "@/components/LoadShapes";
@@ -152,15 +153,14 @@ export function SettingsView() {
     <div className="rd-page rd-settings">
       <PageTitle title="Settings" />
 
-      {settingsError && (
-        // A refresh that failed after the settings were read does not take the page away: the
-        // settings stay and the page says they may be old.
-        <ErrorState
-          message="The settings may be out of date."
-          error={settingsError}
-          onRetry={() => void retrySettings()}
-        />
-      )}
+      {/* A refresh that failed after the settings were read does not take the page away: the
+          settings stay and the page says they may be old. */}
+      <StaleNotice
+        message="The settings may be out of date."
+        error={settingsError}
+        everyMs={SLOW_POLL_MS}
+        onRetry={() => void retrySettings()}
+      />
 
       {/* The pane the panels scroll in when the window is too short for them (R1). */}
       <div className="rd-settings-scroll">
