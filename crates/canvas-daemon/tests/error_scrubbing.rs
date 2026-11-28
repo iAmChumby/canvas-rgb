@@ -193,7 +193,8 @@ async fn the_bundle_route_lists_then_writes() {
     let path = std::path::PathBuf::from(written["path"].as_str().unwrap());
     assert!(path.exists());
     assert_eq!(path.parent().unwrap(), canvas_diag::paths::diagnostics_dir());
-    let _ = std::fs::remove_dir_all(&home);
+    // The home is not removed: every test in this binary shares it, and removing it while
+    // another test saves into it fails that save.
 }
 
 /// The layer itself, through a real axum router: only a non-2xx body is rewritten (G4).
@@ -396,6 +397,49 @@ async fn user_names_with_device_like_text_survive_get_save_get() {
             .any(|p| p["name"] == group_name),
         "the renamed preset name survived: {detail}"
     );
+}
+
+/// A 4xx whose stream breaks is forwarded as it came: the bytes read so far, unchanged, and then
+/// the error, never a shorter body that looks complete (H2).
+#[tokio::test]
+async fn a_broken_4xx_stream_keeps_its_bytes_and_stays_broken() {
+    use futures_util::StreamExt;
+    let (_router, app, _home) = build();
+    let sent = format!("failed at {FAKE}/notes: ").into_bytes();
+    let handler = {
+        let sent = sent.clone();
+        move || {
+            let chunk = Bytes::from(sent.clone());
+            async move {
+                let cut = axum::Error::new(std::io::Error::other("the stream was cut"));
+                let stream = futures_util::stream::iter(vec![Ok::<Bytes, axum::Error>(chunk), Err(cut)]);
+                (StatusCode::BAD_REQUEST, Body::from_stream(stream))
+            }
+        }
+    };
+    let router = axum::Router::new()
+        .route("/broken", axum::routing::get(handler))
+        .layer(axum::middleware::from_fn_with_state(app, api::scrub_errors::scrub_errors));
+    let response = router
+        .oneshot(Request::builder().uri("/broken").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.headers().get(axum::http::header::CONTENT_LENGTH).is_none());
+    let mut stream = response.into_body().into_data_stream();
+    let mut got = Vec::new();
+    let mut broke = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(chunk) => got.extend_from_slice(&chunk),
+            Err(_) => {
+                broke = true;
+                break;
+            }
+        }
+    }
+    assert_eq!(got, sent, "the bytes before the break were changed");
+    assert!(broke, "a cut body must not end as a complete one");
 }
 
 /// An oversized stream without Content-Length cannot be rewritten: every byte, including the
