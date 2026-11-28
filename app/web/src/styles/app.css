@@ -561,6 +561,12 @@ html[data-motion="reduced"] *::after {
   display: none;
 }
 
+/* A name the row cannot hold on any line leaves its swatch, which carries the name in its title
+   and accessible name; the page body says it. Nothing is drawn over its neighbour. */
+.strip[data-bar-now="gone"] .strip-now-text {
+  display: none;
+}
+
 /* B9: the context leaves only when the strip's own measurement says it does not fit (the JS sets
    the attribute), and CSS uses the very same attribute, so there is no 1150/1151 gap. */
 :root[data-bar-context="body"] .rd-context {
@@ -932,6 +938,13 @@ html[data-motion="reduced"] *::after {
 
 :root[data-bar-secondary="menu"] .rd-actions .rd-secondary {
   display: none;
+}
+
+/* Keys that leave together keep the bar's own gap while they are in it. */
+.rd-actions span.rd-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: inherit;
 }
 
 .bar-overflow-menu {
@@ -6003,6 +6016,23 @@ button.chip:hover {
 
   .strip-controls {
     gap: var(--s1);
+  }
+
+  /* A first line that cannot hold the title and now playing (a build mode's back keys and a typed
+     name) sends now playing to the keys' line, so Pause and search never move (B12). The empty
+     box is the line break between the two. */
+  .strip[data-bar-rows="2"][data-bar-now="second"] .strip-row::after {
+    content: "";
+    order: 4;
+    flex-basis: 100%;
+  }
+  .strip[data-bar-rows="2"][data-bar-now="second"] .strip-now {
+    order: 5;
+  }
+  .strip[data-bar-rows="2"][data-bar-now="second"] .strip-page-actions {
+    order: 6;
+    flex-basis: auto;
+    margin-left: auto;
   }
 
   /* On the keys' own line the unsent changes are said in words. */

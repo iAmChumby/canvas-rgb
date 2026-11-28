@@ -16,7 +16,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
-- Editor: the page bar, the status strip and the rail now follow one priority order measured from their own width. A page's title never shrinks, the profile switch becomes a dropdown and secondary keys move to the overflow when space is short, the rail shows a value whole or not at all, pages with actions get a fixed two-row bar on a phone, and the audio-source value wraps instead of being cut. (#586)
+- Editor: the page bar, the status strip and the rail now follow one priority order measured from their own width. A page's title never shrinks, the profile switch becomes a dropdown and secondary keys move to the overflow when space is short, the rail shows a value whole or not at all, pages with actions get a fixed two-row bar on a phone, and the audio-source value wraps instead of being cut. The name of what is playing is shown once, moving to the keys' line or into the page when the title's line cannot hold it. (#586)
 
 ### Fixed
 

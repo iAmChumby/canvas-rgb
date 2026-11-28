@@ -3,6 +3,7 @@
 // draw, up to the room the row has. A measurement taken from either of them can never grow back.
 
 import { act, cleanup, render, screen } from "@testing-library/react";
+import type { CSSProperties } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UserTitle } from "@/shell/PageHeader";
 
@@ -106,6 +107,24 @@ describe("a user-named title", () => {
   it("never drops below twelve characters", () => {
     mount(LONG, 40);
     expect(Array.from(drawn().replace("…", ""))).toHaveLength(12);
+  });
+
+  it("keeps the room of now playing once it has moved to the keys' line", () => {
+    room = 800;
+    render(
+      <div className="strip" data-bar-rows="2" data-bar-now="second">
+        <div className="strip-row" style={{ "--bar-wraps": "1" } as CSSProperties}>
+          <span className="strip-slot">
+            <span className="rd-title">
+              <UserTitle title={LONG} />
+            </span>
+          </span>
+          <span data-w={BESIDE} />
+          <span className="strip-now" data-w={700} />
+        </div>
+      </div>,
+    );
+    expect(drawn()).toBe(LONG);
   });
 
   it("never splits an emoji, at any width", () => {

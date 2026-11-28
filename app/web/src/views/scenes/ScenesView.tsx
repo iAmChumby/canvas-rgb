@@ -12,7 +12,7 @@ import { Skeleton, InlineSkeleton } from "@/components/Skeleton";
 import { notify } from "@/components/Notify";
 import { NameField } from "@/components/NameField";
 import { Popover } from "@/components/Popover";
-import { PageActions, PageTitle, useContextInBody } from "@/shell/PageHeader";
+import { PageActions, PageTitle, useBarFlag, useContextInBody } from "@/shell/PageHeader";
 import { effectMissing, effectNameOf } from "@/lib/status";
 import { getSnap, retryScenes, useSnap } from "@/lib/store";
 import { AddDevices } from "@/views/scenes/AddDevices";
@@ -57,6 +57,20 @@ function ScenesShape({ rows }: { rows: number }) {
         </div>
       ))}
     </div>
+  );
+}
+
+/** The scene line: its name, unless something above already says it, and what is in it. */
+function SceneLine({ name, groups, leds }: { name: string | null; groups: number; leds: number | null }) {
+  const counts =
+    groups === 0
+      ? "no groups yet"
+      : `${groups} ${groups === 1 ? "group" : "groups"}${leds === null ? "" : ` · ${leds} LEDs`}`;
+  return (
+    <span className="rd-scenes-context">
+      {name !== null && <b>{name}</b>}
+      <span className="rd-scenes-counts">{name === null ? counts : ` · ${counts}`}</span>
+    </span>
   );
 }
 
@@ -258,6 +272,16 @@ export function ScenesView() {
   /** Where the scene that plays is in the order of the keys. */
   const sceneAt = use.scenes.findIndex((s) => s.id === scene?.id);
 
+  // The strip names what is playing; where that is this scene and the rail's deck is collapsed,
+  // the scene line leaves the name out, so it is on screen once (#586 B11). The body's status line
+  // is the name's home when the strip could not hold it.
+  const namedInStrip = useBarFlag("nowWhere", "strip");
+  const namedInBody = useBarFlag("nowWhere", "body");
+  const playingName = useSnap((x) => x.status?.active_scene?.name);
+  const nameSaid = (namedInStrip || namedInBody) && scene !== undefined && scene !== null && scene.name === playingName;
+  // Undo and Redo are secondary keys: a bar that cannot hold them keeps them in the scene's menu.
+  const keysInMenu = useBarFlag("barSecondary", "menu");
+
   // The rename field stands where the scene line is. When the strip moves that line between the
   // bar and the body, the focus follows the copy that is on screen (#586 R3).
   const contextInBody = useContextInBody();
@@ -389,18 +413,7 @@ export function ScenesView() {
                 onEscape={() => setRenaming(false)}
               />
             ) : (
-              <span className="rd-scenes-context">
-                <b>{scene.name}</b>
-                {groups.length === 0 ? (
-                  <span className="rd-scenes-counts"> · no groups yet</span>
-                ) : (
-                  <span className="rd-scenes-counts">
-                    {" "}
-                    · {groups.length} {groups.length === 1 ? "group" : "groups"}
-                    {lightsState === "ready" ? ` · ${totalLeds} LEDs` : ""}
-                  </span>
-                )}
-              </span>
+              <SceneLine name={nameSaid ? null : scene.name} groups={groups.length} leds={lightsState === "ready" ? totalLeds : null} />
             )
           ) : state === "loading" ? (
             <span className="rd-scenes-context">
@@ -428,36 +441,27 @@ export function ScenesView() {
               onEscape={() => setRenaming(false)}
             />
           ) : (
-            <span className="rd-scenes-context">
-              <b>{scene.name}</b>
-              {groups.length === 0 ? (
-                <span className="rd-scenes-counts"> · no groups yet</span>
-              ) : (
-                <span className="rd-scenes-counts">
-                  {" "}
-                  · {groups.length} {groups.length === 1 ? "group" : "groups"}
-                  {lightsState === "ready" ? ` · ${totalLeds} LEDs` : ""}
-                </span>
-              )}
-            </span>
+            <SceneLine name={nameSaid ? null : scene.name} groups={groups.length} leds={lightsState === "ready" ? totalLeds : null} />
           )}
         </div>
       )}
       <PageActions>
-        <IconButton
-          label="Undo"
-          icon={<ArrowCounterClockwise size={18} />}
-          size="sm"
-          disabled={!use.canUndo}
-          onClick={undo}
-        />
-        <IconButton
-          label="Redo"
-          icon={<ArrowClockwise size={18} />}
-          size="sm"
-          disabled={!use.canRedo}
-          onClick={redo}
-        />
+        <span className="rd-secondary">
+          <IconButton
+            label="Undo"
+            icon={<ArrowCounterClockwise size={18} />}
+            size="sm"
+            disabled={!use.canUndo}
+            onClick={undo}
+          />
+          <IconButton
+            label="Redo"
+            icon={<ArrowClockwise size={18} />}
+            size="sm"
+            disabled={!use.canRedo}
+            onClick={redo}
+          />
+        </span>
         <Button
           ref={sceneMenuAnchor}
           className={s.iconKey}
@@ -475,6 +479,34 @@ export function ScenesView() {
           label="More about this scene"
           className={s.sheetMenu}
         >
+          {keysInMenu && (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={<ArrowCounterClockwise size={16} />}
+                disabled={!use.canUndo}
+                onClick={() => {
+                  setSceneMenu(false);
+                  undo();
+                }}
+              >
+                Undo
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={<ArrowClockwise size={16} />}
+                disabled={!use.canRedo}
+                onClick={() => {
+                  setSceneMenu(false);
+                  redo();
+                }}
+              >
+                Redo
+              </Button>
+            </>
+          )}
           <Button
             variant="ghost"
             size="sm"

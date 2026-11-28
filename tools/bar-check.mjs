@@ -48,6 +48,7 @@ export const ROUTES = [
   { name: "patterns", url: "/patterns/" },
 ];
 export const LONG_NAME = "A very long stack name that somebody typed in the builder by hand";
+export const LONG_SCENE = "Late night gaming with the desk and case";
 const builder = (state, extra = "") =>
   `/effects/?stack=${encodeURIComponent(state === "long-name" ? LONG_NAME : "Sunset glow")}` +
   `&stack-name=${encodeURIComponent(state === "long-name" ? LONG_NAME : "Sunset glow")}` +
@@ -66,6 +67,8 @@ export const STATES = [
   { name: "builder", url: "/effects/?stack=new&state=complete,stack", state: "renaming" },
   { name: "fans", url: "/fans/", state: "dirty" },
   { name: "scenes", url: "/", state: "renaming" },
+  // B11: a scene name of any length is drawn once and over nothing.
+  { name: "scenes", url: "/", state: "long-scene" },
   // B7: a name cut on a narrow window is whole again on a wide one.
   { name: "builder", url: builder("long-name"), state: "regrow" },
   // B10: every secondary key has one home at every width, the bar or the overflow.
@@ -214,9 +217,10 @@ export const MEASURE = () => {
         return n + el.offsetWidth + left + px(cs.marginRight);
       }, px(getComputedStyle(box).columnGap) * Math.max(0, shownItems.length - 1));
     };
+    const nowBelow = row.closest(".strip")?.dataset.barNow === "second";
     const items = [...row.children]
       .flatMap((el) => (el.classList.contains("strip-slot") ? [...el.children] : [el]))
-      .filter((el) => !(wraps && el.classList.contains("strip-page-actions")));
+      .filter((el) => !(wraps && (el.classList.contains("strip-page-actions") || (nowBelow && el.classList.contains("strip-now")))));
     return Math.round(userEl.offsetWidth + Math.max(0, row.clientWidth - used(row, items)));
   };
   let fullWidth = 0;
@@ -240,10 +244,34 @@ export const MEASURE = () => {
     .map((el) => el.getAttribute("aria-label") || norm(el.textContent) || label(el));
   const parts = [...document.querySelectorAll(".strip-brand, .rd-title, .strip-now, .strip-mark, .rd-actions, .strip-controls")]
     .filter(drawn);
+  /** Where a part is painted: its box, and any text that spills out of it unclipped. */
+  const painted = (part) => {
+    const box = part.getBoundingClientRect();
+    const out = { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+    for (const el of [part, ...part.querySelectorAll("*")]) {
+      if (!drawn(el) || !ownText(el)) continue;
+      let hidden = false;
+      for (let a = el; a && a !== part; a = a.parentElement) {
+        if (Number(getComputedStyle(a).opacity) === 0) hidden = true;
+      }
+      const tr = hidden ? null : textRect(el);
+      if (!tr) continue;
+      let { left, right } = tr;
+      for (let a = el; a && a !== part.parentElement; a = a.parentElement) {
+        if (getComputedStyle(a).overflowX === "visible") continue;
+        const r = a.getBoundingClientRect();
+        left = Math.max(left, r.left);
+        right = Math.min(right, r.right);
+      }
+      out.left = Math.min(out.left, left);
+      out.right = Math.max(out.right, right);
+    }
+    return out;
+  };
   const overlaps = [];
   parts.forEach((a, i) => parts.slice(i + 1).forEach((b) => {
-    const p = a.getBoundingClientRect();
-    const q = b.getBoundingClientRect();
+    const p = painted(a);
+    const q = painted(b);
     if (Math.min(p.right, q.right) - Math.max(p.left, q.left) > 1 && Math.min(p.bottom, q.bottom) - Math.max(p.top, q.top) > 1) {
       overlaps.push(`${label(a)} over ${label(b)}`);
     }
@@ -256,10 +284,25 @@ export const MEASURE = () => {
     .filter(drawn).map((el) => norm(el.innerText));
   const renameFields = [...document.querySelectorAll('input[aria-label="The name of this scene"]')].filter(drawn);
   const scroller = document.scrollingElement ?? document.documentElement;
+  // B12: how far Pause and search stand from the title's own line.
+  const middle = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el || !drawn(el)) return null;
+    const r = el.getBoundingClientRect();
+    return (r.top + r.bottom) / 2;
+  };
+  const controlsMid = middle(".strip-controls");
+  const titleMid = middle(".rd-title h1");
+  // B11: the places that say what is playing. The scene keys are controls, not copies.
+  const playing = document.querySelector(".strip-swatch")?.getAttribute("aria-label") ?? "";
+  const nameCopies = [...document.querySelectorAll(".strip-effect-name, .rd-scenes-context b, .status-body-line, .rail-value")]
+    .filter((el) => drawn(el) && norm(el.textContent).includes(playing)).map(label);
   return {
     vw: document.documentElement.clientWidth, vh: document.documentElement.clientHeight,
     docOverflow: scroller.scrollWidth - scroller.clientWidth,
     docHidden: scroller.scrollHeight - scroller.clientHeight,
+    controlsOff: controlsMid === null || titleMid === null ? null : Math.round(Math.abs(controlsMid - titleMid)),
+    playing, nameCopies,
     names, primary: box("[data-bar-primary]"), primaryPresent: !!primaryEl && fullyVisible(primaryEl),
     userTitle, hasTitleSlot: document.querySelector(".rd-title") !== null,
     isBuilder: document.querySelector("[data-testid='stack-builder']") !== null,
@@ -361,10 +404,13 @@ export function judge(m, state) {
       bad.push(`${where}: user title is below its ${USER_TITLE_FLOOR}-character floor`);
     }
   }
-  // B11: at sizes where the rail is collapsed the scene name must be drawn once, in the strip.
-  if (m.vw <= 768 && state.name === "scenes" && (!m.forms.nowName || m.forms.railValue)) {
-    bad.push(`${where}: the scene name must be in the strip, not the rail, and drawn once`);
+  // B11: at sizes where the rail is collapsed the playing name is on screen exactly once.
+  if (m.vw <= 768 && state.state !== "loading" && m.nameCopies && m.nameCopies.length !== 1) {
+    bad.push(`${where}: the playing name "${m.playing}" is on screen ${m.nameCopies.length} times (${m.nameCopies.join(", ") || "nowhere"})`);
   }
+  if (state.state === "long-scene" && m.playing !== LONG_SCENE) bad.push(`${where}: the long scene name is not the one playing`);
+  // B12: the phone bar is one pattern; Pause and search stay on the title's line on every page.
+  if (m.vw <= 720 && (m.controlsOff ?? 0) > 12) bad.push(`${where}: Pause and search left the title's line by ${m.controlsOff}px`);
   return bad;
 }
 
@@ -421,6 +467,13 @@ async function driveState(page, state) {
     await page.getByRole("button", { name: "More about this scene" }).click({ timeout: 5000 });
     await page.getByRole("dialog", { name: "More about this scene" }).getByRole("button", { name: "Rename", exact: true }).click({ timeout: 5000 });
     await page.locator('input[aria-label="The name of this scene"]:visible').waitFor({ timeout: 5000 });
+  } else if (state.state === "long-scene") {
+    await page.getByRole("button", { name: "More about this scene" }).click({ timeout: 5000 });
+    await page.getByRole("dialog", { name: "More about this scene" }).getByRole("button", { name: "Rename", exact: true }).click({ timeout: 5000 });
+    const field = page.locator('input[aria-label="The name of this scene"]:visible');
+    await field.fill(LONG_SCENE, { timeout: 5000 });
+    await field.press("Enter");
+    await page.waitForSelector(`.strip-swatch[aria-label="${LONG_SCENE}"]`, { state: "attached", timeout: 10000 });
   } else if (state.name === "fans" && state.state === "dirty") {
     // A header's mode that the saved profile does not hold. Fans draws no dirty mark (#586 R7).
     const fixed = page.locator("main").getByRole("radio", { name: "Fixed %" }).first();
