@@ -1,4 +1,6 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
+import { StaleNotice } from "@/components/StaleNotice";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -26,7 +28,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { Enter, useSuccessPulse } from "@/components/Motion";
 import { Highlighted, matchEffect } from "@/components/Search";
 import { useMediaQuery } from "@/components/MediaQuery";
-import { ErrorPanel, Details, LoadFrame, type LoadState } from "@/components/Loading";
+import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
 import { EffectDetailShape, EffectGalleryShape } from "@/components/LoadShapes";
 import { notify } from "@/components/Notify";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
@@ -42,9 +44,9 @@ import { PlayOn } from "@/views/effects/PlayOn";
 import { useStackParam } from "@/lib/stackRoute";
 import { BLANK_EFFECT, blankFileName, copyFileName, titleOf, withTitle } from "@/views/effects/blankEffect";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { ApiFailure, caught, toastText, type Failure } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
-import { getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
+import { SLOW_POLL_MS, getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
 import { PageActions, PageTitle } from "@/shell/PageHeader";
 import { Popover } from "@/components/Popover";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
@@ -170,13 +172,13 @@ export function EffectsView() {
   }, [stackName]);
   // The detail read's error and a write's error are separate: a successful read clears
   // only the read error, so it cannot hide a failed write's message (#156).
-  const [readError, setReadError] = useState<string | null>(null);
-  // A failed write's message, with the effect it belongs to (`null`: a page action, a favourite
+  const [readError, setReadError] = useState<Failure | null>(null);
+  // A failed write's error, with the effect it belongs to (`null`: a page action, a favourite
   // or a delete). An effect's message shows only on that effect. A read never clears one: the
   // next attempt at the same write, or an edit of that effect, does (#156).
-  const [writeError, setWriteErrorState] = useState<{ id: string | null; message: string } | null>(null);
+  const [writeError, setWriteErrorState] = useState<{ id: string | null; error: Failure } | null>(null);
   const failWrite = useCallback(
-    (id: string | null, e: unknown) => setWriteErrorState({ id, message: messageOf(e) }),
+    (id: string | null, e: unknown) => setWriteErrorState({ id, error: caught(e) }),
     [],
   );
   const clearWrite = useCallback(
@@ -184,7 +186,7 @@ export function EffectsView() {
     [],
   );
   const shownWriteError =
-    writeError && (writeError.id === null || writeError.id === selectedId) ? writeError.message : null;
+    writeError && (writeError.id === null || writeError.id === selectedId) ? writeError.error : null;
   // Asks the detail to load again for the same effect: a preset was applied or changed, so the
   // sliders and the preset list are read back from the daemon.
   const [reloadTick, setReloadTick] = useState(0);
@@ -192,7 +194,7 @@ export function EffectsView() {
   // The import: what is being sent, what the daemon said, and the file that is waiting for a
   // replace.
   const [importing, setImporting] = useState(false);
-  const [importError, setImportError] = useState<string | null>(null);
+  const [importError, setImportError] = useState<Failure | null>(null);
   const [replaceWith, setReplaceWith] = useState<{ fileName: string; html: string } | null>(null);
   // A file is over the page: the drop overlay shows.
   const [dragging, setDragging] = useState(false);
@@ -204,20 +206,20 @@ export function EffectsView() {
   // chooser. Only one of them is on screen at a time.
   const [editorTarget, setEditorTarget] = useState<EditorTarget | null>(null);
   const [editBusy, setEditBusy] = useState<string | null>(null);
-  const [editError, setEditError] = useState<string | null>(null);
+  const [editError, setEditError] = useState<Failure | null>(null);
   // The effect whose source could not be read, so Try again retries that one and not whatever
   // the list happens to select later.
   const [editFailed, setEditFailed] = useState<{ id: string; name: string } | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [newBusy, setNewBusy] = useState<string | null>(null);
-  const [newError, setNewError] = useState<string | null>(null);
+  const [newError, setNewError] = useState<Failure | null>(null);
   // New effect's menu, hung under its key: a stack, a pattern or code (0.16.0).
   const [newMenu, setNewMenu] = useState(false);
   const newRef = useRef<HTMLSpanElement>(null);
   // The pattern being built or edited, in the inspector's room (the gallery becomes a strip).
   const [patternStep, setPatternStep] = useState<PatternStep | null>(null);
   // The pattern whose delete the daemon refused, with its sentence (it names the scenes).
-  const [patternRefusal, setPatternRefusal] = useState<{ id: string; message: string } | null>(null);
+  const [patternRefusal, setPatternRefusal] = useState<{ id: string; error: Failure } | null>(null);
   const [patternDeleting, setPatternDeleting] = useState(false);
   // Build mode is `?stack=<name>` on this route (D95.5.1).
   const [stackParam, goStack] = useStackParam();
@@ -310,7 +312,7 @@ export function EffectsView() {
         setReadError(null);
       })
       .catch((e: unknown) => {
-        if (!stop) setReadError(messageOf(e));
+        if (!stop) setReadError(caught(e));
       });
     return () => {
       stop = true;
@@ -494,7 +496,7 @@ export function EffectsView() {
     };
     notify(`Deleted ${name}`, "info", {
       label: "Undo",
-      onClick: () => void putBack().catch((e: unknown) => notify(messageOf(e), "down")),
+      onClick: () => void putBack().catch((e: unknown) => notify(toastText(e), "down")),
     }, { lifeMs: UNDO_MS });
   };
 
@@ -534,7 +536,7 @@ export function EffectsView() {
         setImportError(null);
       } else {
         setReplaceWith(null);
-        setImportError(messageOf(e));
+        setImportError(caught(e));
       }
     } finally {
       setImporting(false);
@@ -615,7 +617,7 @@ export function EffectsView() {
       )
       .catch((e: unknown) => {
         setEditBusy(null);
-        setEditError(messageOf(e));
+        setEditError(caught(e));
       });
   };
 
@@ -667,7 +669,7 @@ export function EffectsView() {
       })
       .catch((e: unknown) => {
         setNewBusy(null);
-        setNewError(messageOf(e));
+        setNewError(caught(e));
       });
   };
 
@@ -690,7 +692,7 @@ export function EffectsView() {
     setPicked(saved.id);
     void refreshAll();
     if (saved.startError) {
-      notify(`${saved.name} is saved, but it did not start: ${saved.startError}`, "warn");
+      notify(toastText(saved.startError, `${saved.name} is saved, but it did not start:`), "warn");
     }
   };
 
@@ -819,7 +821,7 @@ export function EffectsView() {
       setPicked(null);
       await refreshAll();
     } catch (e) {
-      if (e instanceof ApiFailure && e.status === 409) setPatternRefusal({ id, message: messageOf(e) });
+      if (e instanceof ApiFailure && e.status === 409) setPatternRefusal({ id, error: caught(e) });
       else failWrite(null, e);
     } finally {
       setPatternDeleting(false);
@@ -850,7 +852,7 @@ export function EffectsView() {
         <ErrorPanel
           title="The effects could not be read"
           summary="canvas-rgb could not read the effect list. Nothing was changed."
-          message={effectsError}
+          error={effectsError}
           onRetry={() => void retryEffects()}
         />
       }
@@ -1011,7 +1013,7 @@ export function EffectsView() {
           <ErrorPanel
             title="The effect could not be read"
             summary="canvas-rgb could not read that effect. The others are still here."
-            message={readError}
+            error={readError}
             onRetry={() => {
               setReadError(null);
               setReloadTick((t) => t + 1);
@@ -1080,7 +1082,7 @@ export function EffectsView() {
                 {patternRefusal?.id === selectedId ? (
                   <>
                     {/* The daemon's own sentence: it names the scenes that play it. */}
-                    <span>{patternRefusal.message}</span>
+                    <ErrorState compact error={patternRefusal.error} />
                     <div className="row-wrap">
                       <Button
                         variant="danger"
@@ -1266,7 +1268,7 @@ export function EffectsView() {
               <p className="mute eff-starting-values">Starting values. A group keeps its own.</p>
             )}
             {(shownWriteError ?? readError) && (
-              <p className="error-line" style={{ marginTop: 8 }}>{shownWriteError ?? readError}</p>
+              <ErrorState compact error={shownWriteError ?? readError} style={{ marginTop: 8 }} />
             )}
           </Panel>
         </>
@@ -1324,7 +1326,7 @@ export function EffectsView() {
         <ErrorPanel
           title="The code could not be read"
           summary="canvas-rgb could not read that effect's file. Nothing was changed."
-          message={editError}
+          error={editError}
           onRetry={retryEdit}
         />
       ) : (
@@ -1512,7 +1514,7 @@ export function EffectsView() {
             {failed.map((f) => (
               <p key={f.file} className="failed-line">
                 <span className="fig">{f.file}</span>
-                <span className="failed-error">{f.error}</span>
+                <ErrorState compact error={f.error} className="failed-error" />
               </p>
             ))}
           </div>
@@ -1539,19 +1541,19 @@ export function EffectsView() {
               </div>
             </>
           ) : (
-            <span className="error-line">{importError}</span>
+            <ErrorState compact error={importError} />
           )}
         </div>
       )}
 
-      {listStale && (
-        // The list is on screen but the last refresh failed: the cards may be old, and the count
-        // is a dash until the list is read again. The raw words are behind the disclosure.
-        <div className="rule rule-warn" role="status">
-          The effect list may be out of date.
-          <Details>{effectsError}</Details>
-        </div>
-      )}
+      {/* The list is on screen but the last refresh failed: the cards may be old, and the count
+          is a dash until the list is read again. */}
+      <StaleNotice
+        message="The effect list may be out of date."
+        error={listStale ? effectsError : null}
+        everyMs={SLOW_POLL_MS}
+        onRetry={() => void retryEffects()}
+      />
 
       {narrow ? (
         <div

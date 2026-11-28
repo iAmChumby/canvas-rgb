@@ -570,6 +570,7 @@ dependencies = [
  "bytes",
  "canvas-adapters",
  "canvas-core",
+ "canvas-diag",
  "canvas-effects",
  "canvas-html",
  "canvas-proto",
@@ -591,6 +592,18 @@ dependencies = [
  "ureq",
  "windows",
  "windows-core",
+ "zip",
+]
+
+[[package]]
+name = "canvas-diag"
+version = "0.20.0"
+dependencies = [
+ "canvas-proto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "windows",
  "zip",
 ]
 
@@ -632,6 +645,7 @@ name = "canvas-rgb-tray"
 version = "0.20.0"
 dependencies = [
  "canvas-client",
+ "canvas-diag",
  "canvas-proto",
  "reqwest",
  "semver",

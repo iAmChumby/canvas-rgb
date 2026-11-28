@@ -128,7 +128,8 @@ pub async fn preview_effect(
         ))
         .with_retry_after(1));
     };
-    Ok(Json(preview(&request.html, &request.props, slot).await?))
+    let scrubber = app.scrubber.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Ok(Json(preview(&request.html, &request.props, slot, &scrubber).await?))
 }
 
 /// Renders a draft for [`preview_effect`], off the async workers. The slot stays with the
@@ -137,11 +138,13 @@ async fn preview(
     html: &str,
     props: &Props,
     slot: tokio::sync::OwnedSemaphorePermit,
+    scrubber: &canvas_diag::scrub::Scrubber,
 ) -> Result<EffectPreviewResponse, ApiFailure> {
     let source_hash = crate::user_effects::source_hash(html);
     let id = format!("{}{source_hash}", canvas_proto::consts::DRAFT_ID_PREFIX);
     let html = html.to_string();
     let props = props.clone();
+    let scrubber = scrubber.clone();
     tokio::task::spawn_blocking(move || -> Result<EffectPreviewResponse, ApiFailure> {
         let _slot = slot;
         // The same build the lights use, so the preview is judged by the runtime that will
@@ -171,7 +174,8 @@ async fn preview(
             .map(|message| {
                 let (line, column) = crate::user_effects::error_position(message);
                 canvas_proto::api::EffectError {
-                    message: message.clone(),
+                    // A 200 body is not touched by the response layer: scrub here (G4).
+                    message: crate::api::scrub_errors::scrub_error_text(&scrubber, message),
                     line,
                     column,
                 }

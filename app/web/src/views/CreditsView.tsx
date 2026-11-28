@@ -15,6 +15,7 @@ import { LicenceDisclosure } from "@/components/LicenceDisclosure";
 import { Panel } from "@/components/Panel";
 import { SkeletonLines } from "@/components/Skeleton";
 import { PageTitle } from "@/shell/PageHeader";
+import { ErrorState } from "@/components/ErrorState";
 import s from "./credits.module.css";
 
 type Credit = { name: string; url: string; body: string };
@@ -62,7 +63,7 @@ export function CreditsView() {
       {!data ? (
         failed ? (
           <Panel title="Credits">
-            <p className={s.error}>The credits could not be read. Rebuild the editor to regenerate them.</p>
+            <ErrorState message="The credits could not be read. Rebuild the editor to regenerate them." />
           </Panel>
         ) : (
           <Panel title="Credits">

@@ -27,11 +27,11 @@ import { ShapePicker, shapesFor } from "@/components/ShapePicker";
 import { Toggle } from "@/components/Toggle";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Slider } from "@/components/Slider";
-import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
+import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
-import { refreshLights, refreshStatus, retryDevices, useSnap } from "@/lib/store";
+import { caught, type Failure, toastText } from "@/lib/errors";
+import { SLOW_POLL_MS, refreshLights, refreshStatus, retryDevices, useSnap } from "@/lib/store";
 import type { LightPatch } from "@/proto/LightPatch";
 import type { LightView } from "@/proto/LightView";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -42,6 +42,8 @@ import type { ZoneInfo } from "@/proto/ZoneInfo";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { ChainRow } from "@/views/chain/ChainRow";
 import { PageTitle } from "@/shell/PageHeader";
+import { ErrorState } from "@/components/ErrorState";
+import { StaleNotice } from "@/components/StaleNotice";
 
 const KIND_ICON: Record<DeviceKind, Icon> = {
   motherboard: Cpu,
@@ -222,7 +224,7 @@ function WhiteBalanceSection({
   onClose: () => void;
   /** Reads the white balances again, when the first read failed. */
   onRetry: () => void;
-  error: string | null;
+  error: Failure | null;
 }) {
   // The read failed and nothing is known: an error and a way to ask again, never a skeleton for ever.
   const readFailed = !known && error !== null;
@@ -257,14 +259,12 @@ function WhiteBalanceSection({
       </div>
       <div className="rd-wb-rows" aria-busy={known || readFailed ? undefined : true}>
         {readFailed && (
-          <div className="rd-wb-failed">
-            <span className="error-line" role="alert">
-              The white balance could not be read. {error}
-            </span>
-            <Button size="sm" onClick={onRetry}>
-              Try again
-            </Button>
-          </div>
+          <ErrorState
+            className="rd-wb-failed"
+            message="The white balance could not be read."
+            error={error}
+            onRetry={onRetry}
+          />
         )}
         {CHANNELS.map(({ key, label }) => !known ? (
           readFailed ? null : (
@@ -291,7 +291,7 @@ function WhiteBalanceSection({
           </div>
         ))}
       </div>
-      {error && !readFailed && <p className="error-line">{error}</p>}
+      {error && !readFailed && <ErrorState error={error} />}
     </div>
   );
 }
@@ -306,7 +306,7 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(view.label);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Failure | null>(null);
 
   const patch = async (body: LightPatch) => {
     setBusy(true);
@@ -315,7 +315,7 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
       await api.lights.patch(light.id, body);
       await refreshLights();
     } catch (e) {
-      setError(messageOf(e));
+      setError(caught(e));
       throw e;
     } finally {
       setBusy(false);
@@ -420,7 +420,7 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
           onChange={turn}
         />
       </span>
-      {error && <span className="error-line rd-light-error">{error}</span>}
+      {error && <ErrorState error={error} className="rd-light-error" />}
     </div>
   );
 }
@@ -454,7 +454,7 @@ export function DevicesView() {
       await api.dismissFault(openrgbFault.key);
       await refreshStatus();
     } catch (e) {
-      notify(messageOf(e), "warn");
+      notify(toastText(e), "warn");
     } finally {
       setDismissing(false);
     }
@@ -463,7 +463,7 @@ export function DevicesView() {
   // The white balances, read once when the view mounts (#50); a device not listed is neutral.
   const [whiteBalances, setWhiteBalances] = useState<WhiteBalances | null>(null);
   const [wbDrafts, setWbDrafts] = useState<Record<string, WhiteBalance>>({});
-  const [wbError, setWbError] = useState<string | null>(null);
+  const [wbError, setWbError] = useState<Failure | null>(null);
   // The one device whose white balance is open under its row, if any.
   const [wbOpen, setWbOpen] = useState<string | null>(null);
   // Each read carries a number; only the newest read may answer (a retry supersedes a slow one).
@@ -476,7 +476,7 @@ export function DevicesView() {
         if (wbRead.current === n) setWhiteBalances(wb);
       })
       .catch((e: unknown) => {
-        if (wbRead.current === n) setWbError(messageOf(e));
+        if (wbRead.current === n) setWbError(caught(e));
       });
   }, []);
   // "Try again" after a failed read: the error goes, the read is asked for again.
@@ -515,7 +515,7 @@ export function DevicesView() {
         delete next[deviceId];
         return next;
       });
-      setWbError(messageOf(e));
+      setWbError(caught(e));
     }
   };
 
@@ -529,7 +529,7 @@ export function DevicesView() {
       });
       setWbError(null);
     } catch (e) {
-      setWbError(messageOf(e));
+      setWbError(caught(e));
     }
   };
 
@@ -565,14 +565,14 @@ export function DevicesView() {
         }
       />
 
-      {devicesError && devices !== null && (
-        // The list is on screen but the last read failed: the cards stay and the page says they
-        // may be old. The raw words are behind the disclosure.
-        <div className="rule rule-warn" role="status">
-          The device list may be out of date.
-          <Details>{devicesError}</Details>
-        </div>
-      )}
+      {/* The list is on screen but the last read failed: the cards stay and the page says they
+          may be old. */}
+      <StaleNotice
+        message="The device list may be out of date."
+        error={devices !== null ? devicesError : null}
+        everyMs={SLOW_POLL_MS}
+        onRetry={() => void retryDevices()}
+      />
       {openrgb === "down" && openrgbFault && !openrgbFault.dismissed && (
         <FaultNote
           parts={openrgbFault}
@@ -613,8 +613,8 @@ export function DevicesView() {
         error={
           <ErrorPanel
             title="The devices could not be read"
-            summary="canvas-rgb could not read the devices. The lights are unaffected."
-            message={devicesError}
+            summary="canvas-rgb could not read the devices. Try the read again."
+            error={devicesError}
             onRetry={() => void retryDevices()}
           />
         }
@@ -814,4 +814,3 @@ export function DevicesView() {
     </div>
   );
 }
-

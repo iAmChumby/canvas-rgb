@@ -18,38 +18,20 @@ import { useMediaQuery } from "@/components/MediaQuery";
 import { NameField } from "@/components/NameField";
 import { Panel } from "@/components/Panel";
 import { Popover } from "@/components/Popover";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { presetFailure, type Doing, type Failure } from "@/lib/errors";
 import { diffProps, nameTaken } from "@/lib/presetMatch";
 import type { RunningPreset } from "@/lib/runningPreset";
 import type { Preset } from "@/proto/Preset";
 import type { PropertyDef } from "@/proto/PropertyDef";
 import type { Props } from "@/proto/props";
+import { ErrorState } from "@/components/ErrorState";
 
 /** What the name field is for: a new preset from the live values, or a rename. */
 type Naming = { kind: "save" } | { kind: "saveAs" } | { kind: "rename"; name: string };
 
-/** What the strip asks the daemon to do, in the words of its error ("Could not save ..."). */
-type Doing = "apply" | "save" | "update" | "rename" | "duplicate" | "delete";
 
 /** How many changes the diff line spells out before it says "+N more". */
 const DIFF_SHOWN = 2;
-
-/** The words of a refusal: the daemon's own sentence for a clash or a bad name, else what failed and why. */
-function explain(e: unknown, doing: Doing): string {
-  if (e instanceof ApiFailure && (e.status === 409 || e.status === 422)) return e.message;
-  // "could not save the effects: access is denied" -> "Access is denied": the verb is said once, up front.
-  const bare = messageOf(e).replace(/^could not [a-z ]+: /i, "");
-  const reason = bare.charAt(0).toUpperCase() + bare.slice(1);
-  const failed: Record<Doing, string> = {
-    apply: "Not applied",
-    save: "Not saved",
-    update: "Not updated",
-    rename: "Not renamed",
-    duplicate: "Not duplicated",
-    delete: "Not deleted",
-  };
-  return `${failed[doing]}: ${reason}`;
-}
 
 /**
  * The effect's presets as keys: the built-in ones, then the owner's, then "Save current".
@@ -102,7 +84,7 @@ export function PresetStrip({
   const [naming, setNaming] = useState<Naming | null>(null);
   const [value, setValue] = useState("");
   const [working, setWorking] = useState<Doing | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Failure | null>(null);
   // The name being saved, shown as a held key at the end of the owner's presets.
   const [saving, setSaving] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ name: string; confirm: boolean } | null>(null);
@@ -158,7 +140,7 @@ export function PresetStrip({
       await fn();
       return true;
     } catch (e) {
-      setError(explain(e, doing));
+      setError(presetFailure(e, doing));
       return false;
     } finally {
       setWorking(null);
@@ -359,15 +341,17 @@ export function PresetStrip({
         <div className="preset-line" data-mode={naming ? "naming" : running?.modified ? "modified" : "idle"}>
           {line}
         </div>
-        <p
-          className="preset-note"
-          data-tone={error ? "error" : "diff"}
-          id={errorId}
-          role={error ? "alert" : undefined}
-          title={!error && changes.length > 0 ? changes.map((c) => `${c.label} ${c.from} to ${c.to}`).join("\n") : undefined}
-        >
-          {error ?? (naming ? "" : changeText)}
-        </p>
+        {error !== null ? (
+          <ErrorState compact className="preset-note" id={errorId} error={error} />
+        ) : (
+          <p
+            className="preset-note"
+            id={errorId}
+            title={changes.length > 0 ? changes.map((c) => `${c.label} ${c.from} to ${c.to}`).join("\n") : undefined}
+          >
+            {naming ? "" : changeText}
+          </p>
+        )}
       </div>
 
       <Popover

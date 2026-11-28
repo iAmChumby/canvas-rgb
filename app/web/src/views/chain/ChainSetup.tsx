@@ -15,7 +15,7 @@
 
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
-import { CaretLeft, CaretRight, Check, CheckCircle, WarningCircle } from "@phosphor-icons/react";
+import { CaretLeft, CaretRight, Check, CheckCircle } from "@phosphor-icons/react";
 
 import { Button } from "@/components/Button";
 import type { ChainView } from "@/proto/ChainView";
@@ -30,6 +30,7 @@ import { StartingStep } from "@/views/chain/StartingStep";
 import { chainKey, markChainOffered } from "@/views/chain/offered";
 import { useChainSetup, type ChainStep, type IntroKind } from "@/views/chain/useChainSetup";
 import s from "@/views/chain/chain.module.css";
+import { ErrorState } from "@/components/ErrorState";
 
 /** The labels under the bar: a series counts devices, a mirror does not. */
 const SERIES_STEPS = ["Length", "Count", "Check"] as const;
@@ -251,11 +252,7 @@ export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = nul
       case "error":
         return (
           <div className={s.errorScreen}>
-            <h3 className={s.prompt}>{zone} did not answer.</h3>
-            <div className={s.error} role="alert">
-              <WarningCircle className={s.errorIcon} size={16} weight="fill" aria-hidden="true" />
-              <p className={s.errorText}>{setup.error}</p>
-            </div>
+            <ErrorState message={`${zone} did not answer.`} error={setup.error} />
           </div>
         );
     }
@@ -377,13 +374,13 @@ export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = nul
         <p className={s.why}>The app cannot see what is plugged into this ARGB header.</p>
         <div className={s.chainStage}>
           {setup.error !== null && setup.step !== "error" ? (
-            <div className={s.error} role="alert">
-              <WarningCircle className={s.errorIcon} size={16} weight="fill" aria-hidden="true" />
-              <p className={s.errorText}>{setup.error}</p>
-              <Button size="sm" busy={retrying} onClick={() => void retry()}>
-                Retry
-              </Button>
-            </div>
+            <ErrorState
+              className={s.error}
+              error={setup.error}
+              onRetry={() => void retry()}
+              retryLabel="Retry"
+              busy={retrying}
+            />
           ) : null}
           {screen()}
         </div>

@@ -23,6 +23,7 @@ import { Popover } from "@/components/Popover";
 import { Segmented, type SegOption } from "@/components/Segmented";
 import { Slider } from "@/components/Slider";
 import { useFocusTrap } from "@/components/useFocusTrap";
+import { type Failure } from "@/lib/errors";
 import { api } from "@/lib/endpoints";
 import { fillDefaults } from "@/lib/presetMatch";
 import { effectNameOf } from "@/lib/status";
@@ -44,6 +45,7 @@ import type { SequenceShape } from "@/proto/SequenceShape";
 import type { Props } from "@/proto/props";
 import type { UseScene } from "@/views/scenes/useScene";
 import s from "@/views/scenes/scenes.module.css";
+import { ErrorState } from "@/components/ErrorState";
 
 /** The two ways a group's lights share its effect, in the owner's words. */
 const MODES: { value: GroupMode; label: string }[] = [
@@ -587,7 +589,7 @@ function Presets({
 }) {
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Failure | null>(null);
   const [busy, setBusy] = useState(false);
   const presets = [...builtIn, ...user];
 
@@ -605,7 +607,7 @@ function Presets({
       setName("");
       onSaved();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "The preset could not be saved.");
+      setError(e instanceof Error ? e : "The preset could not be saved.");
     } finally {
       setBusy(false);
     }
@@ -659,9 +661,7 @@ function Presets({
         </div>
       )}
       {error && (
-        <p className={s.presetError} role="alert">
-          {error}
-        </p>
+        <ErrorState compact className={s.presetError} error={error} />
       )}
     </section>
   );

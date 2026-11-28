@@ -7,6 +7,7 @@ import { routes } from "@/proto/routes";
 import type { Status } from "@/proto/Status";
 import type { About } from "@/proto/About";
 import type { AboutReport } from "@/proto/AboutReport";
+import type { DiagBundle } from "@/proto/DiagBundle";
 import type { SafeStartAnswer } from "@/proto/SafeStartAnswer";
 import type { SafeStartMode } from "@/proto/SafeStartMode";
 import type { OutputState } from "@/proto/OutputState";
@@ -138,6 +139,9 @@ export const api = {
   about: () => request<About>("GET", ABOUT),
   /** The finished markdown and template fields; never rebuilt by the editor (#574 R1). */
   aboutReport: () => request<AboutReport>("GET", ABOUT_REPORT),
+  /** #575: list, then write, the scrubbed diagnostics zip. */
+  diagBundleList: () => request<DiagBundle>("GET", routes.diagBundle),
+  diagBundleSave: () => request<DiagBundle>("POST", routes.diagBundle),
   /** Enter or leave safe start (#577). The daemon answers first, then the service relaunches it. */
   setSafeStart: (mode: SafeStartMode) => request<SafeStartAnswer>("PUT", SAFE_START, { mode }),
 

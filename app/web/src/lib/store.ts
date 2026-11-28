@@ -28,6 +28,9 @@ export const RPM_HISTORY = 60;
  * A daemon that is down does not need to be asked every second.
  */
 export const DOWN_RETRY_MS = 5000;
+/** The beats of the sync loop: status and fans on the fast one, every other area on the slow one. */
+export const FAST_POLL_MS = 1000;
+export const SLOW_POLL_MS = 4000;
 
 /** When the daemon last refused to answer, 0 when it is answering. */
 let lastStatusFailureAt = 0;
@@ -562,8 +565,8 @@ export function startSync(): () => void {
     if (stopped) u();
     else updateUnlisten = u;
   });
-  fast = setInterval(tickFast, 1000);
-  slow = setInterval(tickSlow, 4000);
+  fast = setInterval(tickFast, FAST_POLL_MS);
+  slow = setInterval(tickSlow, SLOW_POLL_MS);
   document.addEventListener("visibilitychange", onVisibility);
   void onStateChanged(() => {
     void refreshAll();

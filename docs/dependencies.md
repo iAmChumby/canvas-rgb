@@ -118,6 +118,7 @@ cargo-deny 0.20.2 stays in the same role (CI/build only; MIT OR Apache-2.0, appr
 | bytes | rust, prod | 1.12.1 | MIT | approved (baseline 2026-11-05) |
 | canvas-adapters | rust, prod | 0.17.0 | Apache-2.0 | approved (baseline 2026-11-05) |
 | canvas-client | rust, prod | 0.17.0 | Apache-2.0 | approved (2026-11-06) |
+| canvas-diag | rust, prod | 0.20.0 | Apache-2.0 | approved (2026-11-27, internal workspace crate moved out of canvas-daemon; no new third-party code) |
 | canvas-core | rust, prod | 0.17.0 | Apache-2.0 | approved (baseline 2026-11-05) |
 | canvas-effects | rust, prod | 0.17.0 | Apache-2.0 | approved (baseline 2026-11-05) |
 | canvas-html | rust, prod | 0.17.0 | Apache-2.0 | approved (baseline 2026-11-05) |

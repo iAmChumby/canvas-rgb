@@ -129,6 +129,8 @@ const DESCRIPTIONS = {
   "FAULT_DISMISS:POST": "Hides one hardware note on every viewer. The note comes back when its cause clears and then returns.",
   "FAULT_DISMISS:DELETE": "Shows a hidden hardware note again while its condition is still active.",
   "DIAG_READBACK:GET": "Reads the colours the hardware reports back from the devices.",
+  "DIAG_BUNDLE:GET": "Lists the files and sizes a diagnostics zip would hold, before anything is written. Every file is scrubbed and every device id is given a per-bundle alias when the zip is written; `service_logs` says why the machine-wide logs are not included. Nothing is saved by this request.",
+  "DIAG_BUNDLE:POST": "Writes the diagnostics zip to the app's one diagnostics folder and answers with its path, the file list, how many names and device ids were replaced and why the service logs were included or not. A destination cannot be chosen in the body: an existing zip is never overwritten. The API token is never in the zip, and the machine-wide log folder is only read: never written, deleted or adopted.",
   "DIAG_FAIL_SENSOR:POST": "Makes a temperature source report a failure, for a safety test. The source is `cpu`, `gpu` or `board:<name>`; any other value answers 422.",
 };
 
@@ -207,6 +209,7 @@ const TITLES = {
   "/api/v1/first-run/dismiss-zone-panel": "Dismiss zone panel",
   "/api/v1/faults/{key}/dismiss": "Dismiss fault",
   "/api/v1/diag/readback": "Readback",
+  "/api/v1/diag/bundle": "Diagnostics bundle",
   "/api/v1/diag/fail-sensor": "Fail sensor",
 };
 
@@ -724,6 +727,7 @@ const FIELD_MEANINGS = {
   "DeviceInfo.vendor": "The device's manufacturer.",
   "DeviceInfo.zones": "The zones the device has.",
   "DevicesResponse.devices": "The devices the daemon knows, with their zones.",
+  "DiagBundle.files": "The files in the zip, with their names inside it and their sizes before scrubbing. The GET answer lists them without writing anything.",
   "DisplayConfig.blink_above": "The value at or above which the display blinks; null leaves it steady.",
   "DisplayConfig.decimals": "How many digits follow the decimal point.",
   "DisplayConfig.device": "The display the config belongs to.",

@@ -1,0 +1,9 @@
+.body { display: flex; flex-direction: column; gap: 12px; font-size: 14px; color: var(--dim); }
+.files { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; }
+.files li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.name { min-width: 0; overflow-wrap: anywhere; }
+.size { color: var(--mute); white-space: nowrap; }
+.waiting, .reason { color: var(--mute); font-size: 14px; }
+.saved { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--ok); }
+.path { margin: 0; overflow-wrap: anywhere; color: var(--ink); }
+.keys { display: flex; flex-wrap: wrap; gap: 8px; }

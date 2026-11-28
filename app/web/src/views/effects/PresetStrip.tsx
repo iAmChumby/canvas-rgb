@@ -10,6 +10,7 @@ import { InspectorSection } from "@/components/InspectorSection";
 import { NameField } from "@/components/NameField";
 import { Panel } from "@/components/Panel";
 import type { Preset } from "@/proto/Preset";
+import { ErrorState } from "@/components/ErrorState";
 
 export function PresetStrip({
   builtIn,
@@ -67,9 +68,7 @@ export function PresetStrip({
         </Chip>
       </div>
       {presetProblem && (
-        <p className="error-line" role="alert">
-          {presetProblem}
-        </p>
+        <ErrorState compact error={presetProblem} />
       )}
       {presetName !== null && (
         <div className="preset-save">

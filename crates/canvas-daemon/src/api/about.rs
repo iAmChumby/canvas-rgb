@@ -168,8 +168,17 @@ async fn build_report(app: &App) -> AboutReport {
     let other = scrubber.scrub(other);
     let commit = scrubber.scrub(about.commit.as_deref().unwrap_or("unknown"));
     let date = scrubber.scrub(about.build_date.as_deref().unwrap_or("unknown"));
-    let service = scrubber.scrub(about.service_version.as_deref().unwrap_or("unknown"));
-    let last = scrubber.scrub(last_exit_words(about.last_exit));
+    // Unsent values carry the reason, as Help's identity rows do (F12).
+    let service = scrubber.scrub(
+        about.service_version.as_deref().unwrap_or("not collected: the fan service has not answered"),
+    );
+    let last = scrubber.scrub(
+        if about.last_exit == LastExit::Unknown {
+            "not collected: the service has not reported a last run"
+        } else {
+            last_exit_words(about.last_exit)
+        },
+    );
 
     let facts = [
         ("canvas-rgb", version.as_str()),

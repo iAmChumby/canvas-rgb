@@ -1,4 +1,5 @@
 "use client";
+import { ErrorState } from "@/components/ErrorState";
 
 // The pattern editor's page: the editor on one pattern, with the query saying which.
 //
@@ -17,7 +18,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BLACK_HEX, hsvToHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import { refreshPatterns } from "@/lib/store";
 import { PATTERN_GUARD, PatternEditor } from "@/views/patterns/PatternEditor";
 import type { Arrangement } from "@/proto/Arrangement";
@@ -38,7 +39,7 @@ export function PatternEditorPage() {
   const router = useRouter();
   const [pattern, setPattern] = useState<Pattern | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Failure | null>(null);
 
   // An entry the editor's guard made, or one the editor left, opens no editor: the guard's copy of
   // this page stays ahead of the history after a leave (a browser cannot delete it), and a Forward
@@ -64,7 +65,7 @@ export function PatternEditorPage() {
         setPattern(loaded);
         if (query.get("note") === "1") setNote(NO_DEVICE);
       } catch (e) {
-        if (!cancelled) setError(messageOf(e));
+        if (!cancelled) setError(caught(e));
       }
     })();
     return () => {
@@ -84,7 +85,7 @@ export function PatternEditorPage() {
     await refreshPatterns();
   }, []);
 
-  if (error !== null) return <p className={s.pageLine}>{error}</p>;
+  if (error !== null) return <ErrorState compact error={error} className={s.pageLine} />;
   if (pattern === null) return <p className={s.pageLine}>Opening the pattern…</p>;
   return (
     <PatternEditor

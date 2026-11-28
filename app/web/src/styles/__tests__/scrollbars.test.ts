@@ -129,6 +129,7 @@ const SCROLL_PANES = [
   ".disclosureBody", // the Credits page's licence text pane (#578)
   ".rd-help .help-scroll",
   ".receipt-text",
+  ".files", // the diagnostics bundle's file list (#575)
 ];
 
 /**

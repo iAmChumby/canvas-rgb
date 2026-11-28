@@ -1,14 +1,15 @@
 "use client";
+import { ErrorLine } from "@/components/ErrorState";
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { ArrowCircleUp, FolderOpen, WarningCircle, FilmSlate, Lightning, Warning, WarningOctagon } from "@phosphor-icons/react";
+import { ArrowCircleUp, Copy, FolderOpen, WarningCircle, FilmSlate, Lightning, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
+import { ReportIssue } from "@/components/ReportIssue";
 import { Button, ButtonLink } from "@/components/Button";
-import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
-import { canUpdate, openLogsFolder, tauriHost, updateInstall, updateLater, updateSkip } from "@/lib/host";
+import { canUpdate, openLogsFolder, openServiceLogsFolder, tauriHost, updateInstall, updateLater, updateSkip } from "@/lib/host";
 import { sendUpdate } from "@/lib/updateActions";
 import { installFailedSentence, isInstalling, isSkipped } from "@/lib/updateWords";
 import { messageOf } from "@/lib/errors";
@@ -18,6 +19,7 @@ import { patchSnap, useSnap } from "@/lib/store";
 import { UpdatedToast } from "@/shell/UpdatedToast";
 import { requestChainSetup } from "@/views/chain/request";
 import type { SafeStart } from "@/proto/SafeStart";
+import type { AboutReport } from "@/proto/AboutReport";
 
 /** The service banner appears after this many ms without the fan service (G4). */
 const SERVICE_BANNER_MS = 10_000;
@@ -41,6 +43,13 @@ export function StandingNotices() {
   const noScene = status !== null && !status.active_scene && !onScenes;
   // Help & About draws the safe-start notice beside its hero, so the hero never moves (#577).
   const safe = (status?.safe_start?.active ?? false) && !pathname.startsWith("/help");
+  // #576 item 4: the fan service being away is a standing notice in the page's own flow, not a
+  // floating card that covers the controls underneath it (U4). The Fans page says it in its card.
+  const serviceDown =
+    !pathname.endsWith("/fans/") &&
+    status !== null &&
+    status.service_down_ms !== null &&
+    status.service_down_ms >= SERVICE_BANNER_MS;
 
   const dismissPanel = async () => {
     setErr(null);
@@ -65,10 +74,18 @@ export function StandingNotices() {
     });
   };
 
-  if (!safe && !conflict && !noScene && !status?.show_zone_panel) return null;
+  if (!safe && !conflict && !noScene && !status?.show_zone_panel && !serviceDown) return null;
 
   return (
     <div className="banners-flow">
+      {serviceDown && status && (
+        <Banner tone="down" icon={<WarningOctagon size={20} weight="fill" />} title="Fan control is unavailable">
+          canvas-rgb has not heard from the fan service for{" "}
+          {status.service_down_ms === null ? "a while" : fmtSeconds(status.service_down_ms)}. Nothing here has
+          confirmed what the fans are doing now.
+          <ServiceBannerKeys />
+        </Banner>
+      )}
       {safe && <SafeStartBanner />}
       {conflict && (
         <Banner
@@ -112,7 +129,7 @@ export function StandingNotices() {
         >
           Tell the app what is plugged into each ARGB header, so effects fill what you actually have. A
           header with nothing on it can be marked empty and stops asking.
-          {err && <span className="error-line"> {err}</span>}
+          {err && <ErrorLine>{err}</ErrorLine>}
         </Banner>
       )}
     </div>
@@ -120,20 +137,14 @@ export function StandingNotices() {
 }
 
 /**
- * The transient notice that floats over the page: the fan service has been away for a while. It
- * floats because it is not standing: it appears and goes on its own, and a page must not move
- * for it.
+ * The transient notices that float over the page: a release offered and an install that failed.
+ * They wait for a key. The fan service notice stands in the page flow (StandingNotices), so it
+ * never covers the controls underneath it.
  */
 export function GlobalBanners() {
   const pathname = usePathname();
   const router = useRouter();
-  const status = useSnap((s) => s.status);
   const update = useSnap((s) => s.update);
-
-  // The Fans page says this in its own card; the banner would say it twice.
-  const onFans = pathname.endsWith("/fans/");
-  const serviceDown =
-    !onFans && status !== null && status.service_down_ms !== null && status.service_down_ms >= SERVICE_BANNER_MS;
 
   // A release is waiting: the banner offers it until the person says Later (hidden until the next
   // automatic check) or Skip this version. The Updates page has the key itself, so it says it once.
@@ -226,18 +237,61 @@ export function GlobalBanners() {
             </div>
           </Banner>
         )}
-        {serviceDown && status && (
-          <Banner
-            tone="down"
-            icon={<WarningOctagon size={20} weight="fill" />}
-            title="Fan control is unavailable"
-          >
-            canvas-rgb has not heard from the fan service for{" "}
-            {status.service_down_ms === null ? "a while" : fmtSeconds(status.service_down_ms)}. The lights are
-            unaffected.
-          </Banner>
-        )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The service banner's keys (#576 item 4): the daemon answers here, so its report is available.
+ * Opening the service log folder is a fixed-path tray command that never writes to the machine
+ * tree; if it is refused the row says so and names the folder to open by hand.
+ */
+function ServiceBannerKeys() {
+  const [report, setReport] = useState<AboutReport | null>(null);
+  const [showReport, setShowReport] = useState(false);
+  const [refused, setRefused] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const copy = () => {
+    const text = `Fan control has been unavailable for a while. Windows: ${report?.windows ?? "unknown"}`;
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => setCopied(true))
+      .catch(() => setRefused("The clipboard refused the copy."));
+  };
+
+  const reportKey = () => {
+    setShowReport(true);
+    if (!report) {
+      void api.aboutReport().then(setReport).catch((e: unknown) => setRefused(messageOf(e)));
+    }
+  };
+
+  return (
+    <div className="upd-banner-acts">
+      <Button size="sm" variant="ghost" icon={<Copy size={15} />} onClick={copy}>
+        {copied ? "Copied details" : "Copy details"}
+      </Button>
+      <Button size="sm" variant="ghost" onClick={reportKey}>
+        Report issue
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        icon={<FolderOpen size={15} />}
+        disabled={tauriHost() === null}
+        onClick={() =>
+          void openServiceLogsFolder().catch(() =>
+            setRefused("The service log folder could not be opened. Open %ProgramData%\\canvas-rgb\\logs by hand."),
+          )
+        }
+      >
+        Open service logs
+      </Button>
+      {tauriHost() === null ? <span className="mute upd-note">Tray app only</span> : null}
+      {refused ? <span className="mute upd-note">{refused}</span> : null}
+      {showReport ? <ReportIssue report={report} compact /> : null}
     </div>
   );
 }
@@ -330,9 +384,9 @@ export function SafeStartBanner({ onHelp = false }: { onHelp?: boolean }) {
         </div>
       )}
       {error && (
-        <p className="error-line safe-error" role="alert">
+        <ErrorLine className="safe-error" role="alert">
           {error}
-        </p>
+        </ErrorLine>
       )}
     </Banner>
   );

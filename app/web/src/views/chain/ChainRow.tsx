@@ -13,6 +13,7 @@
 // and has no second device to edit. Those edits go straight to `PATCH /api/v1/lights/{id}` and read
 // both lists back; the flow is not run for them.
 
+import { ErrorState } from "@/components/ErrorState";
 import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { PencilSimple } from "@phosphor-icons/react";
@@ -24,7 +25,7 @@ import { StateDot } from "@/components/Panel";
 import { Segmented, type SegOption } from "@/components/Segmented";
 import { Toggle } from "@/components/Toggle";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import { refreshChains, refreshLights } from "@/lib/store";
 import type { ChainPartKind } from "@/proto/ChainPartKind";
 import type { ChainView } from "@/proto/ChainView";
@@ -59,7 +60,7 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(view.label);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Failure | null>(null);
 
   /** Every edit is one PATCH of this light; the two lists are read back so both windows agree. */
   const patch = async (body: LightPatch): Promise<boolean> => {
@@ -70,7 +71,7 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
       await Promise.all([refreshLights(), refreshChains()]);
       return true;
     } catch (e) {
-      setError(messageOf(e));
+      setError(caught(e));
       return false;
     } finally {
       setBusy(false);
@@ -153,7 +154,7 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
           onChange={(next) => void patch({ reversed: next })}
         />
       </span>
-      {error && <span className={`error-line ${s.partError}`}>{error}</span>}
+      {error && <ErrorState compact error={error} className={s.partError} />}
     </li>
   );
 }

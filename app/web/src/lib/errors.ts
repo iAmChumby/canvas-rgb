@@ -8,13 +8,19 @@ export class ApiFailure extends Error {
    * say how long to wait carry one (the effect preview while both render slots are busy).
    */
   readonly retryAfterMs?: number;
+  /**
+   * The next step in plain words (#576). The daemon scrubs `message` and `hint` together; a
+   * local error has no hint until the caller supplies one.
+   */
+  readonly hint?: string;
 
-  constructor(status: number, code: string, message: string, retryAfterMs?: number) {
+  constructor(status: number, code: string, message: string, retryAfterMs?: number, hint?: string) {
     super(message);
     this.name = "ApiFailure";
     this.status = status;
     this.code = code;
     this.retryAfterMs = retryAfterMs;
+    this.hint = hint;
   }
 }
 
@@ -45,8 +51,143 @@ export function daemonFault(e: unknown): DaemonFault {
   return "down";
 }
 
+/** What replaces a device id, as `crates/canvas-diag/src/scrub.rs` has it. */
+export const DEVICE_TOKEN = "the device";
+
+/** The adapter prefixes of a device id (P6). `scrubDeviceIds.test.ts` holds this list to Rust's. */
+export const ADAPTER_PREFIXES: readonly string[] = [
+  "openrgb", "ring", "chione", "royuan", "attack-shark-x6", "eightbitdo-ultimate-2", "hid", "usb", "fake", "cpu",
+];
+
+/** A character that makes the prefix after it part of a longer word. */
+const ID_CHAR = /[A-Za-z0-9_-]/;
+/** Rust's `is_ascii_whitespace`: no vertical tab and no Unicode space. */
+const SPACES = new Set([" ", "\t", "\n", "\f", "\r"]);
+const CLOSERS = new Set(['"', "'", ",", ";", ")", "]", "}", ">"]);
+
+/** Where the `<prefix>:<id>` starting at `at` ends, or null: Rust's `device_id_end`. */
+function deviceIdEnd(text: string, at: number): number | null {
+  if (at > 0 && ID_CHAR.test(text.charAt(at - 1))) return null;
+  for (const prefix of ADAPTER_PREFIXES) {
+    if (!text.startsWith(`${prefix}:`, at)) continue;
+    const start = at + prefix.length + 1;
+    let end = start;
+    for (; end < text.length; end += 1) {
+      const ch = text.charAt(end);
+      const next = text.charAt(end + 1);
+      if (SPACES.has(ch) || CLOSERS.has(ch)) break;
+      // A full stop that ends the sentence, and a colon before prose or at the end, stay in the text.
+      if (ch === "." && (next === "" || SPACES.has(next))) break;
+      if (ch === ":" && (next === "" || SPACES.has(next))) break;
+      // A backslash escaping a quote in JSON ends the id.
+      if (ch === "\\" && (next === '"' || next === "\\")) break;
+    }
+    if (end > start) return end;
+  }
+  return null;
+}
+
+/** Replaces every device fingerprint in text the editor copies or puts in a URL (P6). */
+export function scrubDeviceIds(text: string): string {
+  let out = "";
+  let copied = 0;
+  let at = 0;
+  while (at < text.length) {
+    const end = deviceIdEnd(text, at);
+    if (end === null) {
+      at += 1;
+      continue;
+    }
+    out += text.slice(copied, at) + DEVICE_TOKEN;
+    at = end;
+    copied = end;
+  }
+  return out + text.slice(copied);
+}
+
+/**
+ * What a view stores when something failed: the caught error, or a sentence the editor wrote
+ * itself. Views never turn it into text; `ErrorState` does (#576, F8/F9). An `Error` is not a
+ * React child, so the type checker refuses a caught error rendered by hand.
+ */
+export type Failure = Error | string;
+
+/** The value to store for something caught. */
+export function caught(e: unknown): Failure {
+  if (e instanceof Error || typeof e === "string") return e;
+  return new Error("unknown error");
+}
+
+/**
+ * The words of an error, a sentence, or a daemon's `{ message }` entry: the one place an error
+ * becomes text. A daemon message is already scrubbed at the API edge; a plain `Error` is a local
+ * detail, never the text of the prefilled report (#576 R6).
+ */
 export function messageOf(e: unknown): string {
-  if (e instanceof ApiFailure) return e.message;
-  if (e instanceof Error) return e.message;
-  return "unknown error";
+  const message =
+    typeof e === "string"
+      ? e
+      : typeof e === "object" && e !== null && "message" in e && typeof e.message === "string"
+        ? e.message
+        : "unknown error";
+  // The daemon scrubs at the edge, but a tray or local message can still carry a device id.
+  return scrubDeviceIds(message);
+}
+
+/** A failure said after what the editor was doing: "Saved, but it did not start: <words>". */
+export function inContext(lead: string, e: unknown): Failure {
+  const text = `${lead} ${messageOf(e)}`;
+  return e instanceof ApiFailure
+    ? new ApiFailure(e.status, e.code, text, e.retryAfterMs, e.hint)
+    : new Error(text);
+}
+
+/** The words of a failure for a toast, the one place outside the anatomy. Only `notify` takes it. */
+export function toastText(e: unknown, lead?: string): string {
+  return lead ? `${lead} ${messageOf(e)}` : messageOf(e);
+}
+
+/** The words of a code problem for the editor's own gutter tooltip. Only `CodeEditor` takes it. */
+export function lintText(problem: { message: string }): string {
+  return messageOf(problem);
+}
+
+/** The words of a failure for a `title` attribute. */
+export function titleText(e: unknown): string {
+  return messageOf(e);
+}
+
+/** What the preset strip asks the daemon to do, in the words of its error. */
+export type Doing = "apply" | "save" | "update" | "rename" | "duplicate" | "delete";
+
+const NOT_DONE: Record<Doing, string> = {
+  apply: "Not applied",
+  save: "Not saved",
+  update: "Not updated",
+  rename: "Not renamed",
+  duplicate: "Not duplicated",
+  delete: "Not deleted",
+};
+
+/**
+ * Why a preset change failed. A refusal the daemon worded for a clash or a bad name (409, 422)
+ * stays as it is; any other failure says what was not done and why.
+ */
+export function presetFailure(e: unknown, doing: Doing): Failure {
+  if (e instanceof ApiFailure && (e.status === 409 || e.status === 422)) return e;
+  // "could not save the effects: access is denied" -> "Access is denied": the verb is said once, up front.
+  const bare = messageOf(e).replace(/^could not [a-z ]+: /i, "");
+  return inContext(`${NOT_DONE[doing]}:`, bare.charAt(0).toUpperCase() + bare.slice(1));
+}
+
+/**
+ * The next step a failure carries, if any. `ErrorState` is the only component that reads it.
+ */
+export function hintOf(e: unknown): string | null {
+  return e instanceof ApiFailure && e.hint ? e.hint : null;
+}
+
+/** True when the error came from the daemon or a scrubbed tray command, safe for the report. */
+export function isScrubbedMessage(e: unknown): boolean {
+  return e instanceof ApiFailure;
 }

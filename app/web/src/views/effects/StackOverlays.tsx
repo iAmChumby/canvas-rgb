@@ -18,6 +18,7 @@ import { isHtmlEffect } from "@/views/effects/stackDraft";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { StackLayer } from "@/proto/StackLayer";
 import type { DragState } from "@/lib/dragSession";
+import { ErrorState } from "@/components/ErrorState";
 
 export function NameStackDialog({
   nameDraft,
@@ -56,9 +57,7 @@ export function NameStackDialog({
           onEscape={onEscape}
         />
         {namingError && (
-          <p className="error-line" id="stack-name-error" role="alert">
-            {namingError}
-          </p>
+          <ErrorState compact id="stack-name-error" error={namingError} />
         )}
         <div className="rd-picker-foot">
           <Button variant="ghost" onClick={onCancel}>

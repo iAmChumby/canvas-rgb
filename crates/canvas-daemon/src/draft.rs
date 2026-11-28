@@ -1301,7 +1301,7 @@ pub fn status(app: &App) -> canvas_proto::api::DraftStatus {
                 lease_remaining_ms: slot.lease_until.saturating_sub(now).as_millis() as u64,
                 heartbeat_ms,
                 lease_ms,
-                note: app.draft.last_note(),
+                note: crate::api::scrub_errors::scrub_optional(app, app.draft.last_note()),
                 applied: None,
                 epoch,
                 seq,
@@ -1315,7 +1315,7 @@ pub fn status(app: &App) -> canvas_proto::api::DraftStatus {
             lease_remaining_ms: 0,
             heartbeat_ms,
             lease_ms,
-            note: app.draft.last_note(),
+            note: crate::api::scrub_errors::scrub_optional(app, app.draft.last_note()),
             applied: None,
             epoch: None,
             seq: None,
@@ -1340,10 +1340,13 @@ async fn restore(app: &Arc<App>, _slot: &Slot) -> Ended {
         .map(|(group, why)| format!("{group}: {why}"))
         .collect();
     Ended {
-        note: Some(format!(
-            "the active scene is back, but a group of it is dark: {}",
-            groups.join("; ")
-        )),
+        note: crate::api::scrub_errors::scrub_optional(
+            app,
+            Some(format!(
+                "the active scene is back, but a group of it is dark: {}",
+                groups.join("; ")
+            )),
+        ),
     }
 }
 

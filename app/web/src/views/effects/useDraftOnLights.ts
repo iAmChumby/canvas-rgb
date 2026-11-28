@@ -6,7 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { caught, type Failure } from "@/lib/errors";
 import type { StackSession } from "@/views/effects/stackDraft";
 import type { DraftStatus } from "@/proto/DraftStatus";
 import type { Stack } from "@/proto/Stack";
@@ -28,7 +28,7 @@ export function useDraftOnLights({
   stackForServer: () => Stack;
 }) {
   const [draftState, setDraftState] = useState<DraftState>("off");
-  const [draftError, setDraftError] = useState<string | null>(null);
+  const [draftError, setDraftError] = useState<Failure | null>(null);
   const [draftNote, setDraftNote] = useState<string | null>(null);
   const [expiresIn, setExpiresIn] = useState(0);
   const draftOn = useRef(false);
@@ -61,7 +61,7 @@ export function useDraftOnLights({
       setDraftError(null);
     } catch (e) {
       if (!mounted.current || !draftOn.current) return;
-      setDraftError(messageOf(e));
+      setDraftError(caught(e));
       setDraftState("expiring");
     }
   }
@@ -99,7 +99,7 @@ export function useDraftOnLights({
     } catch (e) {
       if (!mounted.current) return;
       setDraftState("off");
-      setDraftError(messageOf(e));
+      setDraftError(caught(e));
     }
   };
 
@@ -121,7 +121,7 @@ export function useDraftOnLights({
     } catch (e) {
       if (!mounted.current) return;
       setDraftState("restore-error");
-      setDraftError(messageOf(e));
+      setDraftError(caught(e));
     }
   };
 

@@ -1,0 +1,12 @@
+.body { display: flex; flex-direction: column; gap: 10px; font-size: 14px; color: var(--dim); }
+.note { margin: 0; }
+.preview {
+  margin: 0; padding: 10px 12px; min-height: 64px; flex: none;
+  border: 1px solid var(--line-2); border-radius: 8px; background: var(--sunk);
+  color: var(--ink); font: 14px/1.5 "JetBrains Mono", ui-monospace, monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.exact { margin: 0; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.keys { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.warn { margin: 0; color: var(--warn); }
+.learn { color: var(--mute); }

@@ -11,6 +11,8 @@ import { Chip } from "@/components/Chip";
 import { Panel } from "@/components/Panel";
 import { Thumb } from "@/components/Thumb";
 import type { EffectSummary } from "@/proto/EffectSummary";
+import { ErrorState } from "@/components/ErrorState";
+import type { Failure } from "@/lib/errors";
 
 export function NewEffectChooser({
   effects,
@@ -24,7 +26,7 @@ export function NewEffectChooser({
   effects: EffectSummary[];
   /** The effect whose source is being read now. */
   busy: string | null;
-  error: string | null;
+  error: Failure | null;
   narrow: boolean;
   onBlank: () => void;
   onCopy: (id: string) => void;
@@ -78,9 +80,7 @@ export function NewEffectChooser({
           </div>
         )}
         {error && (
-          <p className="error-line" role="alert">
-            {error}
-          </p>
+          <ErrorState compact error={error} />
         )}
       </Panel>
 

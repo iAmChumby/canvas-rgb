@@ -8,6 +8,9 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Errors: every error body is scrubbed at the API edge, so a profile path never reaches the editor, and each error carries the next step. Inline errors share one anatomy with a key row; the daemon-down and engine-down pages and the fan-service banner offer Try again, logs, diagnostics, a pre-filled report and Copy details. (#576)
+- Diagnostics: Save diagnostics lists the files before saving, then gives the zip's path, the number of names replaced and a Reveal in Explorer key. The zip scrubs every text file, replaces each device id and USB location with one stable alias across all files and logs, and includes service logs only when the folder passes the fail-closed check. The tray can save it with the daemon down. (#575)
+- Report issue: Help & About and the recovery pages preview one pre-filled issue address built from the scrubbed report; the address opens only on click and stays under 6000 encoded characters, dropping hardware first and copying the full text when it has to cut. (#575)
 - Hardware notes: when OpenRGB is down or the fan chip cannot be reached, Devices, Fans and the status strip say what is affected, why, how to fix it and when to ignore it. The page notes can be dismissed; they come back when the problem clears and returns. Help & About gains a "Why isn't my device here?" checklist. (#580)
 - Editor: a Credits page at /credits/ credits the people and projects canvas-rgb builds on and lists the third-party licences behind Rust and npm packages, grouped by licence with the full texts behind one disclosure each. It is linked from Settings > Version. (#578)
 - Help & About: a new page with the app's version, build, Windows edition and service version, a scrubbed copy of the support report, and links to the docs, source, release notes, privacy and credits. (#574)

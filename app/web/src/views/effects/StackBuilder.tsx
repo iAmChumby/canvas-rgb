@@ -380,7 +380,7 @@ export function StackBuilder({
             <ErrorPanel
               title="The stack could not be read"
               summary="canvas-rgb could not read that stack. Nothing was changed."
-              message={load.loadError}
+              error={load.loadError}
               onRetry={load.load}
             />
           </div>
@@ -404,7 +404,7 @@ export function StackBuilder({
                 <ErrorPanel
                   title="Saved, but it did not start"
                   summary="canvas-rgb saved that stack, but could not start it on the lights."
-                  message={saver.startFailure.message}
+                  error={saver.startFailure.error}
                   onRetry={() => void saver.startAgain()}
                   retryLabel="Start again"
                   busy={saver.starting}
@@ -414,7 +414,7 @@ export function StackBuilder({
                 <ErrorPanel
                   title="The stack could not be saved"
                   summary="canvas-rgb could not save that stack. Nothing on the lights changed."
-                  message={saver.saveError}
+                  error={saver.saveError}
                   onRetry={() => void saver.save()}
                 />
               )}

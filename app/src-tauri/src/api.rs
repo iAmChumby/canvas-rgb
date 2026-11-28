@@ -48,14 +48,17 @@ impl From<TokenError> for ApiError {
 
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ApiError::Token(e) => write!(f, "API token unavailable: {e}"),
-            ApiError::Unreachable => write!(f, "daemon not reachable"),
-            ApiError::NotTrusted(message) => write!(f, "{message}"),
-            ApiError::Http { status, message } => write!(f, "HTTP {status}: {message}"),
-            ApiError::Decode(e) => write!(f, "unexpected response: {e}"),
-            ApiError::Lost(why) => write!(f, "no answer from the daemon: {why}"),
-        }
+        // A tray error can reach the editor as a command's `Err`. Scrub it here, the one
+        // place every variant is printed (R6), so no profile path or user name gets through.
+        let text = match self {
+            ApiError::Token(e) => format!("API token unavailable: {e}"),
+            ApiError::Unreachable => "daemon not reachable".to_string(),
+            ApiError::NotTrusted(message) => message.clone(),
+            ApiError::Http { status, message } => format!("HTTP {status}: {message}"),
+            ApiError::Decode(e) => format!("unexpected response: {e}"),
+            ApiError::Lost(why) => format!("no answer from the daemon: {why}"),
+        };
+        f.write_str(&canvas_diag::scrub::Scrubber::from_env().scrub(&text))
     }
 }
 
