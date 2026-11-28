@@ -7971,12 +7971,12 @@ button.chip:hover {
   gap: var(--s2);
 }
 
+/* A name a person typed wraps: nothing in the rail is ellipsized (#586). */
 .rail-deck-name {
-  overflow: hidden;
+  min-width: 0;
   font-size: var(--t15);
   font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .rail-deck-count {

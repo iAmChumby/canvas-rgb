@@ -911,6 +911,8 @@ describe("the Scenes page beside the strip (#586 B11)", () => {
         parked: false,
         openrgb: "connected",
         faults: [],
+        conflicts: [],
+        onboarding_complete: true,
       } as unknown as Status,
     });
   const mirror = () => document.querySelector(".scene-context-mirror")?.textContent ?? "";
