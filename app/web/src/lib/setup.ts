@@ -143,6 +143,9 @@ function fanRead(status: Status | null, fans: FansStatus | null, fansError: stri
 /** The four rows, always in this order. */
 export function setupRows({ status, fans, fansError, effects }: SetupFacts): SetupRow[] {
   const sceneRead = scene(status);
+  const effectRead = effect(status, effects);
+  // Aurora alone is "not yet": the row says what would tick it, so a kept Aurora explains itself.
+  const onAurora = effectRead.state === "todo" && status?.active_effects?.includes(FIRST_RUN_EFFECT) === true;
   return [
     { id: "lights", name: "Lights found", why: "The lights are what the app is for.", ...lights(status) },
     {
@@ -157,8 +160,10 @@ export function setupRows({ status, fans, fansError, effects }: SetupFacts): Set
     {
       id: "effect",
       name: "An effect you chose",
-      why: "Pick one for a group on Scenes. It is your PC.",
-      ...effect(status, effects),
+      why: onAurora
+        ? "Pick any other effect on Scenes to tick this."
+        : "Pick one for a group on Scenes. It is your PC.",
+      ...effectRead,
     },
     {
       id: "fans",

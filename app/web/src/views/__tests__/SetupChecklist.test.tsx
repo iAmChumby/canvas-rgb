@@ -118,11 +118,17 @@ describe("the setup checklist", () => {
     ["no lights", { devices_connected: 0, devices_total: 0, active_effects: ["fire"] }],
     ["safe start", { safe_start: { active: true, reason: "user_chose" as const, unclean_streak: 0 } }],
     ["Aurora kept", {}],
-  ])("offers Hide checklist and no Done with %s", async (_name, over) => {
+  ])("offers Hide checklist and no Done with %s", async (name, over) => {
     patchSnap({ status: status(over) });
     api.status.mockResolvedValue(status({ ...over, onboarding_complete: true }));
     mount();
     expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+    if (name === "Aurora kept") {
+      // Why there is no "Done" is on the page, beside the key that is there instead.
+      const effectRow = screen.getAllByRole("listitem").find((li) => li.getAttribute("data-row") === "effect")!;
+      expect(effectRow.textContent).toContain("Aurora, the first-run effect");
+      expect(effectRow.textContent).toContain("Pick any other effect on Scenes to tick this.");
+    }
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Hide checklist" }));
     });

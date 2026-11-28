@@ -85,7 +85,15 @@ describe("the setup rows", () => {
   });
 
   it("ticks the effect row only for an effect the person chose", () => {
-    expect(row(read(), "effect")).toMatchObject({ state: "todo", value: "Aurora, the first-run effect" });
+    expect(row(read(), "effect")).toMatchObject({
+      state: "todo",
+      value: "Aurora, the first-run effect",
+      why: "Pick any other effect on Scenes to tick this.",
+    });
+    // With nothing playing there is no Aurora to explain.
+    expect(row(read({ status: status({ active_effects: [] }) }), "effect").why).toBe(
+      "Pick one for a group on Scenes. It is your PC.",
+    );
     // The hello's own wave is the app's, not a choice.
     expect(row(read({ status: status({ active_effects: ["onboard-hello"] }) }), "effect").state).toBe("todo");
     const chosen = read({

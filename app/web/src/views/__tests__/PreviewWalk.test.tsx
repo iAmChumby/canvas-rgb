@@ -101,12 +101,37 @@ describe("a preview inside the tray", () => {
     expect(previewActive()).toBe(true);
     expect(isDemo()).toBe(true);
 
+    // Every value the checklist's frame ever has, from before the first render.
+    const frames = new Set<string>();
+    const note = (records: MutationRecord[]) => {
+      for (const r of records) if (r.type === "attributes" && r.oldValue !== null) frames.add(r.oldValue);
+      for (const el of Array.from(document.querySelectorAll("[data-setup]"))) {
+        frames.add(el.getAttribute("data-setup") ?? "");
+      }
+    };
+    const watch = new MutationObserver(note);
+    watch.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributeFilter: ["data-setup"],
+      attributeOldValue: true,
+    });
+
     const view = render(page("/", <ScenesView />));
+    // Before the daemon answers: the marker's row is there and the page is not drawn, so neither
+    // the marker nor the checklist can push anything down when the answer arrives.
+    const statusAtRender = getSnap().status;
+    const markerBeforeStatus = screen.queryByTestId("preview-marker") !== null;
+    const pageBeforeStatus = document.querySelector("[data-setup]") !== null;
     // Scenes on the sample data, with the checklist whatever the real launch put off.
     await waitFor(() => expect(screen.getAllByTestId("group-row").length).toBeGreaterThan(0));
     await waitFor(() => expect(getSnap().status).not.toBeNull());
     await settle();
     const checklist = screen.queryByTestId("setup-count") !== null;
+    // The page arrived with its checklist: it was never drawn without one.
+    note(watch.takeRecords());
+    watch.disconnect();
+    const frameStates = Array.from(frames);
     // An in-app link drops the query: the shell puts it back and the page stays a preview.
     window.history.replaceState({}, "", "/fans/");
     for (const [at, node] of [
@@ -189,12 +214,27 @@ describe("a preview inside the tray", () => {
 
     // One comparison, so a failure shows every way out at once.
     expect({
+      statusAtRender,
+      markerBeforeStatus,
+      pageBeforeStatus,
+      frameStates,
       checklist,
       endKey: end !== null,
       requests: world.fetched.filter((u) => u.includes(DAEMON)),
       sockets: world.sockets,
       trayCommands: world.invoked,
       storageWrites: world.writes,
-    }).toEqual({ checklist: true, endKey: true, requests: [], sockets: [], trayCommands: [], storageWrites: [] });
+    }).toEqual({
+      statusAtRender: null,
+      markerBeforeStatus: true,
+      pageBeforeStatus: false,
+      frameStates: ["on"],
+      checklist: true,
+      endKey: true,
+      requests: [],
+      sockets: [],
+      trayCommands: [],
+      storageWrites: [],
+    });
   });
 });
