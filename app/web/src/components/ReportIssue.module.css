@@ -1,7 +1,7 @@
 .body { display: flex; flex-direction: column; gap: 10px; font-size: 14px; color: var(--dim); }
 .note { margin: 0; }
 .preview {
-  margin: 0; padding: 10px 12px; min-height: 64px; flex: none;
+  margin: 0; padding: 10px 12px; min-height: 64px; max-height: 160px; overflow: auto;
   border: 1px solid var(--line-2); border-radius: 8px; background: var(--sunk);
   color: var(--ink); font: 14px/1.5 "JetBrains Mono", ui-monospace, monospace;
   white-space: pre-wrap; overflow-wrap: anywhere;
