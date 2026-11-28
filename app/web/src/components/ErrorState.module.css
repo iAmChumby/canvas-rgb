@@ -69,14 +69,19 @@
 }
 
 /* The stale note's row (#576, K1): as tall empty as full, so a poll that fails and recovers
-   moves nothing (the #109 pattern). Its margins take back part of the page's gaps. */
+   moves nothing (the #109 pattern). It sits in the page's own gap and takes no height from the
+   page, so a view that fits the window still fits it (R1). */
 .slot {
   position: relative;
   flex: 0 0 auto;
-  height: 1lh;
-  margin: calc(-1 * var(--s2)) 0;
+  height: var(--s4);
+  margin: calc(-1 * var(--s4)) 0;
   font-size: 14px;
-  line-height: 1.5;
+  line-height: var(--s4);
+}
+
+.slot > .line {
+  line-height: inherit;
 }
 
 /* The full card a Details key opens lies over the page, so opening it moves nothing either. */
@@ -88,11 +93,20 @@
   z-index: 5;
 }
 
-/* A narrow page wraps the note, so the row holds two lines there. */
+/* A narrow page wraps the note, so the row holds two lines there; the document scrolls, so the
+   row can have its own room. */
 @media (max-width: 720px) {
   .slot {
     height: 2lh;
+    margin: calc(-1 * var(--s2)) 0;
+    line-height: 1.5;
   }
+}
+
+/* A load error stands where a panel stood and counts as one (`.panel`), in the error's look. */
+.state:global(.panel) {
+  padding: 14px 16px;
+  border-color: var(--line-2) var(--line-2) var(--line-2) var(--down);
 }
 
 @media (prefers-reduced-motion: reduce) {
