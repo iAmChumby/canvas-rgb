@@ -23,7 +23,7 @@ export function OnboardingGate() {
     const onScenesPage = pathname === "/" || pathname === "";
     // The gate never runs while the code editor is open (the onboarding owns the window), but
     // the guard costs nothing and keeps every navigation behind the one question.
-    if (!onScenesPage && opensOnScenes(status) && localStorage.getItem("canvas-rgb.hello-seen") === null) {
+    if (!onScenesPage && opensOnScenes(status)) {
       requestNavigation(() => {
         // The page change is the app's, not the person's: the "Updated to" toast, which a person's
         // first navigation sends away, must survive it.

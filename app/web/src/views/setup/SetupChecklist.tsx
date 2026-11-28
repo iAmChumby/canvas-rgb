@@ -125,7 +125,7 @@ export function SetupChecklist({
         >
           Set up later
         </Button>
-        {finished && <Button
+        <Button
           size="sm"
           variant={finished ? "primary" : "default"}
           busy={busy}
@@ -133,7 +133,7 @@ export function SetupChecklist({
           onClick={() => void complete()}
         >
           {finished ? "Done" : "Hide checklist"}
-        </Button>}
+        </Button>
       </div>
     </div>
   );
