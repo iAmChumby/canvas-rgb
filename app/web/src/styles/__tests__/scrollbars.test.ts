@@ -130,7 +130,6 @@ const SCROLL_PANES = [
   ".rd-help .help-scroll",
   ".receipt-text",
   ".files", // the diagnostics bundle's file list (#575)
-  ".preview", // the Report issue preview of the prefilled text (#575)
 ];
 
 /**

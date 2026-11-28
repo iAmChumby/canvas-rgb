@@ -89,6 +89,7 @@ export function ErrorPanel({
 }) {
   return (
     <ErrorState
+      className="panel"
       message={title}
       hint={hintOf(error) ?? summary}
       error={error ?? undefined}

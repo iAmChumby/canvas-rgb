@@ -954,16 +954,15 @@ function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
           Use the board list
         </Button>
       )}
-      {/* Compact beside the keys (K2). No Details or Try again: the key that was refused stands
-          right here, and pressing it again is the retry. */}
+      {/* Compact under the keys (K2). No Details or Try again: the key that was refused stands
+          right there, and pressing it again is the retry. */}
       {err && (
-        <ErrorState
-          compact
-          tooltip
-          className="fan-hdr-availability-error"
-          error={err}
-          next="Press the key again to retry."
-        />
+        <span className="fan-hdr-availability-note">
+          <ErrorState compact error={err} next="Press the key again to retry." />
+          <Button size="sm" variant="ghost" onClick={() => setErr(null)}>
+            Dismiss
+          </Button>
+        </span>
       )}
     </span>
   );
